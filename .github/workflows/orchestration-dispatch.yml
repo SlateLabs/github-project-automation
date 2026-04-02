@@ -46,7 +46,92 @@ jobs:
           echo "timestamp=$timestamp" >> "$GITHUB_OUTPUT"
           echo "::notice::Run key: $run_key"
 
+      - name: Check for recent duplicate run
+        id: dedup
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          REPO_NAME: ${{ github.repository }}
+          REQUESTED_STAGE: ${{ inputs.requested_stage }}
+          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ACTOR: ${{ github.actor }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # §Idempotency — Manual path dedup obligations, rule 1: recent-run check
+          # Scan the last 10 issue comments for a successful orchestration run comment
+          # with the same <repo>/<issue-number>/<requested-stage> prefix completed
+          # within the dedup window.
+          DEDUP_WINDOW_SECONDS=60
+          run_prefix="${REPO_NAME}/${ISSUE_NUMBER}/${REQUESTED_STAGE}/"
+          current_epoch=$(date +%s)
+
+          recent_comments=$(gh issue view "$ISSUE_NUMBER" --comments --json comments \
+            --jq '[.comments | sort_by(.createdAt) | reverse | .[:10] | .[] | select(.body | test("stage transition accepted")) | .body]' 2>/dev/null || echo '[]')
+
+          duplicate="false"
+
+          # Check each recent success comment for a matching run key prefix
+          comment_count=$(echo "$recent_comments" | jq 'length')
+          for (( i=0; i<comment_count; i++ )); do
+            comment_body=$(echo "$recent_comments" | jq -r ".[$i]")
+            # Extract run key from the comment (structured format: repo/issue/stage/timestamp)
+            found_key=$(echo "$comment_body" | grep -oE "[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[0-9]+/${REQUESTED_STAGE}/[0-9]+" | head -1 || true)
+            if [ -n "$found_key" ]; then
+              # Extract timestamp from run key (last segment, milliseconds)
+              key_timestamp_ms=$(echo "$found_key" | rev | cut -d/ -f1 | rev)
+              key_timestamp_s=$((key_timestamp_ms / 1000))
+              elapsed=$((current_epoch - key_timestamp_s))
+              if [ "$elapsed" -lt "$DEDUP_WINDOW_SECONDS" ] && [ "$elapsed" -ge 0 ]; then
+                duplicate="true"
+                break
+              fi
+            fi
+          done
+
+          # Check for GATE-WAIVER: dedup to force past the dedup check
+          if [ "$duplicate" = "true" ]; then
+            waiver_check=$(gh issue view "$ISSUE_NUMBER" --comments --json comments \
+              --jq '.comments[].body' 2>/dev/null | grep -i 'GATE-WAIVER:.*dedup' || true)
+            if [ -n "$waiver_check" ]; then
+              echo "::notice::Dedup window active but GATE-WAIVER: dedup found — proceeding"
+              duplicate="false"
+            fi
+          fi
+
+          echo "duplicate=$duplicate" >> "$GITHUB_OUTPUT"
+
+          if [ "$duplicate" = "true" ]; then
+            echo "::warning::Skipping: a recent run for this issue/stage completed within the ${DEDUP_WINDOW_SECONDS}s dedup window"
+            gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+          ### Orchestration run — skipped (duplicate)
+
+          | Field | Value |
+          |-------|-------|
+          | **Run key** | \`$RUN_KEY\` |
+          | **Requested stage** | \`$REQUESTED_STAGE\` |
+          | **Actor** | @$ACTOR |
+          | **Result** | :fast_forward: Skipped — recent run detected |
+          | **Actions run** | [$RUN_ID]($RUN_URL) |
+
+          A successful run for this issue/stage completed within the last ${DEDUP_WINDOW_SECONDS}s.
+          Re-trigger after the dedup window expires, or post \`GATE-WAIVER: dedup — <reason>\` to force.
+          COMMENT_EOF
+            )"
+          fi
+
+      - name: Exit on duplicate
+        if: steps.dedup.outputs.duplicate == 'true'
+        shell: bash
+        run: |
+          echo "::notice::Exiting cleanly — duplicate run detected within dedup window"
+          exit 0
+
       - name: Validate eligibility
+        if: steps.dedup.outputs.duplicate != 'true'
         id: eligibility
         uses: ./.github/actions/validate-eligibility
         with:
@@ -56,7 +141,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Post ineligible comment
-        if: steps.eligibility.outputs.eligible != 'true'
+        if: steps.dedup.outputs.duplicate != 'true' && steps.eligibility.outputs.eligible != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
@@ -83,7 +168,7 @@ jobs:
           )"
 
       - name: Fail on ineligible
-        if: steps.eligibility.outputs.eligible != 'true'
+        if: steps.dedup.outputs.duplicate != 'true' && steps.eligibility.outputs.eligible != 'true'
         env:
           REASON: ${{ steps.eligibility.outputs.reason }}
         shell: bash
@@ -148,8 +233,29 @@ jobs:
           echo "::error::Gate conditions not met for stage '$REQUESTED_STAGE'"
           exit 1
 
-      - name: Post success comment
+      - name: Verify current state unchanged
+        id: state-check
         if: steps.gate.outputs.gate_passed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: |
+          # §Idempotency — Manual path dedup obligations, rule 2: current-state check
+          # Verify the issue hasn't changed since the run started (still open, same labels).
+          # This is a contract placeholder — in this slice there are no mutating actions
+          # after gate pass. Slice 4 MUST implement check-before-act for each
+          # non-idempotent operation it adds (branch creation, PR opening, etc.).
+          issue_state=$(gh issue view "$ISSUE_NUMBER" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+          if [ "$issue_state" = "CLOSED" ]; then
+            echo "::error::Issue #$ISSUE_NUMBER was closed between eligibility check and gate pass"
+            echo "state_valid=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "state_valid=true" >> "$GITHUB_OUTPUT"
+
+      - name: Post success comment
+        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
