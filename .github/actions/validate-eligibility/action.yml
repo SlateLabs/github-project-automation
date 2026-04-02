@@ -1,0 +1,155 @@
+name: 'Validate Eligibility'
+description: >
+  Checks that an issue is eligible for orchestration automation per the
+  trigger eligibility contract (discussion #3). Validates: issue exists,
+  is an Issue (not a PR), is not closed, has no do-not-automate label,
+  body is non-empty, actor is in trusted_users, and requested stage is
+  known. Project field queries (Status transition, Repository mapping,
+  project linkage) are deferred until the gateway path is implemented.
+
+inputs:
+  issue_number:
+    description: 'Issue number to validate'
+    required: true
+  requested_stage:
+    description: 'Target stage for the transition'
+    required: true
+  actor:
+    description: 'GitHub login of the actor triggering the workflow'
+    required: true
+  github_token:
+    description: 'Token with repo and project read access'
+    required: true
+  trust_policy_path:
+    description: 'Path to trust-policy.yml'
+    required: false
+    default: 'config/trust-policy.yml'
+
+outputs:
+  eligible:
+    description: '"true" if the issue passes all eligibility checks'
+    value: ${{ steps.check.outputs.eligible }}
+  reason:
+    description: 'Human-readable reason if ineligible'
+    value: ${{ steps.check.outputs.reason }}
+  issue_title:
+    description: 'Title of the validated issue'
+    value: ${{ steps.check.outputs.issue_title }}
+  issue_body:
+    description: 'Body of the validated issue'
+    value: ${{ steps.check.outputs.issue_body }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate eligibility
+      id: check
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        ISSUE_NUMBER: ${{ inputs.issue_number }}
+        REQUESTED_STAGE: ${{ inputs.requested_stage }}
+        ACTOR: ${{ inputs.actor }}
+        TRUST_POLICY_PATH: ${{ inputs.trust_policy_path }}
+      run: |
+        set -euo pipefail
+
+        eligible="true"
+        reason=""
+
+        # --- 1. Issue exists and is an Issue (not a PR) ---
+        issue_json=$(gh issue view "$ISSUE_NUMBER" --json number,title,body,state,labels,isPullRequest 2>&1) || {
+          echo "eligible=false" >> "$GITHUB_OUTPUT"
+          echo "reason=Issue #$ISSUE_NUMBER not found or not accessible" >> "$GITHUB_OUTPUT"
+          exit 0
+        }
+
+        is_pr=$(echo "$issue_json" | jq -r '.isPullRequest // false')
+        if [ "$is_pr" = "true" ]; then
+          echo "eligible=false" >> "$GITHUB_OUTPUT"
+          echo "reason=#$ISSUE_NUMBER is a pull request, not an issue" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        issue_state=$(echo "$issue_json" | jq -r '.state')
+        if [ "$issue_state" = "CLOSED" ]; then
+          echo "eligible=false" >> "$GITHUB_OUTPUT"
+          echo "reason=Issue #$ISSUE_NUMBER is closed" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        issue_title=$(echo "$issue_json" | jq -r '.title')
+        issue_body=$(echo "$issue_json" | jq -r '.body // ""')
+
+        # --- 2. Check for do-not-automate label ---
+        has_block_label=$(echo "$issue_json" | jq -r '.labels[]? | select(.name == "do-not-automate") | .name')
+        if [ -n "$has_block_label" ]; then
+          echo "eligible=false" >> "$GITHUB_OUTPUT"
+          echo "reason=Issue #$ISSUE_NUMBER has do-not-automate label" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # --- 3. Issue body is non-empty ---
+        if [ -z "$issue_body" ] || [ "$issue_body" = "null" ]; then
+          echo "eligible=false" >> "$GITHUB_OUTPUT"
+          echo "reason=Issue #$ISSUE_NUMBER has an empty body" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # --- 4. Actor trust check (§8 Manual path enforcement) ---
+        # Fail closed: actor must be explicitly listed in trusted_users.
+        # Org team resolution (trusted_teams) is not yet implemented — see issue #5.
+        # Write access to the repo is necessary but NOT sufficient.
+        if [ -f "$TRUST_POLICY_PATH" ]; then
+          # Check deny_roles (§8 manual path enforcement, rule 3)
+          # Role resolution requires the org API (deferred to issue #5).
+          # On the manual path, outside_collaborator cannot trigger workflow_dispatch
+          # (GitHub requires write access). Other deny_roles entries cannot be enforced
+          # without org API access. Log the limitation but do not silently pass.
+          deny_roles=$(grep -A 100 '^deny_roles:' "$TRUST_POLICY_PATH" | grep -E "^\s*-\s+" | sed 's/.*-\s*//' | tr -d ' ' || true)
+          if [ -n "$deny_roles" ]; then
+            echo "::warning::deny_roles is configured but role resolution requires org API (issue #5). Roles listed: $deny_roles. On the manual path, enforcement falls back to trusted_users check below."
+          fi
+
+          # Check trusted_users (grep-based; acceptable per plan)
+          trusted_user_match=$(grep -A 100 '^trusted_users:' "$TRUST_POLICY_PATH" | grep -E "^\s*-\s+$ACTOR\s*$" || true)
+
+          if [ -z "$trusted_user_match" ]; then
+            echo "::warning::Trust check: actor '$ACTOR' is not in trusted_users. Org team resolution (trusted_teams) is not yet implemented — see issue #5."
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "reason=Actor '$ACTOR' is not in trusted_users. Org team resolution is not yet implemented (see issue #5). Write access to the repo is necessary but not sufficient." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+        else
+          echo "eligible=false" >> "$GITHUB_OUTPUT"
+          echo "reason=Trust policy file not found at $TRUST_POLICY_PATH — cannot validate actor trust. Fail closed." >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # --- 5. Validate requested stage is known ---
+        valid_stages="kickoff clarification design plan execution review merge closeout"
+        stage_valid="false"
+        for s in $valid_stages; do
+          if [ "$s" = "$REQUESTED_STAGE" ]; then
+            stage_valid="true"
+            break
+          fi
+        done
+
+        if [ "$stage_valid" = "false" ]; then
+          echo "eligible=false" >> "$GITHUB_OUTPUT"
+          echo "reason=Unknown requested stage: $REQUESTED_STAGE" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # --- All checks passed ---
+        echo "eligible=$eligible" >> "$GITHUB_OUTPUT"
+        echo "reason=" >> "$GITHUB_OUTPUT"
+        echo "issue_title=$issue_title" >> "$GITHUB_OUTPUT"
+
+        # Body may be multiline — use heredoc for GITHUB_OUTPUT
+        {
+          echo "issue_body<<ELIGIBILITY_EOF"
+          echo "$issue_body"
+          echo "ELIGIBILITY_EOF"
+        } >> "$GITHUB_OUTPUT"

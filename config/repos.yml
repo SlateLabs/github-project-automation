@@ -1,0 +1,21 @@
+# Participating Repos Configuration
+# Lists repos under SlateLabs that participate in the orchestration workflow.
+#
+# Schema per entry:
+#   repo:                     org/repo-name
+#   enabled_stages:           list of stage transitions this repo opts into
+#   shared_workflow_version:  pinned ref for shared reusable workflows
+
+repos:
+  - repo: SlateLabs/github-project-automation
+    enabled_stages:
+      - kickoff
+      - clarification
+      - design
+      - plan
+      - execution
+      - review
+      - merge
+      - closeout
+    # Pin to a release tag or SHA — never a mutable branch (see discussion #3 §2)
+    shared_workflow_version: c1ca348dfd0973edb46136a9865d2805f903c47a
