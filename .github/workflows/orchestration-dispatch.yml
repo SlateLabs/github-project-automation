@@ -93,11 +93,40 @@ jobs:
           done
 
           # Check for GATE-WAIVER: dedup to force past the dedup check
+          # Trust-scoped: only accept waivers from actors in trusted_users (§4 rule 5)
           if [ "$duplicate" = "true" ]; then
-            waiver_check=$(gh issue view "$ISSUE_NUMBER" --comments --json comments \
-              --jq '.comments[].body' 2>/dev/null | grep -i 'GATE-WAIVER:.*dedup' || true)
-            if [ -n "$waiver_check" ]; then
-              echo "::notice::Dedup window active but GATE-WAIVER: dedup found — proceeding"
+            trusted_users_list=""
+            trust_policy="config/trust-policy.yml"
+            if [ -f "$trust_policy" ]; then
+              trusted_users_list=$(grep -A 100 '^trusted_users:' "$trust_policy" \
+                | grep -E '^\s*-\s+' | sed 's/.*-\s*//' | tr -d ' ' || true)
+            fi
+
+            waiver_found="false"
+            waiver_comments_json=$(gh issue view "$ISSUE_NUMBER" --comments --json comments \
+              --jq '.comments[] | {author: .author.login, body: .body}' 2>/dev/null || true)
+            while IFS= read -r comment_line; do
+              [ -z "$comment_line" ] && continue
+              comment_author=$(echo "$comment_line" | jq -r '.author // ""')
+              comment_body=$(echo "$comment_line" | jq -r '.body // ""')
+              # Only accept waivers from trusted users
+              author_trusted="false"
+              if [ -n "$trusted_users_list" ]; then
+                while IFS= read -r tuser; do
+                  if [ "$tuser" = "$comment_author" ]; then
+                    author_trusted="true"
+                    break
+                  fi
+                done <<< "$trusted_users_list"
+              fi
+              if [ "$author_trusted" = "true" ] && echo "$comment_body" | grep -qi 'GATE-WAIVER:.*dedup'; then
+                waiver_found="true"
+                echo "::notice::Dedup window active but trusted GATE-WAIVER: dedup found from @$comment_author — proceeding"
+                break
+              fi
+            done < <(echo "$waiver_comments_json" | jq -c '.' 2>/dev/null || true)
+
+            if [ "$waiver_found" = "true" ]; then
               duplicate="false"
             fi
           fi
