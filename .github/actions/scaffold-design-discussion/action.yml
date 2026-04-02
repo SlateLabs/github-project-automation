@@ -86,25 +86,26 @@ runs:
           echo "discussion_number=$existing_number" >> "$GITHUB_OUTPUT"
           echo "created=false" >> "$GITHUB_OUTPUT"
 
-          # Post informational comment
-          run_key_line=""
+          # Post informational comment — build table rows conditionally to
+          # avoid blank lines that break Markdown table rendering
+          table_rows="| Field | Value |
+        |-------|-------|"
           if [ -n "$RUN_KEY" ]; then
-            run_key_line="| **Run key** | \`$RUN_KEY\` |"
+            table_rows="${table_rows}
+        | **Run key** | \`$RUN_KEY\` |"
           fi
-          actor_line=""
           if [ -n "$ACTOR" ]; then
-            actor_line="| **Actor** | @$ACTOR |"
+            table_rows="${table_rows}
+        | **Actor** | @$ACTOR |"
           fi
+          table_rows="${table_rows}
+        | **Discussion** | $existing_url |
+        | **Result** | :fast_forward: Skipped — discussion already linked |"
 
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
         ### Design discussion scaffold — already exists
 
-        | Field | Value |
-        |-------|-------|
-        $run_key_line
-        $actor_line
-        | **Discussion** | $existing_url |
-        | **Result** | :fast_forward: Skipped — discussion already linked |
+        $table_rows
 
         A design discussion is already linked to this issue. No new discussion was created.
         COMMENT_EOF
@@ -121,11 +122,11 @@ runs:
 
         repo_full="${GITHUB_REPOSITORY:-SlateLabs/github-project-automation}"
 
-        rendered_body=$(sed \
-          -e "s|{{issue_number}}|${ISSUE_NUMBER}|g" \
-          -e "s|{{issue_title}}|${issue_title}|g" \
-          -e "s|{{repo}}|${repo_full}|g" \
-          "$TEMPLATE_PATH")
+        # Use python3 for safe template rendering — sed is unsafe because
+        # issue titles can contain the delimiter character, &, \, etc.
+        export ISSUE_TITLE_SAFE="$issue_title"
+        export REPO_FULL="$repo_full"
+        rendered_body=$(python3 -c 'import sys,os; t=open(sys.argv[1]).read(); t=t.replace("{{issue_title}}",os.environ["ISSUE_TITLE_SAFE"]); t=t.replace("{{issue_number}}",os.environ["ISSUE_NUMBER"]); t=t.replace("{{repo}}",os.environ["REPO_FULL"]); sys.stdout.write(t)' "$TEMPLATE_PATH")
 
         # --- 4. Resolve discussion category ID via GraphQL ---
         repo_owner="${GITHUB_REPOSITORY_OWNER:-SlateLabs}"
@@ -202,24 +203,25 @@ runs:
         echo "created=true" >> "$GITHUB_OUTPUT"
 
         # --- 6. Post comment on source issue ---
-        run_key_line=""
+        # Build table rows conditionally to avoid blank lines that break Markdown tables
+        table_rows="| Field | Value |
+        |-------|-------|"
         if [ -n "$RUN_KEY" ]; then
-          run_key_line="| **Run key** | \`$RUN_KEY\` |"
+          table_rows="${table_rows}
+        | **Run key** | \`$RUN_KEY\` |"
         fi
-        actor_line=""
         if [ -n "$ACTOR" ]; then
-          actor_line="| **Actor** | @$ACTOR |"
+          table_rows="${table_rows}
+        | **Actor** | @$ACTOR |"
         fi
+        table_rows="${table_rows}
+        | **Discussion** | $new_url |
+        | **Result** | :white_check_mark: Discussion created |"
 
         gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
         ### Design discussion scaffold — created
 
-        | Field | Value |
-        |-------|-------|
-        $run_key_line
-        $actor_line
-        | **Discussion** | $new_url |
-        | **Result** | :white_check_mark: Discussion created |
+        $table_rows
 
         A design discussion has been created with all required gate headings.
         Fill in each section, resolve open questions, and get at least one review comment to pass the design gate.
