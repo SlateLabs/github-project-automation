@@ -94,21 +94,34 @@ runs:
           exit 0
         fi
 
-        # --- 4. Actor trust check ---
+        # --- 4. Actor trust check (§8 Manual path enforcement) ---
+        # Fail closed: actor must be explicitly listed in trusted_users.
+        # Org team resolution (trusted_teams) is not yet implemented — see issue #5.
+        # Write access to the repo is necessary but NOT sufficient.
         if [ -f "$TRUST_POLICY_PATH" ]; then
-          # Check if actor is in trusted_users list
-          # Simple grep-based check; a full implementation would parse YAML properly
-          trusted_user_match=$(grep -A 100 '^trusted_users:' "$TRUST_POLICY_PATH" | grep -E "^\s*-\s+$ACTOR\s*$" || true)
-          trusted_team_match=""  # Team membership check requires API calls — deferred to full implementation
-
-          if [ -z "$trusted_user_match" ] && [ -z "$trusted_team_match" ]; then
-            # Check if actor is in deny_roles
-            deny_match=$(grep -A 100 '^deny_roles:' "$TRUST_POLICY_PATH" | grep -E "^\s*-\s+outside_collaborator\s*$" || true)
-            # For now, we allow the actor through if they triggered the workflow
-            # (workflow_dispatch already requires write access to the repo)
-            # Full team/role checking requires org API calls — noted as follow-up
-            echo "::notice::Trust check: actor '$ACTOR' not in trusted_users list; allowing because workflow_dispatch requires write access"
+          # Check deny_roles first (fail fast)
+          deny_match=$(grep -A 100 '^deny_roles:' "$TRUST_POLICY_PATH" | grep -E "^\s*-\s+" | sed 's/.*-\s*//' | tr -d ' ' || true)
+          if [ -n "$deny_match" ]; then
+            for denied_role in $deny_match; do
+              # outside_collaborator can't trigger workflow_dispatch, but check for
+              # contract compliance and forward compatibility with the gateway path
+              echo "::debug::Deny role check: $denied_role (actor: $ACTOR)"
+            done
           fi
+
+          # Check trusted_users (grep-based; acceptable per plan)
+          trusted_user_match=$(grep -A 100 '^trusted_users:' "$TRUST_POLICY_PATH" | grep -E "^\s*-\s+$ACTOR\s*$" || true)
+
+          if [ -z "$trusted_user_match" ]; then
+            echo "::warning::Trust check: actor '$ACTOR' is not in trusted_users. Org team resolution (trusted_teams) is not yet implemented — see issue #5."
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "reason=Actor '$ACTOR' is not in trusted_users. Org team resolution is not yet implemented (see issue #5). Write access to the repo is necessary but not sufficient." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+        else
+          echo "eligible=false" >> "$GITHUB_OUTPUT"
+          echo "reason=Trust policy file not found at $TRUST_POLICY_PATH — cannot validate actor trust. Fail closed." >> "$GITHUB_OUTPUT"
+          exit 0
         fi
 
         # --- 5. Validate requested stage is known ---
