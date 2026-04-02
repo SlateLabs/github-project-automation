@@ -155,9 +155,12 @@ runs:
             ;;
 
           review|merge|closeout)
-            # These gates require more complex checks (CI status, approvals, merge state)
-            # Scaffolded here; full implementation in Slice 4+
-            echo "::notice::Gate checks for '$REQUESTED_STAGE' are scaffolded — full implementation in later slices"
+            # §4 Gate implementation contract, rule 1: unimplemented gates must reject.
+            # Full checks (CI status, approvals, merge state) depend on Slice 4 creating
+            # the artifacts they verify. Use GATE-WAIVER to advance manually.
+            if ! check_waiver "$REQUESTED_STAGE"; then
+              unmet+=("Gate '${REQUESTED_STAGE}' is not yet implemented. Use GATE-WAIVER: ${REQUESTED_STAGE} — <reason> to advance manually.")
+            fi
             ;;
 
           *)
