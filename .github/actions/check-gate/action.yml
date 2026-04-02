@@ -17,6 +17,10 @@ inputs:
   github_token:
     description: 'Token with repo and project read access'
     required: true
+  trust_policy_path:
+    description: 'Path to trust-policy.yml for waiver author validation'
+    required: false
+    default: 'config/trust-policy.yml'
 
 outputs:
   gate_passed:
@@ -40,15 +44,47 @@ runs:
         ISSUE_NUMBER: ${{ inputs.issue_number }}
         REQUESTED_STAGE: ${{ inputs.requested_stage }}
         ISSUE_BODY: ${{ inputs.issue_body }}
+        TRUST_POLICY_PATH: ${{ inputs.trust_policy_path }}
       run: |
         set -euo pipefail
 
         unmet=()
         waived=()
 
-        # --- Fetch GATE-WAIVER comments for this issue ---
-        waivers=$(gh issue view "$ISSUE_NUMBER" --comments --json comments \
-          --jq '.comments[].body' 2>/dev/null | grep -oP 'GATE-WAIVER:\s*\K[^\n—–-]+' || true)
+        # --- Build trusted-user list for waiver validation (§4 rule 5) ---
+        trusted_users_list=""
+        if [ -f "$TRUST_POLICY_PATH" ]; then
+          trusted_users_list=$(grep -A 100 '^trusted_users:' "$TRUST_POLICY_PATH" \
+            | grep -E '^\s*-\s+' | sed 's/.*-\s*//' | tr -d ' ' || true)
+        fi
+
+        # --- Fetch GATE-WAIVER comments for this issue (trust-scoped) ---
+        # Per §4 rule 5: GATE-WAIVER must come from a trusted actor.
+        # Collect waiver bodies only from comments authored by trusted users.
+        waiver_comments_json=$(gh issue view "$ISSUE_NUMBER" --comments --json comments \
+          --jq '.comments[] | {author: .author.login, body: .body}' 2>/dev/null || true)
+        waivers=""
+        while IFS= read -r comment_line; do
+          [ -z "$comment_line" ] && continue
+          comment_author=$(echo "$comment_line" | jq -r '.author // ""')
+          comment_body=$(echo "$comment_line" | jq -r '.body // ""')
+          # Only accept waivers from trusted users
+          author_trusted="false"
+          if [ -n "$trusted_users_list" ]; then
+            while IFS= read -r tuser; do
+              if [ "$tuser" = "$comment_author" ]; then
+                author_trusted="true"
+                break
+              fi
+            done <<< "$trusted_users_list"
+          fi
+          if [ "$author_trusted" = "true" ]; then
+            waiver_match=$(echo "$comment_body" | grep -oP 'GATE-WAIVER:\s*\K[^\n—–-]+' || true)
+            if [ -n "$waiver_match" ]; then
+              waivers="${waivers}${waiver_match}"$'\n'
+            fi
+          fi
+        done < <(echo "$waiver_comments_json" | jq -c '.' 2>/dev/null || true)
 
         check_waiver() {
           local gate_name="$1"
@@ -73,7 +109,7 @@ runs:
             ;;
 
           clarification)
-            # Gate 2→3: Clarification
+            # Gate 2→3: Clarification (§4 Gate 2→3)
             if ! echo "$ISSUE_BODY" | grep -qE '^#{1,2}\s+Summary'; then
               if ! check_waiver "clarification-summary"; then
                 unmet+=("Issue body must contain a ## Summary heading")
@@ -84,59 +120,192 @@ runs:
                 unmet+=("Issue body must contain a ## Scope or ## Open Questions heading")
               fi
             fi
+
+            # Check for blocked label (§4 Gate 2→3, check 2)
+            issue_labels=$(gh issue view "$ISSUE_NUMBER" --json labels --jq '.labels[].name' 2>/dev/null || true)
+            if echo "$issue_labels" | grep -qx "blocked"; then
+              if ! check_waiver "clarification-blocked"; then
+                unmet+=("Issue has 'blocked' label — remove the label before advancing to clarification")
+              fi
+            fi
+
+            # Check open questions resolution (§4 Gate 2→3, check 3)
+            # If ## Open Questions section exists, each list item must be struck through or marked DEFERRED-TO-DESIGN
+            if echo "$ISSUE_BODY" | grep -qE '^#{1,2}\s+Open Questions'; then
+              oq_section=$(echo "$ISSUE_BODY" | sed -n '/^##\{0,1\} Open Questions/,/^##\{0,1\} [^O]/p' | tail -n +2)
+              unresolved_items=$(echo "$oq_section" | grep -E '^\s*[-*]\s+' | grep -vE '(~~|DEFERRED-TO-DESIGN)' || true)
+              if [ -n "$unresolved_items" ]; then
+                if ! check_waiver "clarification-open-questions"; then
+                  unresolved_count=$(echo "$unresolved_items" | wc -l | tr -d ' ')
+                  unmet+=("$unresolved_count open question(s) are unresolved — strike through or mark DEFERRED-TO-DESIGN")
+                fi
+              fi
+            fi
             ;;
 
           design)
-            # Gate 3→4: Design discussion
-            # Check if a discussion is linked from issue comments or body
-            discussion_linked="false"
-            if echo "$ISSUE_BODY" | grep -qE 'discussions/[0-9]+'; then
-              discussion_linked="true"
-            fi
-            if [ "$discussion_linked" = "false" ]; then
+            # Gate 3→4: Design discussion (§4 Gate 3→4 checks 1–4)
+            # 1. A discussion must be linked from issue body or comments
+            discussion_url=""
+            discussion_number=""
+
+            # Search issue body first
+            discussion_url=$(echo "$ISSUE_BODY" | grep -oE 'https://github\.com/[^/]+/[^/]+/discussions/[0-9]+' | head -1 || true)
+            if [ -z "$discussion_url" ]; then
+              # Search comments
               comments_text=$(gh issue view "$ISSUE_NUMBER" --comments --json comments \
                 --jq '.comments[].body' 2>/dev/null || true)
-              if echo "$comments_text" | grep -qE 'discussions/[0-9]+'; then
-                discussion_linked="true"
-              fi
+              discussion_url=$(echo "$comments_text" | grep -oE 'https://github\.com/[^/]+/[^/]+/discussions/[0-9]+' | head -1 || true)
             fi
-            if [ "$discussion_linked" = "false" ]; then
+
+            if [ -z "$discussion_url" ]; then
               if ! check_waiver "design"; then
                 unmet+=("A GitHub Discussion must be linked from the issue (body or comment containing discussions/<number>)")
+              fi
+            else
+              # Extract discussion number from URL
+              discussion_number=$(echo "$discussion_url" | grep -oE '[0-9]+$')
+              repo_path=$(echo "$discussion_url" | sed 's|https://github.com/||' | sed "s|/discussions/$discussion_number||")
+              repo_owner=$(echo "$repo_path" | cut -d/ -f1)
+              repo_name=$(echo "$repo_path" | cut -d/ -f2)
+
+              # §4 Gate 3→4 check 1: discussion must be from the same repo or same org
+              current_owner="${GITHUB_REPOSITORY_OWNER:-}"
+              current_repo_name="${GITHUB_REPOSITORY#*/}"
+              if [ -n "$current_owner" ] && [ "$repo_owner" != "$current_owner" ]; then
+                if ! check_waiver "design-same-org"; then
+                  unmet+=("Discussion URL points to $repo_owner/$repo_name but this repo belongs to $current_owner — discussion must be from the same org or repo")
+                fi
+              fi
+
+              # 2. Fetch discussion body and check required headings
+              # Use GraphQL to fetch discussion content
+              discussion_body=$(gh api graphql -f query='
+                query($owner: String!, $name: String!, $number: Int!) {
+                  repository(owner: $owner, name: $name) {
+                    discussion(number: $number) {
+                      body
+                      author { login }
+                      comments(first: 50) {
+                        nodes { author { login } }
+                      }
+                    }
+                  }
+                }' -f owner="$repo_owner" -f name="$repo_name" -F number="$discussion_number" 2>&1) || {
+                # API failure → fail closed with the error
+                if ! check_waiver "design-api"; then
+                  unmet+=("Failed to fetch discussion #$discussion_number via API: $discussion_body")
+                fi
+                discussion_body=""
+              }
+
+              if [ -n "$discussion_body" ]; then
+                disc_text=$(echo "$discussion_body" | jq -r '.data.repository.discussion.body // ""')
+                disc_author=$(echo "$discussion_body" | jq -r '.data.repository.discussion.author.login // ""')
+
+                # Check required headings in discussion body
+                required_headings=("Summary" "Problem" "Goals" "Non-goals" "Proposed Approach")
+                for heading in "${required_headings[@]}"; do
+                  if ! echo "$disc_text" | grep -qE "^#{1,2}\s+${heading}"; then
+                    waiver_key="design-heading-$(echo "$heading" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')"
+                    if ! check_waiver "$waiver_key"; then
+                      unmet+=("Discussion #$discussion_number is missing required heading: ## $heading")
+                    fi
+                  fi
+                done
+
+                # 3. Check ## Open Questions section exists and items are resolved (§4 Gate 3→4 check 3)
+                if echo "$disc_text" | grep -qE '^#{1,2}\s+Open Questions'; then
+                  oq_section=$(echo "$disc_text" | sed -n '/^##\{0,1\} Open Questions/,/^##\{0,1\} [^O]/p' | tail -n +2)
+                  unresolved_oq=$(echo "$oq_section" | grep -E '^\s*[-*]\s+' | grep -vE '(~~|DEFERRED-TO-PLAN)' || true)
+                  if [ -n "$unresolved_oq" ]; then
+                    if ! check_waiver "design-open-questions"; then
+                      oq_count=$(echo "$unresolved_oq" | wc -l | tr -d ' ')
+                      unmet+=("Discussion #$discussion_number has $oq_count unresolved open question(s) — strike through or mark DEFERRED-TO-PLAN")
+                    fi
+                  fi
+                else
+                  # §4 Gate 3→4 requires the section to exist
+                  if ! check_waiver "design-open-questions-missing"; then
+                    unmet+=("Discussion #$discussion_number is missing required ## Open Questions section")
+                  fi
+                fi
+
+                # 4. Check for non-author review comment
+                commenter_logins=$(echo "$discussion_body" | jq -r '.data.repository.discussion.comments.nodes[].author.login // ""' 2>/dev/null || true)
+                has_non_author_comment="false"
+                while IFS= read -r commenter; do
+                  if [ -n "$commenter" ] && [ "$commenter" != "$disc_author" ]; then
+                    has_non_author_comment="true"
+                    break
+                  fi
+                done <<< "$commenter_logins"
+
+                if [ "$has_non_author_comment" = "false" ]; then
+                  if ! check_waiver "design-review"; then
+                    unmet+=("Discussion #$discussion_number has no comments from anyone other than the author ($disc_author) — at least one review comment is required")
+                  fi
+                fi
               fi
             fi
             ;;
 
           plan)
-            # Gate 4→5: Implementation plan
-            comments_text=$(gh issue view "$ISSUE_NUMBER" --comments --json comments \
-              --jq '.comments[].body' 2>/dev/null || true)
+            # Gate 4→5: Implementation plan (§4 Gate implementation contract, rule 4)
+            # All required headings must appear in the SAME comment, not scattered.
+            comments_json=$(gh issue view "$ISSUE_NUMBER" --comments --json comments 2>/dev/null || echo '{"comments":[]}')
+            plan_comment_found="false"
+            plan_missing_headings=()
 
-            if ! echo "$comments_text" | grep -qE '^#{1,2}\s+Implementation Plan'; then
+            # Iterate over each comment individually
+            comment_count=$(echo "$comments_json" | jq '.comments | length')
+            for (( i=0; i<comment_count; i++ )); do
+              comment_body=$(echo "$comments_json" | jq -r ".comments[$i].body // \"\"")
+
+              # Only examine comments that contain the anchor heading
+              if echo "$comment_body" | grep -qE '^#{1,2}\s+Implementation Plan'; then
+                plan_comment_found="true"
+                plan_missing_headings=()
+
+                # Check all required headings in THIS comment
+                if ! echo "$comment_body" | grep -qE '^#{1,2}\s+Acceptance Criteria'; then
+                  plan_missing_headings+=("## Acceptance Criteria")
+                fi
+                if ! echo "$comment_body" | grep -qE '^#{1,2}\s+Verification Plan'; then
+                  plan_missing_headings+=("## Verification Plan")
+                fi
+                if ! echo "$comment_body" | grep -qE '^#{1,2}\s+Review Expectations'; then
+                  plan_missing_headings+=("## Review Expectations")
+                fi
+                if ! echo "$comment_body" | grep -qE '^#{1,2}\s+(Slices|Execution)'; then
+                  plan_missing_headings+=("## Slices (or ## Execution)")
+                fi
+
+                # If this comment has all headings, we're done
+                if [ ${#plan_missing_headings[@]} -eq 0 ]; then
+                  break
+                fi
+              fi
+            done
+
+            if [ "$plan_comment_found" = "false" ]; then
               if ! check_waiver "plan-exists"; then
-                unmet+=("A comment must contain ## Implementation Plan heading")
+                unmet+=("No comment contains ## Implementation Plan heading")
               fi
-            fi
-            if ! echo "$comments_text" | grep -qE '^#{1,2}\s+Acceptance Criteria'; then
-              if ! check_waiver "plan-acceptance"; then
-                unmet+=("Plan comment must contain ## Acceptance Criteria with checklist items")
-              fi
-            fi
-            if ! echo "$comments_text" | grep -qE '^#{1,2}\s+Verification Plan'; then
-              if ! check_waiver "plan-verification"; then
-                unmet+=("Plan comment must contain ## Verification Plan with checklist items")
-              fi
-            fi
-            if ! echo "$comments_text" | grep -qE '^#{1,2}\s+Review Expectations'; then
-              if ! check_waiver "plan-review"; then
-                unmet+=("Plan comment must contain ## Review Expectations")
-              fi
+            elif [ ${#plan_missing_headings[@]} -gt 0 ]; then
+              # Found a plan comment but it's missing required headings
+              for heading in "${plan_missing_headings[@]}"; do
+                waiver_key="plan-$(echo "$heading" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '-' | sed 's/^-//;s/-$//')"
+                if ! check_waiver "$waiver_key"; then
+                  unmet+=("Plan comment is missing required heading: $heading (all required headings must be co-located in a single comment)")
+                fi
+              done
             fi
             ;;
 
           execution)
-            # Gate 5→6: Execution
-            # Check for branch matching <issue-number>-* or <issue-number>/*
+            # Gate 5→6: Execution (§4 Gate 5→6 checks 1–4)
+            # 1. Check for branch matching <issue-number>-* or <issue-number>/*
             branch_exists=$(gh api "repos/{owner}/{repo}/branches" --paginate \
               --jq ".[].name | select(test(\"^${ISSUE_NUMBER}[-/]\"))" 2>/dev/null | head -1 || true)
             if [ -z "$branch_exists" ]; then
@@ -145,19 +314,44 @@ runs:
               fi
             fi
 
-            # Check for PR referencing this issue
-            pr_exists=$(gh pr list --search "issue:${ISSUE_NUMBER}" --json number --jq '.[0].number' 2>/dev/null || true)
-            if [ -z "$pr_exists" ]; then
+            # 2. Check for PR referencing this issue
+            pr_json=$(gh pr list --search "issue:${ISSUE_NUMBER}" --json number,isDraft,body --jq '.[0]' 2>/dev/null || echo '')
+            pr_number=$(echo "$pr_json" | jq -r '.number // empty' 2>/dev/null || true)
+            if [ -z "$pr_number" ]; then
               if ! check_waiver "execution-pr"; then
                 unmet+=("A pull request referencing issue #${ISSUE_NUMBER} must exist")
+              fi
+            else
+              # 3. PR must not be in draft state
+              pr_is_draft=$(echo "$pr_json" | jq -r '.isDraft // false' 2>/dev/null || echo "false")
+              if [ "$pr_is_draft" = "true" ]; then
+                if ! check_waiver "execution-draft"; then
+                  unmet+=("PR #$pr_number is still in draft state — mark as ready for review or use GATE-WAIVER: execution-draft")
+                fi
+              fi
+
+              # 4. PR body must contain ## Summary and ## Test plan headings
+              pr_body=$(echo "$pr_json" | jq -r '.body // ""' 2>/dev/null || true)
+              if ! echo "$pr_body" | grep -qE '^#{1,2}\s+Summary'; then
+                if ! check_waiver "execution-summary"; then
+                  unmet+=("PR #$pr_number body is missing required ## Summary heading")
+                fi
+              fi
+              if ! echo "$pr_body" | grep -qE '^#{1,2}\s+Test [Pp]lan'; then
+                if ! check_waiver "execution-test-plan"; then
+                  unmet+=("PR #$pr_number body is missing required ## Test plan heading")
+                fi
               fi
             fi
             ;;
 
           review|merge|closeout)
-            # These gates require more complex checks (CI status, approvals, merge state)
-            # Scaffolded here; full implementation in Slice 4+
-            echo "::notice::Gate checks for '$REQUESTED_STAGE' are scaffolded — full implementation in later slices"
+            # §4 Gate implementation contract, rule 1: unimplemented gates must reject.
+            # Full checks (CI status, approvals, merge state) depend on Slice 4 creating
+            # the artifacts they verify. Use GATE-WAIVER to advance manually.
+            if ! check_waiver "$REQUESTED_STAGE"; then
+              unmet+=("Gate '${REQUESTED_STAGE}' is not yet implemented. Use GATE-WAIVER: ${REQUESTED_STAGE} — <reason> to advance manually.")
+            fi
             ;;
 
           *)
