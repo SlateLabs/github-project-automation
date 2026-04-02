@@ -311,7 +311,8 @@ runs:
                   if ! echo "$re_section" | grep -iE 'accessibility' | grep -qiE "$re_disposition_re"; then
                     re_missing_cats+=("accessibility")
                   fi
-                  if ! echo "$re_section" | grep -iE 'usability|content' | grep -qiE "$re_disposition_re"; then
+                  # Accepted exact forms: "usability/content", "usability / content", "usability/ content", "usability /content"
+                  if ! echo "$re_section" | grep -iE 'usability\s*/\s*content' | grep -qiE "$re_disposition_re"; then
                     re_missing_cats+=("usability/content")
                   fi
                   if ! echo "$re_section" | grep -iE 'documentation' | grep -qiE "$re_disposition_re"; then
