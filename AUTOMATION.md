@@ -61,9 +61,12 @@ Stage actions run automatically after eligibility validation and gate checks pas
 **Trigger:** `workflow_dispatch` via the standalone workflow or automatically via `orchestration-dispatch` when `requested_stage: design`.
 
 **What it does:**
-1. Checks if a discussion is already linked to the issue (body or comments)
-2. If no discussion exists: renders `templates/design-discussion.md` with issue metadata, creates a GitHub Discussion in the configured category (default: "Ideas"), and posts the discussion URL back to the issue
-3. If a discussion already exists: skips creation and posts an informational comment
+1. Discovers whether a discussion already exists using three-tier owned-artifact lookup:
+   - **Tier 1:** Scaffold marker comment (`<!-- gpa:design-discussion:#N -->`) in issue comments
+   - **Tier 2:** Discussion URL in issue body (user-placed)
+   - **Tier 3:** Orphaned discussion recovery via GraphQL search (handles partial failure where discussion was created but backlink comment was not posted)
+2. If no discussion exists: renders `templates/design-discussion.md` with issue metadata, creates a GitHub Discussion in the configured category (default: "Ideas"), and posts the discussion URL back to the issue with an owned-artifact marker
+3. If a discussion already exists: skips creation and posts an informational comment (with the marker if not already present)
 
 **Standalone usage:**
 ```
@@ -74,11 +77,11 @@ gh workflow run scaffold-design-discussion.yml -f issue_number=<N>
 ```
 gh workflow run orchestration-dispatch.yml -f issue_number=<N> -f requested_stage=design
 ```
-When triggered via orchestration, the scaffold runs after the design gate passes. If the gate passes because a discussion already exists, the scaffold's idempotency guard skips creation.
+When triggered via orchestration, the scaffold runs **before** the design gate check. This means `requested_stage: design` on an issue with no discussion will create the discussion first, then the gate validates its quality (headings filled in, open questions resolved, review comment present). The first run typically scaffolds the discussion and then fails the gate — the operator fills in the discussion and re-triggers to pass.
 
 **Discussion template:** `templates/design-discussion.md` contains all headings required by the design gate (Summary, Problem, Goals, Non-goals, Proposed Approach, Open Questions) plus exit criteria.
 
-**Idempotency:** The scaffold checks issue body and comments for an existing discussion URL before creating. Running it twice for the same issue will not create a duplicate.
+**Idempotency:** The scaffold uses an owned-artifact marker (`<!-- gpa:design-discussion:#N -->`) to identify its own output. Unrelated discussion URLs mentioned in issue comments do not suppress creation. Running the scaffold twice for the same issue will not create a duplicate. Partial failure between discussion creation and backlink comment is recoverable: the scaffold searches for orphaned discussions by source-issue marker in the discussion body.
 
 **Permissions required:** `contents: read`, `issues: write`, `discussions: write`
 

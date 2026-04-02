@@ -145,17 +145,28 @@ runs:
 
           design)
             # Gate 3→4: Design discussion (§4 Gate 3→4 checks 1–4)
-            # 1. A discussion must be linked from issue body or comments
+            # 1. A discussion must be linked from issue body or scaffold marker comment.
+            #    Only owned artifacts count — random discussion mentions in other
+            #    comments do not satisfy this gate.
             discussion_url=""
             discussion_number=""
+            artifact_marker="gpa:design-discussion:#${ISSUE_NUMBER}"
 
-            # Search issue body first
+            # Search issue body first (user-placed link)
             discussion_url=$(echo "$ISSUE_BODY" | grep -oE 'https://github\.com/[^/]+/[^/]+/discussions/[0-9]+' | head -1 || true)
             if [ -z "$discussion_url" ]; then
-              # Search comments
-              comments_text=$(gh issue view "$ISSUE_NUMBER" --comments --json comments \
-                --jq '.comments[].body' 2>/dev/null || true)
-              discussion_url=$(echo "$comments_text" | grep -oE 'https://github\.com/[^/]+/[^/]+/discussions/[0-9]+' | head -1 || true)
+              # Search comments that contain the owned-artifact scaffold marker
+              marker_comments_json=$(gh issue view "$ISSUE_NUMBER" --comments --json comments 2>/dev/null || echo '{"comments":[]}')
+              marker_comment_count=$(echo "$marker_comments_json" | jq '.comments | length')
+              for (( ci=0; ci<marker_comment_count; ci++ )); do
+                ci_body=$(echo "$marker_comments_json" | jq -r ".comments[$ci].body // \"\"")
+                if echo "$ci_body" | grep -qF "$artifact_marker"; then
+                  discussion_url=$(echo "$ci_body" | grep -oE 'https://github\.com/[^/]+/[^/]+/discussions/[0-9]+' | head -1 || true)
+                  if [ -n "$discussion_url" ]; then
+                    break
+                  fi
+                fi
+              done
             fi
 
             if [ -z "$discussion_url" ]; then
