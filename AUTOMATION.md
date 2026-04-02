@@ -52,11 +52,42 @@ Defined in `config/trust-policy.yml`. See [discussion #3 §8](https://github.com
 
 The default workflow stages are: Backlog → Clarification → Design → Plan → Execution → Review → Merge → Closeout. Each transition has machine-testable gate conditions defined in discussion #3 §4.
 
+## Stage actions
+
+Stage actions run automatically after eligibility validation and gate checks pass. They create the artifacts needed for the next stage.
+
+### Design discussion scaffold
+
+**Trigger:** `workflow_dispatch` via the standalone workflow or automatically via `orchestration-dispatch` when `requested_stage: design`.
+
+**What it does:**
+1. Checks if a discussion is already linked to the issue (body or comments)
+2. If no discussion exists: renders `templates/design-discussion.md` with issue metadata, creates a GitHub Discussion in the configured category (default: "Ideas"), and posts the discussion URL back to the issue
+3. If a discussion already exists: skips creation and posts an informational comment
+
+**Standalone usage:**
+```
+gh workflow run scaffold-design-discussion.yml -f issue_number=<N>
+```
+
+**Via orchestration:**
+```
+gh workflow run orchestration-dispatch.yml -f issue_number=<N> -f requested_stage=design
+```
+When triggered via orchestration, the scaffold runs after the design gate passes. If the gate passes because a discussion already exists, the scaffold's idempotency guard skips creation.
+
+**Discussion template:** `templates/design-discussion.md` contains all headings required by the design gate (Summary, Problem, Goals, Non-goals, Proposed Approach, Open Questions) plus exit criteria.
+
+**Idempotency:** The scaffold checks issue body and comments for an existing discussion URL before creating. Running it twice for the same issue will not create a duplicate.
+
+**Permissions required:** `contents: read`, `issues: write`, `discussions: write`
+
 ## Operator actions
 
 | Action | How |
 |--------|-----|
 | View run status | Check automation comment on the issue, or Actions run |
 | Retry failed run | Re-trigger via `workflow_dispatch` with issue number and target stage |
+| Scaffold a design discussion | `gh workflow run scaffold-design-discussion.yml -f issue_number=<N>` |
 | Waive a gate | Post `GATE-WAIVER: <gate-name> — <reason>` on the issue/PR |
 | Block automation | Add `do-not-automate` label to the issue |

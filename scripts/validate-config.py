@@ -93,11 +93,40 @@ def validate_repos_config():
         print("repos.yml: OK")
 
 
+def validate_templates():
+    """Validate that required templates exist and contain expected headings."""
+    design_template = REPO_ROOT / "templates" / "design-discussion.md"
+    if not design_template.exists():
+        errors.append(f"templates/design-discussion.md: file not found at {design_template}")
+        return
+
+    content = design_template.read_text()
+
+    # Required headings per discussion #3 §4 (design gate)
+    required_headings = [
+        "## Summary",
+        "## Problem",
+        "## Goals",
+        "## Non-goals",
+        "## Proposed Approach",
+        "## Open Questions",
+    ]
+    missing = [h for h in required_headings if h not in content]
+    if missing:
+        errors.append(
+            f"templates/design-discussion.md: missing required headings: {missing}"
+        )
+        return
+
+    print("templates/design-discussion.md: OK")
+
+
 def main():
     print("Validating configuration files...\n")
 
     validate_trust_policy()
     validate_repos_config()
+    validate_templates()
 
     print()
     if errors:

@@ -1,0 +1,227 @@
+name: 'Scaffold Design Discussion'
+description: >
+  Creates a GitHub Discussion from a source issue, pre-populated with all
+  headings required by the design gate (discussion #3 §4). Posts the discussion
+  URL back to the source issue. Idempotent: skips creation if a discussion is
+  already linked.
+
+inputs:
+  issue_number:
+    description: 'Source issue number'
+    required: true
+  github_token:
+    description: 'Token with issues:write and discussions:write scope'
+    required: true
+  discussion_category:
+    description: 'Discussion category name (must already exist in the repo)'
+    required: false
+    default: 'Ideas'
+  run_key:
+    description: 'Orchestration run key for traceability'
+    required: false
+    default: ''
+  actor:
+    description: 'GitHub login of the actor triggering the scaffold'
+    required: false
+    default: ''
+  template_path:
+    description: 'Path to the discussion body template'
+    required: false
+    default: 'templates/design-discussion.md'
+
+outputs:
+  discussion_url:
+    description: 'URL of the created (or existing) discussion'
+    value: ${{ steps.scaffold.outputs.discussion_url }}
+  discussion_number:
+    description: 'Number of the created (or existing) discussion'
+    value: ${{ steps.scaffold.outputs.discussion_number }}
+  created:
+    description: '"true" if a new discussion was created, "false" if one already existed'
+    value: ${{ steps.scaffold.outputs.created }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Scaffold design discussion
+      id: scaffold
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        ISSUE_NUMBER: ${{ inputs.issue_number }}
+        DISCUSSION_CATEGORY: ${{ inputs.discussion_category }}
+        RUN_KEY: ${{ inputs.run_key }}
+        ACTOR: ${{ inputs.actor }}
+        TEMPLATE_PATH: ${{ inputs.template_path }}
+      run: |
+        set -euo pipefail
+
+        # --- 1. Fetch issue metadata ---
+        issue_json=$(gh issue view "$ISSUE_NUMBER" --json title,body,comments 2>&1) || {
+          echo "::error::Failed to fetch issue #$ISSUE_NUMBER: $issue_json"
+          exit 1
+        }
+
+        issue_title=$(echo "$issue_json" | jq -r '.title // ""')
+        issue_body=$(echo "$issue_json" | jq -r '.body // ""')
+
+        # --- 2. Check-before-act: look for existing discussion link ---
+        # §Idempotency manual-path dedup rule 3: check-before-act
+        # Reuses the same URL pattern as check-gate design case (lines 152-159)
+        discussion_url_pattern='https://github\.com/[^/]+/[^/]+/discussions/[0-9]+'
+
+        existing_url=$(echo "$issue_body" | grep -oE "$discussion_url_pattern" | head -1 || true)
+
+        if [ -z "$existing_url" ]; then
+          # Search comments
+          comments_text=$(echo "$issue_json" | jq -r '.comments[].body // ""' 2>/dev/null || true)
+          existing_url=$(echo "$comments_text" | grep -oE "$discussion_url_pattern" | head -1 || true)
+        fi
+
+        if [ -n "$existing_url" ]; then
+          existing_number=$(echo "$existing_url" | grep -oE '[0-9]+$')
+          echo "::notice::Discussion already linked: $existing_url — skipping creation"
+
+          echo "discussion_url=$existing_url" >> "$GITHUB_OUTPUT"
+          echo "discussion_number=$existing_number" >> "$GITHUB_OUTPUT"
+          echo "created=false" >> "$GITHUB_OUTPUT"
+
+          # Post informational comment
+          run_key_line=""
+          if [ -n "$RUN_KEY" ]; then
+            run_key_line="| **Run key** | \`$RUN_KEY\` |"
+          fi
+          actor_line=""
+          if [ -n "$ACTOR" ]; then
+            actor_line="| **Actor** | @$ACTOR |"
+          fi
+
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+        ### Design discussion scaffold — already exists
+
+        | Field | Value |
+        |-------|-------|
+        $run_key_line
+        $actor_line
+        | **Discussion** | $existing_url |
+        | **Result** | :fast_forward: Skipped — discussion already linked |
+
+        A design discussion is already linked to this issue. No new discussion was created.
+        COMMENT_EOF
+          )"
+
+          exit 0
+        fi
+
+        # --- 3. Render template ---
+        if [ ! -f "$TEMPLATE_PATH" ]; then
+          echo "::error::Template file not found at $TEMPLATE_PATH"
+          exit 1
+        fi
+
+        repo_full="${GITHUB_REPOSITORY:-SlateLabs/github-project-automation}"
+
+        rendered_body=$(sed \
+          -e "s|{{issue_number}}|${ISSUE_NUMBER}|g" \
+          -e "s|{{issue_title}}|${issue_title}|g" \
+          -e "s|{{repo}}|${repo_full}|g" \
+          "$TEMPLATE_PATH")
+
+        # --- 4. Resolve discussion category ID via GraphQL ---
+        repo_owner="${GITHUB_REPOSITORY_OWNER:-SlateLabs}"
+        repo_name="${GITHUB_REPOSITORY#*/}"
+        repo_name="${repo_name:-github-project-automation}"
+
+        category_query=$(gh api graphql -f query='
+          query($owner: String!, $name: String!) {
+            repository(owner: $owner, name: $name) {
+              id
+              discussionCategories(first: 25) {
+                nodes { id name }
+              }
+            }
+          }' -f owner="$repo_owner" -f name="$repo_name" 2>&1) || {
+          echo "::error::Failed to query discussion categories: $category_query"
+          exit 1
+        }
+
+        repo_id=$(echo "$category_query" | jq -r '.data.repository.id // ""')
+        if [ -z "$repo_id" ] || [ "$repo_id" = "null" ]; then
+          echo "::error::Could not resolve repository ID. Ensure discussions are enabled on the repo."
+          exit 1
+        fi
+
+        category_id=$(echo "$category_query" | jq -r \
+          --arg cat "$DISCUSSION_CATEGORY" \
+          '.data.repository.discussionCategories.nodes[] | select(.name == $cat) | .id' 2>/dev/null || true)
+
+        if [ -z "$category_id" ] || [ "$category_id" = "null" ]; then
+          available=$(echo "$category_query" | jq -r '.data.repository.discussionCategories.nodes[].name' | tr '\n' ', ' | sed 's/,$//')
+          echo "::error::Discussion category '$DISCUSSION_CATEGORY' not found. Available categories: $available"
+          exit 1
+        fi
+
+        # --- 5. Create discussion via GraphQL ---
+        discussion_title="Design: $issue_title"
+
+        create_result=$(gh api graphql -f query='
+          mutation($repoId: ID!, $categoryId: ID!, $title: String!, $body: String!) {
+            createDiscussion(input: {
+              repositoryId: $repoId,
+              categoryId: $categoryId,
+              title: $title,
+              body: $body
+            }) {
+              discussion {
+                id
+                number
+                url
+              }
+            }
+          }' \
+          -f repoId="$repo_id" \
+          -f categoryId="$category_id" \
+          -f title="$discussion_title" \
+          -f body="$rendered_body" 2>&1) || {
+          echo "::error::GraphQL createDiscussion mutation failed: $create_result"
+          exit 1
+        }
+
+        new_url=$(echo "$create_result" | jq -r '.data.createDiscussion.discussion.url // ""')
+        new_number=$(echo "$create_result" | jq -r '.data.createDiscussion.discussion.number // ""')
+
+        if [ -z "$new_url" ] || [ "$new_url" = "null" ]; then
+          echo "::error::createDiscussion succeeded but returned no URL. Response: $create_result"
+          exit 1
+        fi
+
+        echo "::notice::Discussion created: $new_url"
+
+        echo "discussion_url=$new_url" >> "$GITHUB_OUTPUT"
+        echo "discussion_number=$new_number" >> "$GITHUB_OUTPUT"
+        echo "created=true" >> "$GITHUB_OUTPUT"
+
+        # --- 6. Post comment on source issue ---
+        run_key_line=""
+        if [ -n "$RUN_KEY" ]; then
+          run_key_line="| **Run key** | \`$RUN_KEY\` |"
+        fi
+        actor_line=""
+        if [ -n "$ACTOR" ]; then
+          actor_line="| **Actor** | @$ACTOR |"
+        fi
+
+        gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+        ### Design discussion scaffold — created
+
+        | Field | Value |
+        |-------|-------|
+        $run_key_line
+        $actor_line
+        | **Discussion** | $new_url |
+        | **Result** | :white_check_mark: Discussion created |
+
+        A design discussion has been created with all required gate headings.
+        Fill in each section, resolve open questions, and get at least one review comment to pass the design gate.
+        COMMENT_EOF
+        )"

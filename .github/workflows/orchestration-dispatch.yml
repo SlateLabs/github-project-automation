@@ -24,6 +24,7 @@ on:
 permissions:
   contents: read
   issues: write
+  discussions: write
 
 jobs:
   orchestrate:
@@ -348,6 +349,25 @@ jobs:
           $waived_section
           COMMENT_EOF
           )"
+
+      # --- Stage actions ---
+      # Post-gate stage-specific automation. Each stage action is gated on
+      # its stage name and runs only after eligibility + gate + state checks pass.
+      # The scaffold action's own idempotency guard (check-before-act) prevents
+      # double-creation even if the orchestration workflow is re-run.
+
+      - name: Scaffold design discussion
+        if: >-
+          steps.gate.outputs.gate_passed == 'true'
+          && steps.state-check.outputs.state_valid == 'true'
+          && inputs.requested_stage == 'design'
+        id: scaffold-discussion
+        uses: ./.github/actions/scaffold-design-discussion
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          run_key: ${{ steps.run-key.outputs.run_key }}
+          actor: ${{ github.actor }}
 
       - name: Job summary
         if: always()
