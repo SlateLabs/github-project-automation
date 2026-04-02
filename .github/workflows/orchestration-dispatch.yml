@@ -185,6 +185,7 @@ jobs:
           requested_stage: ${{ inputs.requested_stage }}
           issue_body: ${{ steps.eligibility.outputs.issue_body }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          trust_policy_path: config/trust-policy.yml
 
       - name: Post gate failure comment
         if: steps.gate.outputs.gate_passed != 'true' && steps.eligibility.outputs.eligible == 'true'
@@ -240,18 +241,48 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ACTOR: ${{ github.actor }}
+          RUN_ID: ${{ github.run_id }}
+          REQUESTED_STAGE: ${{ inputs.requested_stage }}
         run: |
           # §Idempotency — Manual path dedup obligations, rule 2: current-state check
-          # Verify the issue hasn't changed since the run started (still open, same labels).
-          # This is a contract placeholder — in this slice there are no mutating actions
-          # after gate pass. Slice 4 MUST implement check-before-act for each
-          # non-idempotent operation it adds (branch creation, PR opening, etc.).
-          issue_state=$(gh issue view "$ISSUE_NUMBER" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+          # Verify the issue hasn't changed since the run started (still open, no
+          # do-not-automate label added). Posts a mismatch comment per contract.
+          # Slice 4 MUST extend this with check-before-act for each non-idempotent
+          # operation it adds (branch creation, PR opening, etc.).
+          issue_json=$(gh issue view "$ISSUE_NUMBER" --json state,labels 2>/dev/null || echo '{}')
+          issue_state=$(echo "$issue_json" | jq -r '.state // "UNKNOWN"')
+          has_block_label=$(echo "$issue_json" | jq -r '.labels[]? | select(.name == "do-not-automate") | .name' || true)
+
+          mismatch=""
           if [ "$issue_state" = "CLOSED" ]; then
-            echo "::error::Issue #$ISSUE_NUMBER was closed between eligibility check and gate pass"
+            mismatch="Issue #$ISSUE_NUMBER was closed between eligibility check and gate pass"
+          elif [ -n "$has_block_label" ]; then
+            mismatch="Issue #$ISSUE_NUMBER had do-not-automate label added between eligibility check and gate pass"
+          fi
+
+          if [ -n "$mismatch" ]; then
+            echo "::error::$mismatch"
+            # Post status mismatch comment per §Idempotency current-state checks contract
+            gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+          ### Orchestration run — superseded (state mismatch)
+
+          | Field | Value |
+          |-------|-------|
+          | **Run key** | \`$RUN_KEY\` |
+          | **Requested stage** | \`$REQUESTED_STAGE\` |
+          | **Actor** | @$ACTOR |
+          | **Result** | :stop_sign: Superseded — state changed during run |
+          | **Reason** | $mismatch |
+          | **Actions run** | [$RUN_ID]($RUN_URL) |
+          COMMENT_EOF
+            )"
             echo "state_valid=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
+
           echo "state_valid=true" >> "$GITHUB_OUTPUT"
 
       - name: Post success comment
