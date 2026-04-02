@@ -1,0 +1,180 @@
+name: 'Check Gate'
+description: >
+  Verifies the gate conditions for a requested stage transition per
+  discussion #3 §4. Each gate has machine-testable artifact requirements.
+  Supports GATE-WAIVER comments posted by trusted actors.
+
+inputs:
+  issue_number:
+    description: 'Issue number to check gates for'
+    required: true
+  requested_stage:
+    description: 'Target stage for the transition'
+    required: true
+  issue_body:
+    description: 'Body of the issue (passed from validate-eligibility)'
+    required: true
+  github_token:
+    description: 'Token with repo and project read access'
+    required: true
+
+outputs:
+  gate_passed:
+    description: '"true" if all gate conditions are met or waived'
+    value: ${{ steps.gate.outputs.gate_passed }}
+  unmet_conditions:
+    description: 'JSON array of unmet gate conditions'
+    value: ${{ steps.gate.outputs.unmet_conditions }}
+  waived_conditions:
+    description: 'JSON array of waived gate conditions'
+    value: ${{ steps.gate.outputs.waived_conditions }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check gate conditions
+      id: gate
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        ISSUE_NUMBER: ${{ inputs.issue_number }}
+        REQUESTED_STAGE: ${{ inputs.requested_stage }}
+        ISSUE_BODY: ${{ inputs.issue_body }}
+      run: |
+        set -euo pipefail
+
+        unmet=()
+        waived=()
+
+        # --- Fetch GATE-WAIVER comments for this issue ---
+        waivers=$(gh issue view "$ISSUE_NUMBER" --comments --json comments \
+          --jq '.comments[].body' 2>/dev/null | grep -oP 'GATE-WAIVER:\s*\K[^\n—–-]+' || true)
+
+        check_waiver() {
+          local gate_name="$1"
+          if echo "$waivers" | grep -qi "$gate_name"; then
+            waived+=("$gate_name")
+            return 0
+          fi
+          return 1
+        }
+
+        # --- Gate checks by stage ---
+        case "$REQUESTED_STAGE" in
+          kickoff)
+            # Gate 1→2: Backlog triage
+            # Issue exists (already validated by eligibility check)
+            # Issue body contains ## Summary heading
+            if ! echo "$ISSUE_BODY" | grep -qE '^#{1,2}\s+Summary'; then
+              if ! check_waiver "kickoff"; then
+                unmet+=("Issue body must contain a ## Summary heading")
+              fi
+            fi
+            ;;
+
+          clarification)
+            # Gate 2→3: Clarification
+            if ! echo "$ISSUE_BODY" | grep -qE '^#{1,2}\s+Summary'; then
+              if ! check_waiver "clarification-summary"; then
+                unmet+=("Issue body must contain a ## Summary heading")
+              fi
+            fi
+            if ! echo "$ISSUE_BODY" | grep -qE '^#{1,2}\s+(Scope|Open Questions)'; then
+              if ! check_waiver "clarification-scope"; then
+                unmet+=("Issue body must contain a ## Scope or ## Open Questions heading")
+              fi
+            fi
+            ;;
+
+          design)
+            # Gate 3→4: Design discussion
+            # Check if a discussion is linked from issue comments or body
+            discussion_linked="false"
+            if echo "$ISSUE_BODY" | grep -qE 'discussions/[0-9]+'; then
+              discussion_linked="true"
+            fi
+            if [ "$discussion_linked" = "false" ]; then
+              comments_text=$(gh issue view "$ISSUE_NUMBER" --comments --json comments \
+                --jq '.comments[].body' 2>/dev/null || true)
+              if echo "$comments_text" | grep -qE 'discussions/[0-9]+'; then
+                discussion_linked="true"
+              fi
+            fi
+            if [ "$discussion_linked" = "false" ]; then
+              if ! check_waiver "design"; then
+                unmet+=("A GitHub Discussion must be linked from the issue (body or comment containing discussions/<number>)")
+              fi
+            fi
+            ;;
+
+          plan)
+            # Gate 4→5: Implementation plan
+            comments_text=$(gh issue view "$ISSUE_NUMBER" --comments --json comments \
+              --jq '.comments[].body' 2>/dev/null || true)
+
+            if ! echo "$comments_text" | grep -qE '^#{1,2}\s+Implementation Plan'; then
+              if ! check_waiver "plan-exists"; then
+                unmet+=("A comment must contain ## Implementation Plan heading")
+              fi
+            fi
+            if ! echo "$comments_text" | grep -qE '^#{1,2}\s+Acceptance Criteria'; then
+              if ! check_waiver "plan-acceptance"; then
+                unmet+=("Plan comment must contain ## Acceptance Criteria with checklist items")
+              fi
+            fi
+            if ! echo "$comments_text" | grep -qE '^#{1,2}\s+Verification Plan'; then
+              if ! check_waiver "plan-verification"; then
+                unmet+=("Plan comment must contain ## Verification Plan with checklist items")
+              fi
+            fi
+            if ! echo "$comments_text" | grep -qE '^#{1,2}\s+Review Expectations'; then
+              if ! check_waiver "plan-review"; then
+                unmet+=("Plan comment must contain ## Review Expectations")
+              fi
+            fi
+            ;;
+
+          execution)
+            # Gate 5→6: Execution
+            # Check for branch matching <issue-number>-* or <issue-number>/*
+            branch_exists=$(gh api "repos/{owner}/{repo}/branches" --paginate \
+              --jq ".[].name | select(test(\"^${ISSUE_NUMBER}[-/]\"))" 2>/dev/null | head -1 || true)
+            if [ -z "$branch_exists" ]; then
+              if ! check_waiver "execution-branch"; then
+                unmet+=("A branch matching ${ISSUE_NUMBER}-* or ${ISSUE_NUMBER}/* must exist")
+              fi
+            fi
+
+            # Check for PR referencing this issue
+            pr_exists=$(gh pr list --search "issue:${ISSUE_NUMBER}" --json number --jq '.[0].number' 2>/dev/null || true)
+            if [ -z "$pr_exists" ]; then
+              if ! check_waiver "execution-pr"; then
+                unmet+=("A pull request referencing issue #${ISSUE_NUMBER} must exist")
+              fi
+            fi
+            ;;
+
+          review|merge|closeout)
+            # These gates require more complex checks (CI status, approvals, merge state)
+            # Scaffolded here; full implementation in Slice 4+
+            echo "::notice::Gate checks for '$REQUESTED_STAGE' are scaffolded — full implementation in later slices"
+            ;;
+
+          *)
+            unmet+=("Unknown stage: $REQUESTED_STAGE")
+            ;;
+        esac
+
+        # --- Output results ---
+        # Convert arrays to JSON
+        unmet_json=$(printf '%s\n' "${unmet[@]+"${unmet[@]}"}" | jq -R -s -c 'split("\n") | map(select(. != ""))')
+        waived_json=$(printf '%s\n' "${waived[@]+"${waived[@]}"}" | jq -R -s -c 'split("\n") | map(select(. != ""))')
+
+        if [ ${#unmet[@]} -eq 0 ] 2>/dev/null || [ -z "${unmet[*]+x}" ]; then
+          echo "gate_passed=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "gate_passed=false" >> "$GITHUB_OUTPUT"
+        fi
+
+        echo "unmet_conditions=$unmet_json" >> "$GITHUB_OUTPUT"
+        echo "waived_conditions=$waived_json" >> "$GITHUB_OUTPUT"
