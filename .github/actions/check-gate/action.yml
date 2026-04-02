@@ -129,29 +129,55 @@ runs:
             ;;
 
           plan)
-            # Gate 4→5: Implementation plan
-            comments_text=$(gh issue view "$ISSUE_NUMBER" --comments --json comments \
-              --jq '.comments[].body' 2>/dev/null || true)
+            # Gate 4→5: Implementation plan (§4 Gate implementation contract, rule 4)
+            # All required headings must appear in the SAME comment, not scattered.
+            comments_json=$(gh issue view "$ISSUE_NUMBER" --comments --json comments 2>/dev/null || echo '{"comments":[]}')
+            plan_comment_found="false"
+            plan_missing_headings=()
 
-            if ! echo "$comments_text" | grep -qE '^#{1,2}\s+Implementation Plan'; then
+            # Iterate over each comment individually
+            comment_count=$(echo "$comments_json" | jq '.comments | length')
+            for (( i=0; i<comment_count; i++ )); do
+              comment_body=$(echo "$comments_json" | jq -r ".comments[$i].body // \"\"")
+
+              # Only examine comments that contain the anchor heading
+              if echo "$comment_body" | grep -qE '^#{1,2}\s+Implementation Plan'; then
+                plan_comment_found="true"
+                plan_missing_headings=()
+
+                # Check all required headings in THIS comment
+                if ! echo "$comment_body" | grep -qE '^#{1,2}\s+Acceptance Criteria'; then
+                  plan_missing_headings+=("## Acceptance Criteria")
+                fi
+                if ! echo "$comment_body" | grep -qE '^#{1,2}\s+Verification Plan'; then
+                  plan_missing_headings+=("## Verification Plan")
+                fi
+                if ! echo "$comment_body" | grep -qE '^#{1,2}\s+Review Expectations'; then
+                  plan_missing_headings+=("## Review Expectations")
+                fi
+                if ! echo "$comment_body" | grep -qE '^#{1,2}\s+(Slices|Execution)'; then
+                  plan_missing_headings+=("## Slices (or ## Execution)")
+                fi
+
+                # If this comment has all headings, we're done
+                if [ ${#plan_missing_headings[@]} -eq 0 ]; then
+                  break
+                fi
+              fi
+            done
+
+            if [ "$plan_comment_found" = "false" ]; then
               if ! check_waiver "plan-exists"; then
-                unmet+=("A comment must contain ## Implementation Plan heading")
+                unmet+=("No comment contains ## Implementation Plan heading")
               fi
-            fi
-            if ! echo "$comments_text" | grep -qE '^#{1,2}\s+Acceptance Criteria'; then
-              if ! check_waiver "plan-acceptance"; then
-                unmet+=("Plan comment must contain ## Acceptance Criteria with checklist items")
-              fi
-            fi
-            if ! echo "$comments_text" | grep -qE '^#{1,2}\s+Verification Plan'; then
-              if ! check_waiver "plan-verification"; then
-                unmet+=("Plan comment must contain ## Verification Plan with checklist items")
-              fi
-            fi
-            if ! echo "$comments_text" | grep -qE '^#{1,2}\s+Review Expectations'; then
-              if ! check_waiver "plan-review"; then
-                unmet+=("Plan comment must contain ## Review Expectations")
-              fi
+            elif [ ${#plan_missing_headings[@]} -gt 0 ]; then
+              # Found a plan comment but it's missing required headings
+              for heading in "${plan_missing_headings[@]}"; do
+                waiver_key="plan-$(echo "$heading" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '-' | sed 's/^-//;s/-$//')"
+                if ! check_waiver "$waiver_key"; then
+                  unmet+=("Plan comment is missing required heading: $heading (all required headings must be co-located in a single comment)")
+                fi
+              done
             fi
             ;;
 
