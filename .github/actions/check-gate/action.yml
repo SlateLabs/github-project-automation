@@ -301,25 +301,29 @@ runs:
                     fi
                   fi
 
-                  # Review Expectations must list dispositions for all four required categories
+                  # Review Expectations must list explicit dispositions for all four required categories.
+                  # Per §4: each category must appear with a disposition keyword (required, waived, N/A, deferred)
+                  # on the same line, not just the category keyword in freeform text.
+                  # Accepted pattern: "- **Accessibility**: required" or "| Accessibility | waived — reason |"
                   re_section=$(echo "$comment_body" | sed -n '/^##\{0,1\} Review Expectations/,/^##\{0,1\} [^R]/p' | tail -n +2)
+                  re_disposition_re='(required|waived|N/A|n/a|deferred)'
                   re_missing_cats=()
-                  if ! echo "$re_section" | grep -qiE 'accessibility'; then
+                  if ! echo "$re_section" | grep -iE 'accessibility' | grep -qiE "$re_disposition_re"; then
                     re_missing_cats+=("accessibility")
                   fi
-                  if ! echo "$re_section" | grep -qiE 'usability|content'; then
+                  if ! echo "$re_section" | grep -iE 'usability|content' | grep -qiE "$re_disposition_re"; then
                     re_missing_cats+=("usability/content")
                   fi
-                  if ! echo "$re_section" | grep -qiE 'documentation'; then
+                  if ! echo "$re_section" | grep -iE 'documentation' | grep -qiE "$re_disposition_re"; then
                     re_missing_cats+=("documentation")
                   fi
-                  if ! echo "$re_section" | grep -qiE 'hygiene'; then
+                  if ! echo "$re_section" | grep -iE 'hygiene' | grep -qiE "$re_disposition_re"; then
                     re_missing_cats+=("hygiene")
                   fi
                   if [ ${#re_missing_cats[@]} -gt 0 ]; then
                     if ! check_waiver "plan-review-expectations-content"; then
                       missing_list=$(IFS=', '; echo "${re_missing_cats[*]}")
-                      unmet+=("## Review Expectations must list dispositions for: accessibility, usability/content, documentation, hygiene — missing: $missing_list")
+                      unmet+=("## Review Expectations must list explicit dispositions (required/waived/N/A/deferred) for: accessibility, usability/content, documentation, hygiene — missing or lacking disposition: $missing_list")
                     fi
                   fi
 
