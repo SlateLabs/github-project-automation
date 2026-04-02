@@ -18,4 +18,4 @@ repos:
       - merge
       - closeout
     # Pin to a release tag or SHA — never a mutable branch (see discussion #3 §2)
-    shared_workflow_version: c1ca348dfd0973edb46136a9865d2805f903c47a
+    shared_workflow_version: 08cf90ef668d27986151c19194f7632e210d1820
