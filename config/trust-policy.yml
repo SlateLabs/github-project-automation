@@ -1,0 +1,26 @@
+# Trusted-Actor Policy Configuration
+# See: discussion #3 §8 for the full policy model
+#
+# This file defines which actors may trigger orchestration automation
+# and what level of access each actor category receives.
+#
+# Schema:
+#   trusted_teams:      org team slugs with full orchestration rights
+#   trusted_users:      individual GitHub logins (escape hatch)
+#   trusted_apps:       GitHub App IDs allowed to trigger automation
+#   record_only_roles:  org roles that trigger record-only behavior (logged, pending-review label added)
+#   deny_roles:         roles that are silently dropped
+
+trusted_teams:
+  - slatelabs-admins
+
+trusted_users:
+  - jflamb
+
+trusted_apps: []
+
+record_only_roles:
+  - member
+
+deny_roles:
+  - outside_collaborator
