@@ -248,6 +248,19 @@ jobs:
           run_key: ${{ steps.run-key.outputs.run_key }}
           actor: ${{ github.actor }}
 
+      # For the closeout stage, scaffold the retrospective comment BEFORE the gate.
+      # The gate validates that the closeout scaffold comment exists (among other
+      # conditions), so we scaffold first, then gate-check.
+      - name: Scaffold closeout retrospective (pre-gate)
+        if: steps.eligibility.outputs.eligible == 'true' && inputs.requested_stage == 'closeout'
+        id: scaffold-closeout
+        uses: ./.github/actions/scaffold-closeout
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          run_key: ${{ steps.run-key.outputs.run_key }}
+          actor: ${{ github.actor }}
+
       # For the follow-up-capture stage, run the capture action AFTER the gate
       # check passes (unlike design/plan/execution which scaffold BEFORE the gate).
       # The gate validates that markers exist and execution is complete; the capture

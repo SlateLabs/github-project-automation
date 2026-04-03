@@ -464,12 +464,169 @@ runs:
             fi
             ;;
 
-          review|merge|closeout)
-            # §4 Gate implementation contract, rule 1: unimplemented gates must reject.
-            # Full checks (CI status, approvals, merge state) depend on Slice 4 creating
-            # the artifacts they verify. Use GATE-WAIVER to advance manually.
-            if ! check_waiver "$REQUESTED_STAGE"; then
-              unmet+=("Gate '${REQUESTED_STAGE}' is not yet implemented. Use GATE-WAIVER: ${REQUESTED_STAGE} — <reason> to advance manually.")
+          review)
+            # Gate: Review (§4 Gate 6→7)
+            # Conditions:
+            #   1. A PR referencing this issue exists (open or merged)
+            #   2. PR has at least one approving review
+            #   3. No unresolved changes-requested reviews remain
+
+            # Find PR referencing this issue (open or merged)
+            review_pr_json=""
+            review_pr_number=""
+
+            # Search open PRs first
+            review_pr_json=$(gh pr list --state open --search "\"#${ISSUE_NUMBER}\" in:title,body" \
+              --json number,headRefName --jq '.[0]' 2>/dev/null || echo '')
+            review_pr_number=$(echo "$review_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
+
+            if [ -z "$review_pr_number" ]; then
+              # Fallback: branch convention
+              review_pr_json=$(gh pr list --state open --json number,headRefName --limit 100 \
+                --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))][0]" 2>/dev/null || echo '')
+              review_pr_number=$(echo "$review_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
+            fi
+
+            if [ -z "$review_pr_number" ]; then
+              # Check merged PRs
+              review_pr_json=$(gh pr list --state merged --search "\"#${ISSUE_NUMBER}\" in:title,body" \
+                --json number --jq '.[0]' 2>/dev/null || echo '')
+              review_pr_number=$(echo "$review_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
+            fi
+
+            if [ -z "$review_pr_number" ]; then
+              if ! check_waiver "review-pr"; then
+                unmet+=("No PR found referencing issue #${ISSUE_NUMBER} — a PR must exist for review gate")
+              fi
+            else
+              # Fetch reviews for the PR
+              reviews_json=$(gh api "repos/{owner}/{repo}/pulls/${review_pr_number}/reviews" \
+                --jq '[.[] | {state: .state, user: .user.login}]' 2>/dev/null || echo '[]')
+
+              # Check for at least one APPROVED review
+              approved_count=$(echo "$reviews_json" | jq '[.[] | select(.state == "APPROVED")] | length')
+              if [ "$approved_count" -eq 0 ]; then
+                if ! check_waiver "review-approval"; then
+                  unmet+=("PR #$review_pr_number has no approving review — at least one APPROVED review is required")
+                fi
+              fi
+
+              # Check for unresolved CHANGES_REQUESTED reviews.
+              # A CHANGES_REQUESTED review is resolved if the same user later submitted
+              # an APPROVED or DISMISSED review.
+              changes_requested_users=$(echo "$reviews_json" | jq -r '[.[] | select(.state == "CHANGES_REQUESTED") | .user] | unique | .[]' 2>/dev/null || true)
+              unresolved_cr=""
+              while IFS= read -r cr_user; do
+                [ -z "$cr_user" ] && continue
+                # Check if this user later approved or dismissed
+                resolved=$(echo "$reviews_json" | jq --arg user "$cr_user" \
+                  '[.[] | select(.user == $user and (.state == "APPROVED" or .state == "DISMISSED"))] | length')
+                if [ "$resolved" -eq 0 ]; then
+                  unresolved_cr="${unresolved_cr}${cr_user} "
+                fi
+              done <<< "$changes_requested_users"
+
+              if [ -n "$unresolved_cr" ]; then
+                if ! check_waiver "review-changes-requested"; then
+                  unmet+=("PR #$review_pr_number has unresolved changes-requested reviews from: ${unresolved_cr}— resolve or dismiss before advancing")
+                fi
+              fi
+            fi
+            ;;
+
+          merge)
+            # Gate: Merge (§4 Gate 7→8)
+            # Conditions:
+            #   1. A merged PR referencing this issue exists
+            #   2. The merged PR had an approving review
+
+            merged_pr_number=""
+
+            # Search merged PRs by issue reference
+            merged_pr_json=$(gh pr list --state merged --search "\"#${ISSUE_NUMBER}\" in:title,body" \
+              --json number --jq '.[0]' 2>/dev/null || echo '')
+            merged_pr_number=$(echo "$merged_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
+
+            if [ -z "$merged_pr_number" ]; then
+              # Fallback: branch convention
+              merged_pr_json=$(gh pr list --state merged --json number,headRefName --limit 500 \
+                --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))][0]" 2>/dev/null || echo '')
+              merged_pr_number=$(echo "$merged_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
+            fi
+
+            if [ -z "$merged_pr_number" ]; then
+              if ! check_waiver "merge-pr"; then
+                unmet+=("No merged PR found referencing issue #${ISSUE_NUMBER} — a PR must be merged for the merge gate")
+              fi
+            else
+              # Verify the merged PR had an approving review
+              merge_reviews_json=$(gh api "repos/{owner}/{repo}/pulls/${merged_pr_number}/reviews" \
+                --jq '[.[] | select(.state == "APPROVED")] | length' 2>/dev/null || echo '0')
+
+              if [ "$merge_reviews_json" -eq 0 ]; then
+                if ! check_waiver "merge-approval"; then
+                  unmet+=("Merged PR #$merged_pr_number had no approving review — review approval is required before merge")
+                fi
+              fi
+            fi
+            ;;
+
+          closeout)
+            # Gate: Closeout (§4 Gate 8→done)
+            # Conditions:
+            #   1. A merged PR referencing this issue exists
+            #   2. Follow-up capture evidence (FOLLOW-UP markers or follow-up issues exist)
+            #   3. A closeout scaffold comment exists (owned-artifact marker)
+
+            # 1. Check for merged PR
+            closeout_merged_pr=""
+            closeout_merged_json=$(gh pr list --state merged --search "\"#${ISSUE_NUMBER}\" in:title,body" \
+              --json number --jq '.[0].number' 2>/dev/null || true)
+            closeout_merged_pr=$(echo "$closeout_merged_json" | tr -d '[:space:]')
+
+            if [ -z "$closeout_merged_pr" ] || [ "$closeout_merged_pr" = "null" ]; then
+              # Fallback: branch convention
+              closeout_merged_pr=$(gh pr list --state merged --json number,headRefName --limit 500 \
+                --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))][0].number" 2>/dev/null || true)
+              closeout_merged_pr=$(echo "$closeout_merged_pr" | tr -d '[:space:]')
+            fi
+
+            if [ -z "$closeout_merged_pr" ] || [ "$closeout_merged_pr" = "null" ]; then
+              if ! check_waiver "closeout-merged-pr"; then
+                unmet+=("No merged PR found referencing issue #${ISSUE_NUMBER} — a merged PR is required for closeout")
+              fi
+            fi
+
+            # 2. Check for follow-up capture evidence
+            # Either FOLLOW-UP markers in comments OR existing follow-up issues with
+            # owned-artifact markers satisfy this condition.
+            closeout_comments_json=$(gh issue view "$ISSUE_NUMBER" --comments --json comments 2>/dev/null || echo '{"comments":[]}')
+
+            # Check for FOLLOW-UP markers in comments
+            followup_marker_found=$(echo "$closeout_comments_json" | jq -r '.comments[].body // ""' \
+              | grep -cE '<!--\s*FOLLOW-UP:' || true)
+
+            # Check for follow-up status comment (capture was run)
+            followup_status_marker="gpa:follow-up-status:#${ISSUE_NUMBER}"
+            followup_status_found=$(echo "$closeout_comments_json" | jq -r '.comments[].body // ""' \
+              | grep -cF "$followup_status_marker" || true)
+
+            if [ "$followup_marker_found" -eq 0 ] && [ "$followup_status_found" -eq 0 ]; then
+              if ! check_waiver "closeout-follow-ups"; then
+                unmet+=("No follow-up capture evidence found — run follow-up-capture stage or add FOLLOW-UP markers before closeout")
+              fi
+            fi
+
+            # 3. Check for closeout scaffold comment (owned-artifact marker)
+            repo_full_closeout="${GITHUB_REPOSITORY:-SlateLabs/github-project-automation}"
+            closeout_artifact_marker="gpa:owned-artifact:closeout:${repo_full_closeout}#${ISSUE_NUMBER}"
+            closeout_scaffold_found=$(echo "$closeout_comments_json" | jq -r '.comments[].body // ""' \
+              | grep -cF "$closeout_artifact_marker" || true)
+
+            if [ "$closeout_scaffold_found" -eq 0 ]; then
+              if ! check_waiver "closeout-scaffold"; then
+                unmet+=("No closeout scaffold comment found — the closeout retrospective must be posted before advancing")
+              fi
             fi
             ;;
 

@@ -216,6 +216,59 @@ If a label does not exist, the action attempts to create the issue without it an
 
 **Permissions required:** `contents: read`, `issues: write`
 
+### Closeout scaffold
+
+**Trigger:** `workflow_dispatch` via the standalone workflow or automatically via `orchestration-dispatch` when `requested_stage: closeout`.
+
+**What it does:**
+1. Discovers whether a closeout retrospective comment already exists using owned-artifact lookup:
+   - Owned-artifact marker (`<!-- gpa:owned-artifact:closeout:REPO#N -->`) embedded in the closeout comment itself (rendered from the template)
+   - Status comments use a distinct marker (`<!-- gpa:closeout-status:#N -->`) and are **not** treated as the closeout artifact
+2. If no closeout comment exists: gathers merged PR list and follow-up issue counts, renders `templates/closeout.md` with issue metadata, and posts it as an issue comment with an owned-artifact marker
+3. If a closeout comment already exists: skips creation and posts an informational status comment
+
+**Standalone usage:**
+```
+gh workflow run scaffold-closeout.yml -f issue_number=<N>
+```
+
+**Via orchestration:**
+```
+gh workflow run orchestration-dispatch.yml -f issue_number=<N> -f requested_stage=closeout
+```
+When triggered via orchestration, the scaffold runs **before** the closeout gate check. This means `requested_stage: closeout` on an issue with no closeout comment will create the retrospective first, then the gate validates the full closeout conditions (merged PR, follow-up evidence, scaffold comment). The first run typically scaffolds the retrospective and then passes or fails the gate depending on whether the other conditions are met.
+
+**Closeout template:** `templates/closeout.md` contains structured sections for the retrospective (delivery summary, what went well, what could improve, follow-up status, exit checklist) plus auto-populated merged PR list and follow-up counts.
+
+**Idempotency:** The scaffold identifies its own output via the owned-artifact marker (`<!-- gpa:owned-artifact:closeout:REPO#N -->`) embedded in the closeout comment itself. Status comments posted alongside the closeout use a distinct marker (`<!-- gpa:closeout-status:#N -->`) and are never mistaken for the closeout artifact. Running the scaffold twice for the same issue will not create a duplicate.
+
+**Check-before-act guard:** Before posting the closeout comment, the scaffold re-verifies that the source issue is still open and does not have the `do-not-automate` label. If the issue state changed after eligibility validation, the scaffold aborts without mutating any artifacts.
+
+**Permissions required:** `contents: read`, `issues: write`, `pull-requests: read`
+
+### Gate checks — review, merge, closeout
+
+These three gates complete the 8-stage model so every transition has a real machine-testable check.
+
+**Review gate (Gate 6→7):**
+- A PR referencing the issue must exist (open or merged)
+- The PR must have at least one `APPROVED` review
+- No unresolved `CHANGES_REQUESTED` reviews may remain (a `CHANGES_REQUESTED` review is resolved if the same user later submitted an `APPROVED` or `DISMISSED` review)
+- Waiver keys: `review-pr`, `review-approval`, `review-changes-requested`
+
+**Merge gate (Gate 7→8):**
+- A merged PR referencing the issue must exist
+- The merged PR must have had at least one `APPROVED` review
+- Waiver keys: `merge-pr`, `merge-approval`
+
+**Closeout gate (Gate 8→done):**
+- A merged PR referencing the issue must exist
+- Follow-up capture evidence must exist (either `<!-- FOLLOW-UP: ... -->` markers in comments, or a follow-up status comment indicating the capture stage was run)
+- A closeout scaffold comment with the owned-artifact marker must exist
+- Waiver keys: `closeout-merged-pr`, `closeout-follow-ups`, `closeout-scaffold`
+
+All three gates support `GATE-WAIVER` override by trusted actors (per `config/trust-policy.yml`).
+
 ## Operator actions
 
 | Action | How |
@@ -226,5 +279,6 @@ If a label does not exist, the action attempts to create the issue without it an
 | Scaffold an implementation plan | `gh workflow run scaffold-impl-plan.yml -f issue_number=<N>` |
 | Scaffold execution bootstrap | `gh workflow run scaffold-execution.yml -f issue_number=<N>` |
 | Capture follow-ups | `gh workflow run capture-follow-ups.yml -f issue_number=<N>` |
+| Scaffold closeout retrospective | `gh workflow run scaffold-closeout.yml -f issue_number=<N>` |
 | Waive a gate | Post `GATE-WAIVER: <gate-name> — <reason>` on the issue/PR |
 | Block automation | Add `do-not-automate` label to the issue |

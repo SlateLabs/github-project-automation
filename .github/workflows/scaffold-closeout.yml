@@ -1,0 +1,108 @@
+name: Scaffold Closeout
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number to post a closeout retrospective comment on'
+        required: true
+        type: number
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  closeout:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate run key
+        id: run-key
+        shell: bash
+        env:
+          REPO_NAME: ${{ github.repository }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
+        run: |
+          timestamp=$(date +%s%3N)
+          run_key="${REPO_NAME}/${ISSUE_NUM}/closeout/${timestamp}"
+          echo "run_key=$run_key" >> "$GITHUB_OUTPUT"
+          echo "::notice::Run key: $run_key"
+
+      - name: Validate eligibility
+        id: eligibility
+        uses: ./.github/actions/validate-eligibility
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          requested_stage: closeout
+          actor: ${{ github.actor }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Post ineligible comment
+        if: steps.eligibility.outputs.eligible != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
+          REASON: ${{ steps.eligibility.outputs.reason }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ACTOR: ${{ github.actor }}
+          RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+          ### Closeout scaffold — ineligible
+
+          | Field | Value |
+          |-------|-------|
+          | **Run key** | \`$RUN_KEY\` |
+          | **Actor** | @$ACTOR |
+          | **Result** | :x: Ineligible |
+          | **Reason** | $REASON |
+          | **Actions run** | [$RUN_ID]($RUN_URL) |
+          COMMENT_EOF
+          )"
+
+      - name: Fail on ineligible
+        if: steps.eligibility.outputs.eligible != 'true'
+        env:
+          REASON: ${{ steps.eligibility.outputs.reason }}
+        shell: bash
+        run: |
+          echo "::error::Issue is not eligible: $REASON"
+          exit 1
+
+      - name: Scaffold closeout
+        if: steps.eligibility.outputs.eligible == 'true'
+        id: scaffold
+        uses: ./.github/actions/scaffold-closeout
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          run_key: ${{ steps.run-key.outputs.run_key }}
+          actor: ${{ github.actor }}
+
+      - name: Job summary
+        if: always()
+        env:
+          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
+          ELIGIBLE: ${{ steps.eligibility.outputs.eligible }}
+          CREATED: ${{ steps.scaffold.outputs.created }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ACTOR: ${{ github.actor }}
+        shell: bash
+        run: |
+          {
+            echo "## Closeout Scaffold Summary"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Run key | \`$RUN_KEY\` |"
+            echo "| Issue | #$ISSUE_NUMBER |"
+            echo "| Actor | $ACTOR |"
+            echo "| Eligible | $ELIGIBLE |"
+            echo "| Created | ${CREATED:-n/a} |"
+          } >> "$GITHUB_STEP_SUMMARY"
