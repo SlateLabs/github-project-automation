@@ -54,7 +54,7 @@ The default workflow stages are: Backlog → Clarification → Design → Plan �
 
 ## Stage actions
 
-Stage actions run automatically after eligibility validation and gate checks pass. They create the artifacts needed for the next stage.
+Stage actions run automatically after eligibility validation passes. Some actions (like the design scaffold) run **before** their gate check to create the artifacts the gate will then evaluate; others run after gate checks pass. Each action's trigger timing is documented below.
 
 ### Design discussion scaffold
 

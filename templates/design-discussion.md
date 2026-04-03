@@ -1,5 +1,7 @@
 # Design Discussion: {{issue_title}}
 
+<!-- gpa:owned-artifact:design-discussion:{{repo}}#{{issue_number}} -->
+
 > Source issue: {{repo}}#{{issue_number}}
 > Created by orchestration automation
 

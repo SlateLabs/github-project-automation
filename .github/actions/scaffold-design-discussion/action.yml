@@ -103,8 +103,11 @@ runs:
         # Tier 3: Search for orphaned discussion via GraphQL (recovery)
         # Handles partial failure where createDiscussion succeeded but the
         # backlink comment was never posted to the source issue.
+        # Uses the owned-artifact marker embedded in the discussion body
+        # to deterministically identify discussions created by this scaffold.
         if [ -z "$existing_url" ]; then
-          search_query="repo:${repo_full} \"Source issue: ${repo_full}#${ISSUE_NUMBER}\" in:body"
+          owned_artifact_marker="gpa:owned-artifact:design-discussion:${repo_full}#${ISSUE_NUMBER}"
+          search_query="repo:${repo_full} \"${owned_artifact_marker}\" in:body"
           orphan_result=$(gh api graphql -f query='
             query($q: String!) {
               search(query: $q, type: DISCUSSION, first: 5) {
@@ -119,12 +122,22 @@ runs:
             }' -f q="$search_query" 2>&1) || true
 
           if [ -n "$orphan_result" ]; then
-            orphan_url=$(echo "$orphan_result" | jq -r '.data.search.nodes[0].url // ""' 2>/dev/null || true)
-            if [ -n "$orphan_url" ] && [ "$orphan_url" != "null" ]; then
-              existing_url="$orphan_url"
-              discovery_method="orphan-recovery"
-              echo "::warning::Found orphaned discussion (backlink missing): $existing_url — healing backlink"
-            fi
+            # Validate each candidate: the discussion body must contain the
+            # exact owned-artifact marker to confirm it was created by this
+            # scaffold, not merely referencing the same issue.
+            node_count=$(echo "$orphan_result" | jq '.data.search.nodes | length' 2>/dev/null || echo 0)
+            for (( j=0; j<node_count; j++ )); do
+              candidate_body=$(echo "$orphan_result" | jq -r ".data.search.nodes[$j].body // \"\"" 2>/dev/null || true)
+              if echo "$candidate_body" | grep -qF "$owned_artifact_marker"; then
+                orphan_url=$(echo "$orphan_result" | jq -r ".data.search.nodes[$j].url // \"\"" 2>/dev/null || true)
+                if [ -n "$orphan_url" ] && [ "$orphan_url" != "null" ]; then
+                  existing_url="$orphan_url"
+                  discovery_method="orphan-recovery"
+                  echo "::warning::Found orphaned discussion (backlink missing): $existing_url — healing backlink"
+                  break
+                fi
+              fi
+            done
           fi
         fi
 
