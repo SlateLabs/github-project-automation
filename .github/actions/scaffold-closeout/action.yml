@@ -1,0 +1,228 @@
+name: 'Scaffold Closeout'
+description: >
+  Posts a structured closeout retrospective comment on the source issue,
+  auto-populated with merged PR list and follow-up counts.
+  Idempotent: skips creation if an owned-artifact closeout comment already exists.
+  Per discussion #3 §4, Gate 8 (closeout).
+
+inputs:
+  issue_number:
+    description: 'Source issue number'
+    required: true
+  github_token:
+    description: 'Token with issues:read and issues:write scope'
+    required: true
+  run_key:
+    description: 'Orchestration run key for traceability'
+    required: false
+    default: ''
+  actor:
+    description: 'GitHub login of the actor triggering the scaffold'
+    required: false
+    default: ''
+  template_path:
+    description: 'Path to the closeout body template'
+    required: false
+    default: 'templates/closeout.md'
+
+outputs:
+  comment_url:
+    description: 'URL of the created (or existing) closeout comment'
+    value: ${{ steps.scaffold.outputs.comment_url }}
+  created:
+    description: '"true" if a new comment was created, "false" if one already existed'
+    value: ${{ steps.scaffold.outputs.created }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Scaffold closeout retrospective
+      id: scaffold
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        ISSUE_NUMBER: ${{ inputs.issue_number }}
+        RUN_KEY: ${{ inputs.run_key }}
+        ACTOR: ${{ inputs.actor }}
+        TEMPLATE_PATH: ${{ inputs.template_path }}
+      run: |
+        set -euo pipefail
+
+        repo_full="${GITHUB_REPOSITORY:-SlateLabs/github-project-automation}"
+        owned_artifact_marker="gpa:owned-artifact:closeout:${repo_full}#${ISSUE_NUMBER}"
+        status_marker="gpa:closeout-status:#${ISSUE_NUMBER}"
+
+        # --- 1. Fetch issue metadata ---
+        issue_json=$(gh issue view "$ISSUE_NUMBER" --json title,body,comments 2>&1) || {
+          echo "::error::Failed to fetch issue #$ISSUE_NUMBER: $issue_json"
+          exit 1
+        }
+
+        issue_title=$(echo "$issue_json" | jq -r '.title // ""')
+
+        # --- 2. Owned-artifact discovery ---
+        # Check if a closeout comment already exists (idempotency).
+        # Only comments containing the owned-artifact marker count — status
+        # comments use a distinct marker and are not treated as the artifact.
+        existing_comment_url=""
+        comment_count=$(echo "$issue_json" | jq '.comments | length')
+
+        for (( i=0; i<comment_count; i++ )); do
+          comment_body=$(echo "$issue_json" | jq -r ".comments[$i].body // \"\"")
+          if echo "$comment_body" | grep -qF "$owned_artifact_marker"; then
+            # Extract the comment URL from the API response
+            comment_id=$(echo "$issue_json" | jq -r ".comments[$i].url // \"\"")
+            # Fallback: construct from issue URL
+            existing_comment_url="https://github.com/${repo_full}/issues/${ISSUE_NUMBER}#issuecomment-$(echo "$issue_json" | jq -r ".comments[$i].id // \"unknown\"")"
+            break
+          fi
+        done
+
+        if [ -n "$existing_comment_url" ]; then
+          echo "::notice::Closeout comment already exists — skipping creation"
+
+          echo "comment_url=$existing_comment_url" >> "$GITHUB_OUTPUT"
+          echo "created=false" >> "$GITHUB_OUTPUT"
+
+          # Post informational status comment (distinct marker)
+          table_rows="| Field | Value |
+        |-------|-------|"
+          if [ -n "$RUN_KEY" ]; then
+            table_rows="${table_rows}
+        | **Run key** | \`$RUN_KEY\` |"
+          fi
+          if [ -n "$ACTOR" ]; then
+            table_rows="${table_rows}
+        | **Actor** | @$ACTOR |"
+          fi
+          table_rows="${table_rows}
+        | **Result** | :fast_forward: Skipped — closeout comment already exists |"
+
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+        ### Closeout scaffold — already exists
+        <!-- $status_marker -->
+
+        $table_rows
+
+        A closeout retrospective comment for this issue already exists. No duplicate was created.
+        COMMENT_EOF
+          )"
+
+          exit 0
+        fi
+
+        # --- 3. Check-before-act: re-verify issue state ---
+        issue_state_json=$(gh issue view "$ISSUE_NUMBER" --json state,labels 2>&1) || {
+          echo "::error::Failed to re-check issue #$ISSUE_NUMBER state: $issue_state_json"
+          exit 1
+        }
+        issue_state=$(echo "$issue_state_json" | jq -r '.state // ""')
+        has_block_label=$(echo "$issue_state_json" | jq -r '.labels[]?.name // empty' | grep -cF 'do-not-automate' || true)
+
+        if [ "$issue_state" != "OPEN" ]; then
+          echo "::error::Issue #$ISSUE_NUMBER is no longer open (state: $issue_state) — aborting scaffold"
+          exit 1
+        fi
+        if [ "$has_block_label" -gt 0 ]; then
+          echo "::error::Issue #$ISSUE_NUMBER has do-not-automate label — aborting scaffold"
+          exit 1
+        fi
+
+        # --- 4. Gather data for template variables ---
+
+        # Merged PRs referencing this issue
+        merged_pr_list=""
+        merged_prs_json=$(gh pr list --state merged --search "\"#${ISSUE_NUMBER}\" in:title,body" \
+          --json number,title --limit 100 2>/dev/null || echo '[]')
+
+        # Also check by branch convention
+        merged_branch_prs_json=$(gh pr list --state merged --json number,title,headRefName --limit 500 \
+          --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))]" 2>/dev/null || echo '[]')
+
+        # Merge both lists, dedup by PR number
+        all_merged=$(echo "$merged_prs_json" "$merged_branch_prs_json" | jq -s 'add | unique_by(.number) | sort_by(.number)')
+
+        merged_count=$(echo "$all_merged" | jq 'length')
+        if [ "$merged_count" -gt 0 ]; then
+          merged_pr_list=$(echo "$all_merged" | jq -r '.[] | "#\(.number) — \(.title)"' | sed 's/^/- /')
+        else
+          merged_pr_list="_(none found)_"
+        fi
+
+        # Follow-up issues: count issues with owned-artifact marker for this source
+        followup_marker_prefix="gpa:owned-artifact:follow-up:${repo_full}#${ISSUE_NUMBER}:"
+        followup_issues=$(gh issue list --state all --limit 200 --json number,body 2>/dev/null || echo '[]')
+        follow_up_count=$(echo "$followup_issues" | jq --arg prefix "$followup_marker_prefix" \
+          '[.[] | select(.body | contains($prefix))] | length')
+
+        if [ "$follow_up_count" -gt 0 ]; then
+          follow_up_summary=$(echo "$followup_issues" | jq -r --arg prefix "$followup_marker_prefix" \
+            '.[] | select(.body | contains($prefix)) | "- #\(.number)"')
+        else
+          follow_up_summary="_(no follow-up issues captured)_"
+        fi
+
+        # --- 5. Render template ---
+        if [ ! -f "$TEMPLATE_PATH" ]; then
+          echo "::error::Template file not found at $TEMPLATE_PATH"
+          exit 1
+        fi
+
+        export ISSUE_TITLE_SAFE="$issue_title"
+        export REPO_FULL="$repo_full"
+        export MERGED_PR_LIST="$merged_pr_list"
+        export FOLLOW_UP_COUNT="$follow_up_count"
+        export FOLLOW_UP_SUMMARY="$follow_up_summary"
+
+        rendered_body=$(python3 -c '
+        import sys, os
+        t = open(sys.argv[1]).read()
+        t = t.replace("{{repo}}", os.environ["REPO_FULL"])
+        t = t.replace("{{issue_number}}", os.environ["ISSUE_NUMBER"])
+        t = t.replace("{{issue_title}}", os.environ["ISSUE_TITLE_SAFE"])
+        t = t.replace("{{run_key}}", os.environ["RUN_KEY"])
+        t = t.replace("{{merged_pr_list}}", os.environ["MERGED_PR_LIST"])
+        t = t.replace("{{follow_up_count}}", os.environ["FOLLOW_UP_COUNT"])
+        t = t.replace("{{follow_up_summary}}", os.environ["FOLLOW_UP_SUMMARY"])
+        sys.stdout.write(t)
+        ' "$TEMPLATE_PATH")
+
+        # --- 6. Post closeout comment ---
+        comment_result=$(gh issue comment "$ISSUE_NUMBER" --body "$rendered_body" 2>&1) || {
+          echo "::error::Failed to post closeout comment: $comment_result"
+          exit 1
+        }
+
+        # Extract comment URL from gh output (prints the URL on success)
+        comment_url="$comment_result"
+        echo "::notice::Closeout comment posted: $comment_url"
+
+        echo "comment_url=$comment_url" >> "$GITHUB_OUTPUT"
+        echo "created=true" >> "$GITHUB_OUTPUT"
+
+        # --- 7. Post status comment ---
+        table_rows="| Field | Value |
+        |-------|-------|"
+        if [ -n "$RUN_KEY" ]; then
+          table_rows="${table_rows}
+        | **Run key** | \`$RUN_KEY\` |"
+        fi
+        if [ -n "$ACTOR" ]; then
+          table_rows="${table_rows}
+        | **Actor** | @$ACTOR |"
+        fi
+        table_rows="${table_rows}
+        | **Merged PRs** | $merged_count |
+        | **Follow-ups** | $follow_up_count |
+        | **Result** | :white_check_mark: Closeout retrospective created |"
+
+        gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+        ### Closeout scaffold — created
+        <!-- $status_marker -->
+
+        $table_rows
+
+        A closeout retrospective comment has been posted on this issue.
+        Review the retrospective sections and complete the exit checklist before closing the issue.
+        COMMENT_EOF
+        )"
