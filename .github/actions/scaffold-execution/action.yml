@@ -3,7 +3,7 @@ description: >
   Creates a feature branch and draft PR for a source issue, pre-populated with
   all headings required by the execution gate (discussion #3 §4, Gate 5→6).
   Idempotent: skips creation if an open or merged PR with the owned-artifact
-  marker exists. Closed-unmerged PRs are ignored so reruns can recover.
+  marker exists. Closed-unmerged PRs are reopened for deterministic recovery.
 
 inputs:
   issue_number:
@@ -94,8 +94,7 @@ runs:
         done
 
         # Also check merged PRs for Tier 1 (completed work should not be re-scaffolded).
-        # Closed-unmerged PRs are intentionally excluded so reruns can create a
-        # replacement PR after a prior attempt was abandoned.
+        # Closed-unmerged PRs are handled separately below (reopened for recovery).
         if [ -z "$existing_pr_url" ]; then
           pr_list_merged=$(gh pr list --state merged --json number,body,headRefName --limit 50 2>/dev/null || echo '[]')
           pr_count_merged=$(echo "$pr_list_merged" | jq 'length')
@@ -107,6 +106,43 @@ runs:
               existing_branch=$(echo "$pr_list_merged" | jq -r ".[$i].headRefName")
               existing_pr_url="https://github.com/${repo_full}/pull/${existing_pr_number}"
               discovery_method="owned-artifact-marker"
+              break
+            fi
+          done
+        fi
+
+        # Recovery: Search closed-unmerged PRs for the owned-artifact marker.
+        # If found, reopen the PR so the operator can continue from where they
+        # left off. This makes closed-unmerged recovery deterministic end-to-end
+        # rather than silently creating a duplicate PR on the same branch.
+        if [ -z "$existing_pr_url" ]; then
+          pr_list_closed=$(gh pr list --state closed --json number,body,headRefName,mergedAt --limit 50 2>/dev/null || echo '[]')
+          pr_count_closed=$(echo "$pr_list_closed" | jq 'length')
+
+          for (( i=0; i<pr_count_closed; i++ )); do
+            pr_body=$(echo "$pr_list_closed" | jq -r ".[$i].body // \"\"")
+            merged_at=$(echo "$pr_list_closed" | jq -r ".[$i].mergedAt // \"\"")
+            # Skip merged PRs (they appear in --state closed too via API; belt-and-suspenders)
+            if [ -n "$merged_at" ] && [ "$merged_at" != "null" ]; then
+              continue
+            fi
+            if echo "$pr_body" | grep -qF "$owned_artifact_marker"; then
+              closed_pr_number=$(echo "$pr_list_closed" | jq -r ".[$i].number")
+              closed_pr_branch=$(echo "$pr_list_closed" | jq -r ".[$i].headRefName")
+
+              echo "::notice::Found closed-unmerged execution PR #${closed_pr_number} — reopening for recovery"
+
+              # Reopen the PR via API
+              reopen_result=$(gh api "repos/{owner}/{repo}/pulls/${closed_pr_number}" \
+                -X PATCH -f "state=open" 2>&1) || {
+                echo "::error::Failed to reopen PR #${closed_pr_number}: $reopen_result"
+                exit 1
+              }
+
+              existing_pr_number="$closed_pr_number"
+              existing_branch="$closed_pr_branch"
+              existing_pr_url="https://github.com/${repo_full}/pull/${existing_pr_number}"
+              discovery_method="closed-unmerged-reopened"
               break
             fi
           done
@@ -182,6 +218,25 @@ runs:
         }
 
         branch_name="${ISSUE_NUMBER}-${branch_slug}"
+
+        # --- Check-before-act: re-verify issue state before mutations ---
+        # Between eligibility validation and now, the issue may have been closed
+        # or had do-not-automate added. Re-check before creating any artifacts.
+        issue_state_json=$(gh issue view "$ISSUE_NUMBER" --json state,labels 2>&1) || {
+          echo "::error::Failed to re-check issue #$ISSUE_NUMBER state: $issue_state_json"
+          exit 1
+        }
+        issue_state=$(echo "$issue_state_json" | jq -r '.state // ""')
+        has_block_label=$(echo "$issue_state_json" | jq -r '.labels[]?.name // empty' | grep -cF 'do-not-automate' || true)
+
+        if [ "$issue_state" != "OPEN" ]; then
+          echo "::error::Issue #$ISSUE_NUMBER is no longer open (state: $issue_state) — aborting scaffold before creating artifacts"
+          exit 1
+        fi
+        if [ "$has_block_label" -gt 0 ]; then
+          echo "::error::Issue #$ISSUE_NUMBER now has do-not-automate label — aborting scaffold before creating artifacts"
+          exit 1
+        fi
 
         # Resolve default branch upfront (needed for PR creation even if branch already exists)
         default_branch=$(gh api "repos/{owner}/{repo}" --jq '.default_branch' 2>/dev/null || echo "main")
