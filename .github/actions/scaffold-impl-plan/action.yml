@@ -60,11 +60,15 @@ runs:
 
         # --- 2. Check-before-act: owned-artifact discovery ---
         # Two-tier discovery for the owned plan comment:
-        #   Tier 1: Scaffold marker comment (<!-- gpa:impl-plan:#N -->)
+        #   Tier 1: Owned-artifact marker (<!-- gpa:owned-artifact:impl-plan:REPO#N -->)
+        #            This marker lives in the actual plan comment (rendered from the template).
+        #            Status comments use a distinct marker (gpa:impl-plan-status:#N) and are
+        #            NOT treated as the plan artifact.
         #   Tier 2: Issue comment containing ## Implementation Plan heading (user-placed)
         # No orphan recovery tier needed — comments live on the issue, can't be orphaned.
-        artifact_marker="gpa:impl-plan:#${ISSUE_NUMBER}"
         repo_full="${GITHUB_REPOSITORY:-SlateLabs/github-project-automation}"
+        owned_artifact_marker="gpa:owned-artifact:impl-plan:${repo_full}#${ISSUE_NUMBER}"
+        status_marker="gpa:impl-plan-status:#${ISSUE_NUMBER}"
 
         existing_url=""
         existing_id=""
@@ -72,13 +76,13 @@ runs:
 
         comment_count=$(echo "$issue_json" | jq '.comments | length' 2>/dev/null || echo 0)
 
-        # Tier 1: Search comments for scaffold marker
+        # Tier 1: Search comments for the owned-artifact marker (lives in the plan itself)
         for (( i=0; i<comment_count; i++ )); do
           cbody=$(echo "$issue_json" | jq -r ".comments[$i].body // \"\"")
-          if echo "$cbody" | grep -qF "$artifact_marker"; then
+          if echo "$cbody" | grep -qF "$owned_artifact_marker"; then
             existing_url=$(echo "$issue_json" | jq -r ".comments[$i].url // \"\"")
             existing_id=$(echo "$issue_json" | jq -r ".comments[$i].id // \"\"")
-            discovery_method="scaffold-marker"
+            discovery_method="owned-artifact-marker"
             break
           fi
         done
@@ -103,7 +107,7 @@ runs:
           echo "comment_id=$existing_id" >> "$GITHUB_OUTPUT"
           echo "created=false" >> "$GITHUB_OUTPUT"
 
-          # Post informational comment with owned-artifact marker
+          # Post informational status comment (distinct marker — not the plan artifact)
           table_rows="| Field | Value |
         |-------|-------|"
           if [ -n "$RUN_KEY" ]; then
@@ -121,7 +125,7 @@ runs:
 
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
         ### Implementation plan scaffold — already exists
-        <!-- $artifact_marker -->
+        <!-- $status_marker -->
 
         $table_rows
 
@@ -181,7 +185,7 @@ runs:
 
         gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
         ### Implementation plan scaffold — created
-        <!-- gpa:impl-plan:#${ISSUE_NUMBER} -->
+        <!-- gpa:impl-plan-status:#${ISSUE_NUMBER} -->
 
         $table_rows
 
