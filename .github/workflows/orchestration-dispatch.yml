@@ -248,11 +248,71 @@ jobs:
           run_key: ${{ steps.run-key.outputs.run_key }}
           actor: ${{ github.actor }}
 
-      # For the closeout stage, scaffold the retrospective comment BEFORE the gate.
-      # The gate validates that the closeout scaffold comment exists (among other
-      # conditions), so we scaffold first, then gate-check.
-      - name: Scaffold closeout retrospective (pre-gate)
+      # For the closeout stage, enforce pre-scaffold prerequisites BEFORE
+      # scaffolding. This matches the standalone scaffold-closeout.yml sequence:
+      # pre-scaffold gate (merged PR, branch deleted, follow-ups) → scaffold →
+      # full gate (content checks). Without this, the orchestration path could
+      # post a closeout retrospective on an issue that hasn't met prerequisites.
+      - name: Pre-scaffold gate check (closeout)
         if: steps.eligibility.outputs.eligible == 'true' && inputs.requested_stage == 'closeout'
+        id: closeout-pre-gate
+        uses: ./.github/actions/check-gate
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          requested_stage: closeout
+          issue_body: ${{ steps.eligibility.outputs.issue_body }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          check_mode: pre-scaffold
+
+      - name: Post closeout pre-scaffold gate failure
+        if: steps.closeout-pre-gate.outputs.gate_passed == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
+          UNMET: ${{ steps.closeout-pre-gate.outputs.unmet_conditions }}
+          WAIVED: ${{ steps.closeout-pre-gate.outputs.waived_conditions }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ACTOR: ${{ github.actor }}
+          RUN_ID: ${{ github.run_id }}
+          REQUESTED_STAGE: ${{ inputs.requested_stage }}
+        shell: bash
+        run: |
+          unmet_list=$(echo "$UNMET" | jq -r '.[] | "- :x: \(.)"' 2>/dev/null || echo "- (none)")
+          waived_list=$(echo "$WAIVED" | jq -r '.[] | "- :fast_forward: \(.)"' 2>/dev/null || echo "- (none)")
+
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+          ### Orchestration run — closeout pre-scaffold gate failed
+
+          | Field | Value |
+          |-------|-------|
+          | **Run key** | \`$RUN_KEY\` |
+          | **Requested stage** | \`$REQUESTED_STAGE\` |
+          | **Actor** | @$ACTOR |
+          | **Result** | :x: Prerequisites not met — scaffold not posted |
+          | **Actions run** | [$RUN_ID]($RUN_URL) |
+
+          **Unmet prerequisites:**
+          $unmet_list
+
+          **Waived conditions:**
+          $waived_list
+
+          Resolve the unmet prerequisites and re-trigger.
+          COMMENT_EOF
+          )"
+
+      - name: Fail on closeout pre-scaffold gate failure
+        if: steps.closeout-pre-gate.outputs.gate_passed == 'false'
+        env:
+          UNMET: ${{ steps.closeout-pre-gate.outputs.unmet_conditions }}
+        shell: bash
+        run: |
+          echo "::error::Closeout pre-scaffold gate failed. Unmet prerequisites: $UNMET"
+          exit 1
+
+      - name: Scaffold closeout retrospective (pre-gate)
+        if: steps.eligibility.outputs.eligible == 'true' && inputs.requested_stage == 'closeout' && steps.closeout-pre-gate.outputs.gate_passed != 'false'
         id: scaffold-closeout
         uses: ./.github/actions/scaffold-closeout
         with:

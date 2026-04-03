@@ -236,7 +236,7 @@ gh workflow run scaffold-closeout.yml -f issue_number=<N>
 ```
 gh workflow run orchestration-dispatch.yml -f issue_number=<N> -f requested_stage=closeout
 ```
-When triggered via orchestration, the scaffold runs **before** the closeout gate check. This means `requested_stage: closeout` on an issue with no closeout comment will create the retrospective first, then the gate validates the full closeout conditions (merged PR, follow-up evidence, scaffold comment). The first run typically scaffolds the retrospective and then passes or fails the gate depending on whether the other conditions are met.
+Both entry points enforce the same closeout sequence: **pre-scaffold gate → scaffold → full gate**. The pre-scaffold gate (`check_mode: pre-scaffold`) verifies non-scaffold prerequisites (merged PR, branch deleted, follow-up evidence) before any scaffold comment is posted. If prerequisites are not met, the workflow fails without mutating any artifacts. Once the pre-scaffold gate passes, the closeout retrospective comment is created, and then the full gate validates scaffold content (headings, sections, process improvement dispositions).
 
 **Closeout template:** `templates/closeout.md` contains structured sections for the retrospective (delivery summary, what went well, what could improve, follow-up status, exit checklist) plus auto-populated merged PR list and follow-up counts.
 
