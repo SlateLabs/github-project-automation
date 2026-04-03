@@ -1,6 +1,8 @@
 name: Orchestration Dispatch
 
 on:
+  repository_dispatch:
+    types: [orchestration-start]
   workflow_dispatch:
     inputs:
       issue_number:
@@ -35,31 +37,142 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Normalize inputs
+        id: normalize
+        shell: bash
+        env:
+          TRIGGER: ${{ github.event_name }}
+          # workflow_dispatch inputs
+          WD_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          WD_REQUESTED_STAGE: ${{ inputs.requested_stage }}
+          WD_ACTOR: ${{ github.actor }}
+          # repository_dispatch client_payload (passed via env to avoid injection)
+          RD_ISSUE_NUMBER: ${{ github.event.client_payload.issue_number }}
+          RD_REQUESTED_STAGE: ${{ github.event.client_payload.requested_stage }}
+          RD_RUN_KEY: ${{ github.event.client_payload.run_key }}
+          RD_ACTOR: ${{ github.event.client_payload.actor }}
+          RD_TIMESTAMP: ${{ github.event.client_payload.timestamp }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          VALID_STAGES="kickoff clarification design plan execution follow-up-capture review merge closeout"
+
+          if [ "$TRIGGER" = "repository_dispatch" ]; then
+            # --- Validate repository_dispatch payload ---
+            errors=()
+
+            # issue_number: must be a positive integer
+            if [ -z "${RD_ISSUE_NUMBER:-}" ]; then
+              errors+=("missing required field: issue_number")
+            elif ! echo "$RD_ISSUE_NUMBER" | grep -qE '^[1-9][0-9]*$'; then
+              errors+=("issue_number must be a positive integer, got: '${RD_ISSUE_NUMBER}'")
+            fi
+
+            # requested_stage: must be a known stage
+            if [ -z "${RD_REQUESTED_STAGE:-}" ]; then
+              errors+=("missing required field: requested_stage")
+            else
+              stage_valid="false"
+              for s in $VALID_STAGES; do
+                if [ "$s" = "$RD_REQUESTED_STAGE" ]; then
+                  stage_valid="true"
+                  break
+                fi
+              done
+              if [ "$stage_valid" = "false" ]; then
+                errors+=("unknown requested_stage: '${RD_REQUESTED_STAGE}'")
+              fi
+            fi
+
+            # run_key: must match <owner>/<repo>/<number>/<stage>/<timestamp>
+            if [ -z "${RD_RUN_KEY:-}" ]; then
+              errors+=("missing required field: run_key")
+            elif ! echo "$RD_RUN_KEY" | grep -qE '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[0-9]+/[A-Za-z0-9_-]+/[0-9]+$'; then
+              errors+=("run_key does not match canonical format '<owner>/<repo>/<number>/<stage>/<timestamp>', got: '${RD_RUN_KEY}'")
+            fi
+
+            # actor: must be non-empty
+            if [ -z "${RD_ACTOR:-}" ]; then
+              errors+=("missing required field: actor")
+            fi
+
+            # timestamp: must be non-empty
+            if [ -z "${RD_TIMESTAMP:-}" ]; then
+              errors+=("missing required field: timestamp")
+            fi
+
+            if [ ${#errors[@]} -gt 0 ]; then
+              error_msg="repository_dispatch payload validation failed:"
+              for e in "${errors[@]}"; do
+                error_msg="${error_msg}\n- ${e}"
+              done
+              echo "::error::${error_msg}"
+
+              # Post diagnostic comment if issue_number is parseable
+              if echo "${RD_ISSUE_NUMBER:-}" | grep -qE '^[1-9][0-9]*$'; then
+                diagnostic="### Orchestration run — payload validation failed\n\n"
+                diagnostic+="The \`repository_dispatch\` payload for \`orchestration-start\` failed validation:\n\n"
+                for e in "${errors[@]}"; do
+                  diagnostic+="- ${e}\n"
+                done
+                diagnostic+="\nExpected payload: \`{ issue_number, requested_stage, run_key, actor, timestamp }\`"
+                echo -e "$diagnostic" | gh issue comment "${RD_ISSUE_NUMBER}" --body-file -
+              fi
+
+              exit 1
+            fi
+
+            # Normalized outputs for repository_dispatch
+            echo "issue_number=${RD_ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
+            echo "requested_stage=${RD_REQUESTED_STAGE}" >> "$GITHUB_OUTPUT"
+            echo "actor=${RD_ACTOR}" >> "$GITHUB_OUTPUT"
+            echo "trigger=repository_dispatch" >> "$GITHUB_OUTPUT"
+            echo "::notice::Normalized inputs from repository_dispatch (actor: ${RD_ACTOR}, issue: ${RD_ISSUE_NUMBER}, stage: ${RD_REQUESTED_STAGE})"
+          else
+            # --- workflow_dispatch: pass through existing inputs ---
+            echo "issue_number=${WD_ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
+            echo "requested_stage=${WD_REQUESTED_STAGE}" >> "$GITHUB_OUTPUT"
+            echo "actor=${WD_ACTOR}" >> "$GITHUB_OUTPUT"
+            echo "trigger=workflow_dispatch" >> "$GITHUB_OUTPUT"
+            echo "::notice::Normalized inputs from workflow_dispatch (actor: ${WD_ACTOR}, issue: ${WD_ISSUE_NUMBER}, stage: ${WD_REQUESTED_STAGE})"
+          fi
+
       - name: Generate run key
         id: run-key
         shell: bash
         env:
+          TRIGGER: ${{ steps.normalize.outputs.trigger }}
           REPO_NAME: ${{ github.repository }}
-          ISSUE_NUM: ${{ inputs.issue_number }}
-          STAGE: ${{ inputs.requested_stage }}
+          ISSUE_NUM: ${{ steps.normalize.outputs.issue_number }}
+          STAGE: ${{ steps.normalize.outputs.requested_stage }}
+          RD_RUN_KEY: ${{ github.event.client_payload.run_key }}
         run: |
-          timestamp=$(date +%s%3N)
-          run_key="${REPO_NAME}/${ISSUE_NUM}/${STAGE}/${timestamp}"
+          if [ "$TRIGGER" = "repository_dispatch" ]; then
+            # Preserve gateway-provided run key
+            run_key="$RD_RUN_KEY"
+            # Extract timestamp from run key (last segment) for logging
+            timestamp=$(echo "$run_key" | rev | cut -d/ -f1 | rev)
+          else
+            # Generate fresh run key for manual trigger
+            timestamp=$(date +%s%3N)
+            run_key="${REPO_NAME}/${ISSUE_NUM}/${STAGE}/${timestamp}"
+          fi
           echo "run_key=$run_key" >> "$GITHUB_OUTPUT"
           echo "timestamp=$timestamp" >> "$GITHUB_OUTPUT"
-          echo "::notice::Run key: $run_key"
+          echo "::notice::Run key: $run_key (source: $TRIGGER)"
 
       - name: Check for recent duplicate run
         id: dedup
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_NUMBER: ${{ steps.normalize.outputs.issue_number }}
           REPO_NAME: ${{ github.repository }}
-          REQUESTED_STAGE: ${{ inputs.requested_stage }}
+          REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
           RUN_KEY: ${{ steps.run-key.outputs.run_key }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          ACTOR: ${{ github.actor }}
+          ACTOR: ${{ steps.normalize.outputs.actor }}
           RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -168,21 +281,21 @@ jobs:
         id: eligibility
         uses: ./.github/actions/validate-eligibility
         with:
-          issue_number: ${{ inputs.issue_number }}
-          requested_stage: ${{ inputs.requested_stage }}
-          actor: ${{ github.actor }}
+          issue_number: ${{ steps.normalize.outputs.issue_number }}
+          requested_stage: ${{ steps.normalize.outputs.requested_stage }}
+          actor: ${{ steps.normalize.outputs.actor }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Post ineligible comment
         if: steps.dedup.outputs.duplicate != 'true' && steps.eligibility.outputs.eligible != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_NUMBER: ${{ steps.normalize.outputs.issue_number }}
           RUN_KEY: ${{ steps.run-key.outputs.run_key }}
           REASON: ${{ steps.eligibility.outputs.reason }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          REQUESTED_STAGE: ${{ inputs.requested_stage }}
-          ACTOR: ${{ github.actor }}
+          REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
+          ACTOR: ${{ steps.normalize.outputs.actor }}
           RUN_ID: ${{ github.run_id }}
         shell: bash
         run: |
@@ -215,40 +328,40 @@ jobs:
       # The gate validates discussion quality (headings, open questions, review)
       # against the existing or just-created discussion.
       - name: Scaffold design discussion (pre-gate)
-        if: steps.eligibility.outputs.eligible == 'true' && inputs.requested_stage == 'design'
+        if: steps.eligibility.outputs.eligible == 'true' && steps.normalize.outputs.requested_stage == 'design'
         id: scaffold-discussion
         uses: ./.github/actions/scaffold-design-discussion
         with:
-          issue_number: ${{ inputs.issue_number }}
+          issue_number: ${{ steps.normalize.outputs.issue_number }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           run_key: ${{ steps.run-key.outputs.run_key }}
-          actor: ${{ github.actor }}
+          actor: ${{ steps.normalize.outputs.actor }}
 
       # For the plan stage, scaffold the plan comment BEFORE the gate check.
       # The gate validates plan structure (headings, checklists, review expectations)
       # against the existing or just-created plan comment.
       - name: Scaffold implementation plan (pre-gate)
-        if: steps.eligibility.outputs.eligible == 'true' && inputs.requested_stage == 'plan'
+        if: steps.eligibility.outputs.eligible == 'true' && steps.normalize.outputs.requested_stage == 'plan'
         id: scaffold-plan
         uses: ./.github/actions/scaffold-impl-plan
         with:
-          issue_number: ${{ inputs.issue_number }}
+          issue_number: ${{ steps.normalize.outputs.issue_number }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           run_key: ${{ steps.run-key.outputs.run_key }}
-          actor: ${{ github.actor }}
+          actor: ${{ steps.normalize.outputs.actor }}
 
       # For the execution stage, scaffold branch + draft PR BEFORE the gate check.
       # The gate validates execution artifacts (branch exists, PR exists, required headings)
       # against the existing or just-created PR.
       - name: Scaffold execution bootstrap (pre-gate)
-        if: steps.eligibility.outputs.eligible == 'true' && inputs.requested_stage == 'execution'
+        if: steps.eligibility.outputs.eligible == 'true' && steps.normalize.outputs.requested_stage == 'execution'
         id: scaffold-execution
         uses: ./.github/actions/scaffold-execution
         with:
-          issue_number: ${{ inputs.issue_number }}
+          issue_number: ${{ steps.normalize.outputs.issue_number }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           run_key: ${{ steps.run-key.outputs.run_key }}
-          actor: ${{ github.actor }}
+          actor: ${{ steps.normalize.outputs.actor }}
 
       # For the closeout stage, enforce pre-scaffold prerequisites BEFORE
       # scaffolding. This matches the standalone scaffold-closeout.yml sequence:
@@ -256,11 +369,11 @@ jobs:
       # full gate (content checks). Without this, the orchestration path could
       # post a closeout retrospective on an issue that hasn't met prerequisites.
       - name: Pre-scaffold gate check (closeout)
-        if: steps.eligibility.outputs.eligible == 'true' && inputs.requested_stage == 'closeout'
+        if: steps.eligibility.outputs.eligible == 'true' && steps.normalize.outputs.requested_stage == 'closeout'
         id: closeout-pre-gate
         uses: ./.github/actions/check-gate
         with:
-          issue_number: ${{ inputs.issue_number }}
+          issue_number: ${{ steps.normalize.outputs.issue_number }}
           requested_stage: closeout
           issue_body: ${{ steps.eligibility.outputs.issue_body }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -270,14 +383,14 @@ jobs:
         if: steps.closeout-pre-gate.outputs.gate_passed == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_NUMBER: ${{ steps.normalize.outputs.issue_number }}
           RUN_KEY: ${{ steps.run-key.outputs.run_key }}
           UNMET: ${{ steps.closeout-pre-gate.outputs.unmet_conditions }}
           WAIVED: ${{ steps.closeout-pre-gate.outputs.waived_conditions }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          ACTOR: ${{ github.actor }}
+          ACTOR: ${{ steps.normalize.outputs.actor }}
           RUN_ID: ${{ github.run_id }}
-          REQUESTED_STAGE: ${{ inputs.requested_stage }}
+          REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
         shell: bash
         run: |
           unmet_list=$(echo "$UNMET" | jq -r '.[] | "- :x: \(.)"' 2>/dev/null || echo "- (none)")
@@ -315,14 +428,14 @@ jobs:
           exit 1
 
       - name: Scaffold closeout retrospective (pre-gate)
-        if: steps.eligibility.outputs.eligible == 'true' && inputs.requested_stage == 'closeout' && steps.closeout-pre-gate.outputs.gate_passed != 'false'
+        if: steps.eligibility.outputs.eligible == 'true' && steps.normalize.outputs.requested_stage == 'closeout' && steps.closeout-pre-gate.outputs.gate_passed != 'false'
         id: scaffold-closeout
         uses: ./.github/actions/scaffold-closeout
         with:
-          issue_number: ${{ inputs.issue_number }}
+          issue_number: ${{ steps.normalize.outputs.issue_number }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           run_key: ${{ steps.run-key.outputs.run_key }}
-          actor: ${{ github.actor }}
+          actor: ${{ steps.normalize.outputs.actor }}
 
       # For the follow-up-capture stage, run the capture action AFTER the gate
       # check passes (unlike design/plan/execution which scaffold BEFORE the gate).
@@ -334,8 +447,8 @@ jobs:
         if: steps.eligibility.outputs.eligible == 'true'
         uses: ./.github/actions/check-gate
         with:
-          issue_number: ${{ inputs.issue_number }}
-          requested_stage: ${{ inputs.requested_stage }}
+          issue_number: ${{ steps.normalize.outputs.issue_number }}
+          requested_stage: ${{ steps.normalize.outputs.requested_stage }}
           issue_body: ${{ steps.eligibility.outputs.issue_body }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           trust_policy_path: config/trust-policy.yml
@@ -344,13 +457,13 @@ jobs:
         if: steps.gate.outputs.gate_passed != 'true' && steps.eligibility.outputs.eligible == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_NUMBER: ${{ steps.normalize.outputs.issue_number }}
           RUN_KEY: ${{ steps.run-key.outputs.run_key }}
           UNMET: ${{ steps.gate.outputs.unmet_conditions }}
           WAIVED: ${{ steps.gate.outputs.waived_conditions }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          REQUESTED_STAGE: ${{ inputs.requested_stage }}
-          ACTOR: ${{ github.actor }}
+          REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
+          ACTOR: ${{ steps.normalize.outputs.actor }}
           RUN_ID: ${{ github.run_id }}
         shell: bash
         run: |
@@ -382,7 +495,7 @@ jobs:
       - name: Fail on gate not passed
         if: steps.gate.outputs.gate_passed != 'true' && steps.eligibility.outputs.eligible == 'true'
         env:
-          REQUESTED_STAGE: ${{ inputs.requested_stage }}
+          REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
         shell: bash
         run: |
           echo "::error::Gate conditions not met for stage '$REQUESTED_STAGE'"
@@ -394,12 +507,12 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_NUMBER: ${{ steps.normalize.outputs.issue_number }}
           RUN_KEY: ${{ steps.run-key.outputs.run_key }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          ACTOR: ${{ github.actor }}
+          ACTOR: ${{ steps.normalize.outputs.actor }}
           RUN_ID: ${{ github.run_id }}
-          REQUESTED_STAGE: ${{ inputs.requested_stage }}
+          REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
         run: |
           # §Idempotency — Manual path dedup obligations, rule 2: current-state check
           # Verify the issue hasn't changed since the run started (still open, no
@@ -444,12 +557,12 @@ jobs:
         if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_NUMBER: ${{ steps.normalize.outputs.issue_number }}
           RUN_KEY: ${{ steps.run-key.outputs.run_key }}
           WAIVED: ${{ steps.gate.outputs.waived_conditions }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          REQUESTED_STAGE: ${{ inputs.requested_stage }}
-          ACTOR: ${{ github.actor }}
+          REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
+          ACTOR: ${{ steps.normalize.outputs.actor }}
           RUN_ID: ${{ github.run_id }}
         shell: bash
         run: |
@@ -480,21 +593,21 @@ jobs:
       # and execution is complete. Unlike pre-gate scaffolds, this runs AFTER
       # the gate passes because it creates external artifacts (new issues).
       - name: Capture follow-ups (post-gate)
-        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && inputs.requested_stage == 'follow-up-capture'
+        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && steps.normalize.outputs.requested_stage == 'follow-up-capture'
         id: capture-follow-ups
         uses: ./.github/actions/capture-follow-ups
         with:
-          issue_number: ${{ inputs.issue_number }}
+          issue_number: ${{ steps.normalize.outputs.issue_number }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           run_key: ${{ steps.run-key.outputs.run_key }}
-          actor: ${{ github.actor }}
+          actor: ${{ steps.normalize.outputs.actor }}
 
       - name: Query run history
         if: always()
         id: run-history
         uses: ./.github/actions/query-run-history
         with:
-          issue_number: ${{ inputs.issue_number }}
+          issue_number: ${{ steps.normalize.outputs.issue_number }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Job summary
@@ -503,10 +616,11 @@ jobs:
           RUN_KEY: ${{ steps.run-key.outputs.run_key }}
           ELIGIBLE: ${{ steps.eligibility.outputs.eligible }}
           GATE_PASSED: ${{ steps.gate.outputs.gate_passed }}
-          ISSUE_NUMBER: ${{ inputs.issue_number }}
-          REQUESTED_STAGE: ${{ inputs.requested_stage }}
-          ACTOR: ${{ github.actor }}
+          ISSUE_NUMBER: ${{ steps.normalize.outputs.issue_number }}
+          REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
+          ACTOR: ${{ steps.normalize.outputs.actor }}
           REPO: ${{ github.repository }}
+          TRIGGER: ${{ steps.normalize.outputs.trigger }}
           RUN_HISTORY: ${{ steps.run-history.outputs.run_history }}
         shell: bash
         run: |
@@ -549,6 +663,7 @@ jobs:
             echo "| Run key | \`$RUN_KEY\` |"
             echo "| Issue | [#$ISSUE_NUMBER](https://github.com/$REPO/issues/$ISSUE_NUMBER) |"
             echo "| Previous run | $previous_run_value |"
+            echo "| Trigger | \`$TRIGGER\` |"
             echo "| Stage | \`$REQUESTED_STAGE\` |"
             echo "| Actor | $ACTOR |"
             echo "| Eligible | $ELIGIBLE |"

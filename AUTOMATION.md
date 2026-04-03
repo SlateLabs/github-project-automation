@@ -42,7 +42,54 @@ tests/                — automated coverage for gateway and contract logic
 | Manual kickoff | `workflow_dispatch` in participating repo | Operator provides `issue_number` and `requested_stage`; workflow validates eligibility and gates |
 | Webhook gateway | `projects_v2_item` org event → Cloud Run → `repository_dispatch` | Automated trigger when project item status changes (issue #2) |
 
-Both paths converge on the same gate-checking logic. Eligibility validation is shared but not yet at full parity: the manual path validates issue state, actor trust, labels, and body content; the webhook gateway path will additionally validate live project-field state (Status transition, Repository mapping, project linkage) once implemented (see [issue #9](https://github.com/SlateLabs/github-project-automation/issues/9)).
+Both paths converge on the same orchestration workflow (`orchestration-dispatch.yml`). An input normalization step at the top of the workflow resolves inputs from either `workflow_dispatch` inputs or `repository_dispatch` client_payload, so all downstream steps (dedup, eligibility, gate checks, scaffolds, comments) execute identically regardless of trigger source.
+
+### `repository_dispatch` consumer
+
+The orchestration workflow accepts `repository_dispatch` events with `event_type: orchestration-start`. This is the automated entry point used by the webhook gateway (Slice 8).
+
+**Payload contract:**
+
+```json
+{
+  "event_type": "orchestration-start",
+  "client_payload": {
+    "issue_number": 42,
+    "requested_stage": "kickoff",
+    "run_key": "SlateLabs/github-project-automation/42/kickoff/1711234567890",
+    "actor": "jflamb",
+    "timestamp": "1711234567890"
+  }
+}
+```
+
+**Field validation (enforced at workflow start):**
+
+| Field | Type | Validation |
+|-------|------|------------|
+| `issue_number` | integer | Positive integer (`>= 1`) |
+| `requested_stage` | string | One of: `kickoff`, `clarification`, `design`, `plan`, `execution`, `follow-up-capture`, `review`, `merge`, `closeout` |
+| `run_key` | string | Matches `<owner>/<repo>/<number>/<stage>/<timestamp>` format |
+| `actor` | string | Non-empty |
+| `timestamp` | string | Non-empty |
+
+On validation failure, the workflow posts a diagnostic comment on the issue (if `issue_number` is parseable) listing all validation errors, then exits with a non-zero status.
+
+**Run key preservation:** When triggered via `repository_dispatch`, the workflow uses the gateway-provided `run_key` directly instead of generating a new one. This preserves end-to-end correlation: gateway structured log → dispatch → orchestration issue comments all share the same run key.
+
+**Manual simulation:**
+
+```bash
+gh api repos/SlateLabs/github-project-automation/dispatches \
+  -f event_type=orchestration-start \
+  -f 'client_payload[issue_number]=42' \
+  -f 'client_payload[requested_stage]=kickoff' \
+  -f 'client_payload[run_key]=SlateLabs/github-project-automation/42/kickoff/1711234567890' \
+  -f 'client_payload[actor]=jflamb' \
+  -f 'client_payload[timestamp]=1711234567890'
+```
+
+Eligibility validation is shared but not yet at full parity: the manual path validates issue state, actor trust, labels, and body content; the webhook gateway path will additionally validate live project-field state (Status transition, Repository mapping, project linkage) once implemented (see [issue #9](https://github.com/SlateLabs/github-project-automation/issues/9)).
 
 ## Webhook gateway contract
 
@@ -125,10 +172,12 @@ Every gateway outcome emits JSON including:
 
 ### Local verification
 
-Run the gateway tests and the existing config validation with:
+Run the gateway tests, dispatch normalization tests, and config validation with:
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_*.py'
+bash tests/test_dispatch_normalization.sh
+bash tests/test_workflow_structure.sh
 python3 scripts/validate-config.py
 ```
 
