@@ -409,6 +409,36 @@ runs:
             fi
             ;;
 
+          follow-up-capture)
+            # Gate: Follow-up capture (discussion #3 §10, §14 Slice 5)
+            # Conditions:
+            #   1. At least one <!-- FOLLOW-UP: ... --> marker exists in issue comments
+            #   2. A merged PR referencing this issue exists (execution is complete)
+
+            # 1. Check for FOLLOW-UP markers in comments
+            followup_comments_json=$(gh issue view "$ISSUE_NUMBER" --comments --json comments 2>/dev/null || echo '{"comments":[]}')
+            followup_marker_count=$(echo "$followup_comments_json" | jq '[.comments[].body // "" | test("<!--\\s*FOLLOW-UP:")] | map(select(.)) | length')
+
+            if [ "$followup_marker_count" -eq 0 ]; then
+              if ! check_waiver "follow-up-capture-markers"; then
+                unmet+=("No <!-- FOLLOW-UP: ... --> markers found in issue comments — add markers before running follow-up capture")
+              fi
+            fi
+
+            # 2. Check for a merged PR referencing this issue
+            merged_prs=$(gh pr list --state merged --search "issue:${ISSUE_NUMBER}" --json number --jq 'length' 2>/dev/null || echo "0")
+            if [ "$merged_prs" -eq 0 ]; then
+              # Fallback: check for merged PRs with branch matching <issue-number>-*
+              merged_branch_prs=$(gh pr list --state merged --json number,headRefName \
+                --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))] | length" 2>/dev/null || echo "0")
+              if [ "$merged_branch_prs" -eq 0 ]; then
+                if ! check_waiver "follow-up-capture-merged-pr"; then
+                  unmet+=("No merged PR found referencing issue #${ISSUE_NUMBER} — execution must be complete before capturing follow-ups")
+                fi
+              fi
+            fi
+            ;;
+
           review|merge|closeout)
             # §4 Gate implementation contract, rule 1: unimplemented gates must reject.
             # Full checks (CI status, approvals, merge state) depend on Slice 4 creating
