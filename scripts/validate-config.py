@@ -121,12 +121,40 @@ def validate_templates():
     print("templates/design-discussion.md: OK")
 
 
+def validate_plan_template():
+    """Validate that the implementation plan template exists and contains expected headings."""
+    plan_template = REPO_ROOT / "templates" / "implementation-plan.md"
+    if not plan_template.exists():
+        errors.append(f"templates/implementation-plan.md: file not found at {plan_template}")
+        return
+
+    content = plan_template.read_text()
+
+    # Required headings per discussion #3 §4 (plan gate, Gate 4→5)
+    required_headings = [
+        "## Implementation Plan",
+        "## Acceptance Criteria",
+        "## Verification Plan",
+        "## Review Expectations",
+        "## Slices",
+    ]
+    missing = [h for h in required_headings if h not in content]
+    if missing:
+        errors.append(
+            f"templates/implementation-plan.md: missing required headings: {missing}"
+        )
+        return
+
+    print("templates/implementation-plan.md: OK")
+
+
 def main():
     print("Validating configuration files...\n")
 
     validate_trust_policy()
     validate_repos_config()
     validate_templates()
+    validate_plan_template()
 
     print()
     if errors:

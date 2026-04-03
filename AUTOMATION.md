@@ -85,6 +85,35 @@ When triggered via orchestration, the scaffold runs **before** the design gate c
 
 **Permissions required:** `contents: read`, `issues: write`, `discussions: write`
 
+### Implementation plan scaffold
+
+**Trigger:** `workflow_dispatch` via the standalone workflow or automatically via `orchestration-dispatch` when `requested_stage: plan`.
+
+**What it does:**
+1. Discovers whether a plan comment already exists using two-tier owned-artifact lookup:
+   - **Tier 1:** Owned-artifact marker (`<!-- gpa:owned-artifact:impl-plan:REPO#N -->`) embedded in the plan comment itself (rendered from the template)
+   - **Tier 2:** Issue comment containing `## Implementation Plan` heading (user-placed)
+   - Status comments use a distinct marker (`<!-- gpa:impl-plan-status:#N -->`) and are **not** treated as the plan artifact
+2. If no plan comment exists: renders `templates/implementation-plan.md` with issue metadata and posts it as an issue comment with an owned-artifact marker
+3. If a plan comment already exists: skips creation and posts an informational status comment
+
+**Standalone usage:**
+```
+gh workflow run scaffold-impl-plan.yml -f issue_number=<N>
+```
+
+**Via orchestration:**
+```
+gh workflow run orchestration-dispatch.yml -f issue_number=<N> -f requested_stage=plan
+```
+When triggered via orchestration, the scaffold runs **before** the plan gate check. This means `requested_stage: plan` on an issue with no plan comment will create the comment first, then the gate validates its structure (headings present, checklists populated, review dispositions listed, slices numbered). The first run typically scaffolds the plan and then fails the gate — the operator fills in the plan and re-triggers to pass.
+
+**Plan template:** `templates/implementation-plan.md` contains all headings required by the plan gate (Implementation Plan, Acceptance Criteria, Verification Plan, Review Expectations, Slices) plus exit criteria.
+
+**Idempotency:** The scaffold identifies its own output via the owned-artifact marker (`<!-- gpa:owned-artifact:impl-plan:REPO#N -->`) embedded in the plan comment itself. Status comments posted alongside the plan use a distinct marker (`<!-- gpa:impl-plan-status:#N -->`) and are never mistaken for the plan artifact. Running the scaffold twice for the same issue will not create a duplicate. Unlike the design scaffold, no orphan recovery tier is needed because plan comments live directly on the issue and cannot be orphaned.
+
+**Permissions required:** `contents: read`, `issues: write`
+
 ## Operator actions
 
 | Action | How |
@@ -92,5 +121,6 @@ When triggered via orchestration, the scaffold runs **before** the design gate c
 | View run status | Check automation comment on the issue, or Actions run |
 | Retry failed run | Re-trigger via `workflow_dispatch` with issue number and target stage |
 | Scaffold a design discussion | `gh workflow run scaffold-design-discussion.yml -f issue_number=<N>` |
+| Scaffold an implementation plan | `gh workflow run scaffold-impl-plan.yml -f issue_number=<N>` |
 | Waive a gate | Post `GATE-WAIVER: <gate-name> — <reason>` on the issue/PR |
 | Block automation | Add `do-not-automate` label to the issue |
