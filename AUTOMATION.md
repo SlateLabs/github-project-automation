@@ -19,8 +19,8 @@ config/
 templates/            — shared prompt/scaffold templates
 scripts/              — validation and utility scripts
 .github/
-  workflows/          — orchestration workflows (dispatch, reusable)
-  actions/            — composite actions (validate-eligibility, check-gate)
+  workflows/          — orchestration workflows (dispatch, standalone, retry)
+  actions/            — composite actions (validate-eligibility, check-gate, query-run-history, scaffolds)
 ```
 
 ## How participating repos integrate
@@ -83,6 +83,8 @@ When triggered via orchestration, the scaffold runs **before** the design gate c
 
 **Idempotency:** The scaffold uses an owned-artifact marker (`<!-- gpa:design-discussion:#N -->`) to identify its own output. Unrelated discussion URLs mentioned in issue comments do not suppress creation. Running the scaffold twice for the same issue will not create a duplicate. Partial failure between discussion creation and backlink comment is recoverable: the scaffold searches for orphaned discussions by source-issue marker in the discussion body.
 
+**Check-before-act guard:** Before creating a discussion (the mutation), the scaffold re-verifies that the source issue is still open and does not have the `do-not-automate` label. If the issue state changed after eligibility validation, the scaffold aborts without creating any artifacts.
+
 **Permissions required:** `contents: read`, `issues: write`, `discussions: write`
 
 ### Implementation plan scaffold
@@ -111,6 +113,8 @@ When triggered via orchestration, the scaffold runs **before** the plan gate che
 **Plan template:** `templates/implementation-plan.md` contains all headings required by the plan gate (Implementation Plan, Acceptance Criteria, Verification Plan, Review Expectations, Slices) plus exit criteria.
 
 **Idempotency:** The scaffold identifies its own output via the owned-artifact marker (`<!-- gpa:owned-artifact:impl-plan:REPO#N -->`) embedded in the plan comment itself. Status comments posted alongside the plan use a distinct marker (`<!-- gpa:impl-plan-status:#N -->`) and are never mistaken for the plan artifact. Running the scaffold twice for the same issue will not create a duplicate. Unlike the design scaffold, no orphan recovery tier is needed because plan comments live directly on the issue and cannot be orphaned.
+
+**Check-before-act guard:** Before posting the plan comment (the mutation), the scaffold re-verifies that the source issue is still open and does not have the `do-not-automate` label. If the issue state changed after eligibility validation, the scaffold aborts without creating any artifacts.
 
 **Permissions required:** `contents: read`, `issues: write`
 
@@ -282,7 +286,8 @@ All three gates support `GATE-WAIVER` override by trusted actors (per `config/tr
 | Action | How |
 |--------|-----|
 | View run status | Check automation comment on the issue, or Actions run |
-| Retry failed run | Re-trigger via `workflow_dispatch` with issue number and target stage |
+| Query run history | Use the `query-run-history` action (see [Run history](#query-run-history) below) |
+| Retry failed run | `gh workflow run retry-stage.yml -f issue_number=<N> -f target_stage=<stage>` |
 | Scaffold a design discussion | `gh workflow run scaffold-design-discussion.yml -f issue_number=<N>` |
 | Scaffold an implementation plan | `gh workflow run scaffold-impl-plan.yml -f issue_number=<N>` |
 | Scaffold execution bootstrap | `gh workflow run scaffold-execution.yml -f issue_number=<N>` |
@@ -290,3 +295,164 @@ All three gates support `GATE-WAIVER` override by trusted actors (per `config/tr
 | Scaffold closeout retrospective | `gh workflow run scaffold-closeout.yml -f issue_number=<N>` |
 | Waive a gate | Post `GATE-WAIVER: <gate-name> — <reason>` on the issue/PR |
 | Block automation | Add `do-not-automate` label to the issue |
+
+### Query run history
+
+The `query-run-history` composite action scans issue comments for machine-readable run-status markers (`<!-- gpa:run-status:STAGE:OUTCOME:RUN_KEY -->`) and outputs structured JSON. It is read-only and makes no mutations.
+
+**Inputs:** `issue_number`, `github_token`
+
+**Outputs:**
+- `run_history` — JSON array of `{stage, outcome, run_key, timestamp, actor, comment_url}` records, sorted by timestamp descending
+- `run_count` — total number of run-status markers found
+- `latest_run_key` — run key from the most recent marker
+
+**Marker format:**
+```
+<!-- gpa:run-status:STAGE:OUTCOME:RUN_KEY -->
+```
+Where `OUTCOME` is one of: `started`, `completed`, `skipped`, `failed`.
+
+All automation comments (scaffold actions, orchestration dispatch, retry-stage) include these markers. The markers are HTML comments and invisible in rendered markdown.
+
+### Retry stage workflow
+
+The `retry-stage.yml` workflow provides a single entry point for retrying any failed stage. It validates eligibility, maps the target stage to the correct standalone workflow, and dispatches it.
+
+**Usage:**
+```bash
+gh workflow run retry-stage.yml -f issue_number=<N> -f target_stage=<stage>
+```
+
+**Valid stages:** `design`, `plan`, `execution`, `follow-up-capture`, `closeout`
+
+**Stage-to-workflow mapping:**
+
+| Stage | Dispatched workflow |
+|-------|-------------------|
+| `design` | `scaffold-design-discussion.yml` |
+| `plan` | `scaffold-impl-plan.yml` |
+| `execution` | `scaffold-execution.yml` |
+| `follow-up-capture` | `capture-follow-ups.yml` |
+| `closeout` | `scaffold-closeout.yml` |
+
+The retry workflow validates eligibility before dispatching (issue must be open, no `do-not-automate` label, actor must be trusted). The dispatched workflow runs independently and posts its own status comment.
+
+## Operator Runbook
+
+### Checking automation status for an issue
+
+1. **Quick check:** Look at the issue's comment thread for automation status comments. Each run posts a structured comment with a run key, result (checkmark/X/warning), and outcome details.
+
+2. **Structured query:** Use the `query-run-history` action to get a JSON array of all runs:
+   ```bash
+   # In a workflow step:
+   - uses: ./.github/actions/query-run-history
+     with:
+       issue_number: 42
+       github_token: ${{ secrets.GITHUB_TOKEN }}
+   ```
+
+3. **Actions tab:** Go to the Actions tab and filter by workflow name. Each workflow run's job summary includes a clickable link back to the source issue and next-step guidance.
+
+4. **Run key format:** `REPO/ISSUE_NUMBER/STAGE_SLUG/TIMESTAMP_MS` — e.g., `SlateLabs/github-project-automation/42/design-scaffold/1711234567890`. The timestamp is milliseconds since epoch.
+
+### Retrying a failed stage
+
+**Option 1 — Retry workflow (recommended):**
+```bash
+gh workflow run retry-stage.yml \
+  -f issue_number=42 \
+  -f target_stage=design
+```
+This validates eligibility and dispatches the correct stage workflow.
+
+**Option 2 — Direct dispatch:**
+```bash
+gh workflow run scaffold-design-discussion.yml -f issue_number=42
+```
+Skip the retry wrapper and invoke the stage workflow directly. Same eligibility checks apply.
+
+**Option 3 — Orchestration dispatch:**
+```bash
+gh workflow run orchestration-dispatch.yml \
+  -f issue_number=42 \
+  -f requested_stage=design
+```
+Routes through the full orchestration engine (dedup check, gate check, state verification).
+
+### Overriding a gate (GATE-WAIVER)
+
+When a gate condition cannot be met (e.g., a CI check is flaky, a review is not yet possible), a trusted actor can post a waiver comment on the issue:
+
+```
+GATE-WAIVER: <gate-name> — <reason>
+```
+
+**Requirements:**
+- The commenter must be listed in `config/trust-policy.yml` under `trusted_users`
+- The gate name must match the specific condition key (case-insensitive)
+- The `— <reason>` part is required for auditability
+
+**Common gate names:**
+
+| Gate | Waiver key |
+|------|-----------|
+| Review approval | `review-approval` |
+| Changes requested | `review-changes-requested` |
+| Review PR exists | `review-pr` |
+| Merged PR | `merge-pr` |
+| Merge approval | `merge-approval` |
+| Closeout merged PR | `closeout-merged-pr` |
+| Closeout branch deleted | `closeout-branch-deleted` |
+| Closeout follow-ups | `closeout-follow-ups` |
+| Closeout scaffold | `closeout-scaffold` |
+| Closeout heading | `closeout-heading` |
+| Closeout deferred work | `closeout-deferred-work` |
+| Closeout process improvement | `closeout-process-improvement` |
+| Closeout PI dispositions | `closeout-process-improvement-dispositions` |
+| Dedup override | `dedup` |
+
+**Example:**
+```
+GATE-WAIVER: review-approval — PR was pair-programmed and self-reviewed; external review deferred to next slice
+```
+
+### Blocking automation (`do-not-automate` label)
+
+Add the `do-not-automate` label to any issue to prevent all automation actions:
+- Eligibility validation rejects the issue immediately
+- All scaffold actions check for the label before mutations (check-before-act guard)
+- The orchestration dispatch verifies the label hasn't been added mid-run (state check)
+- The label can be removed to re-enable automation
+
+### Diagnosing a stalled run
+
+1. **Check the Actions tab:** Find the most recent workflow run for the issue. The job summary shows the outcome and any error details.
+
+2. **Check issue comments:** Look for the most recent automation comment. The run key links to the specific Actions run.
+
+3. **Common stall patterns:**
+
+   | Symptom | Likely cause | Resolution |
+   |---------|-------------|------------|
+   | No automation comments | Eligibility failed (closed issue, missing label, untrusted actor) | Check issue state and `config/trust-policy.yml` |
+   | "Gate conditions not met" | Gate prerequisites missing | Read the unmet conditions list; either fulfill them or post a GATE-WAIVER |
+   | "Skipped (duplicate)" | Dedup window active | Wait 60s and re-trigger, or post `GATE-WAIVER: dedup — <reason>` |
+   | "Superseded (state mismatch)" | Issue was closed or labeled during the run | Re-open the issue or remove the label, then re-trigger |
+   | "Ineligible" with no clear reason | Actor not in trusted_users | Add the actor to `config/trust-policy.yml` |
+
+4. **Run-status markers:** Search for `<!-- gpa:run-status:` in issue comments to see the machine-readable history of all runs, including their outcomes.
+
+### Run key format reference
+
+```
+<repo-owner>/<repo-name>/<issue-number>/<stage-slug>/<timestamp-ms>
+```
+
+- **repo-owner/repo-name**: e.g., `SlateLabs/github-project-automation`
+- **issue-number**: the source issue
+- **stage-slug**: matches the workflow purpose (e.g., `design-scaffold`, `plan-scaffold`, `execution-scaffold`, `follow-up-capture`, `closeout`, `retry-design`)
+- **timestamp-ms**: milliseconds since epoch when the run started
+
+Search the Actions tab with the run key to find the exact workflow run.

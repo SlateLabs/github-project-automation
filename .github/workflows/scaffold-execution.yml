@@ -55,6 +55,7 @@ jobs:
         run: |
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Execution bootstrap scaffold — ineligible
+          <!-- gpa:run-status:execution:failed:$RUN_KEY -->
 
           | Field | Value |
           |-------|-------|
@@ -96,6 +97,7 @@ jobs:
           CREATED: ${{ steps.scaffold.outputs.created }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
         shell: bash
         run: |
           {
@@ -104,11 +106,17 @@ jobs:
             echo "| Field | Value |"
             echo "|-------|-------|"
             echo "| Run key | \`$RUN_KEY\` |"
-            echo "| Issue | #$ISSUE_NUMBER |"
+            echo "| Issue | [#$ISSUE_NUMBER](https://github.com/$REPO/issues/$ISSUE_NUMBER) |"
             echo "| Actor | $ACTOR |"
             echo "| Eligible | $ELIGIBLE |"
             echo "| PR | ${PR_URL:-n/a} |"
             echo "| PR number | ${PR_NUMBER:-n/a} |"
             echo "| Branch | ${BRANCH_NAME:-n/a} |"
             echo "| Created | ${CREATED:-n/a} |"
+            echo ""
+            echo "### Next steps"
+            echo ""
+            echo "- Implement the feature on the \`${BRANCH_NAME:-feature}\` branch"
+            echo "- Fill in PR body sections and mark ready for review"
+            echo "- Re-trigger \`orchestration-dispatch\` with \`requested_stage: execution\` to pass the gate"
           } >> "$GITHUB_STEP_SUMMARY"

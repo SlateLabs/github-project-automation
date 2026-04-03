@@ -55,6 +55,7 @@ jobs:
         run: |
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Design discussion scaffold — ineligible
+          <!-- gpa:run-status:design:failed:$RUN_KEY -->
 
           | Field | Value |
           |-------|-------|
@@ -94,6 +95,7 @@ jobs:
           CREATED: ${{ steps.scaffold.outputs.created }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
         shell: bash
         run: |
           {
@@ -102,9 +104,15 @@ jobs:
             echo "| Field | Value |"
             echo "|-------|-------|"
             echo "| Run key | \`$RUN_KEY\` |"
-            echo "| Issue | #$ISSUE_NUMBER |"
+            echo "| Issue | [#$ISSUE_NUMBER](https://github.com/$REPO/issues/$ISSUE_NUMBER) |"
             echo "| Actor | $ACTOR |"
             echo "| Eligible | $ELIGIBLE |"
             echo "| Discussion URL | ${DISCUSSION_URL:-n/a} |"
             echo "| Created | ${CREATED:-n/a} |"
+            echo ""
+            echo "### Next steps"
+            echo ""
+            echo "- Fill in the design discussion with all required gate headings"
+            echo "- Resolve open questions and get at least one review comment"
+            echo "- Re-trigger \`orchestration-dispatch\` with \`requested_stage: design\` to pass the gate"
           } >> "$GITHUB_STEP_SUMMARY"

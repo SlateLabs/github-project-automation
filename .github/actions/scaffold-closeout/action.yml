@@ -101,6 +101,7 @@ runs:
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
         ### Closeout scaffold — already exists
         <!-- $status_marker -->
+        <!-- gpa:run-status:closeout:skipped:$RUN_KEY -->
 
         $table_rows
 
@@ -219,6 +220,7 @@ runs:
         gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
         ### Closeout scaffold — created
         <!-- $status_marker -->
+        <!-- gpa:run-status:closeout:completed:$RUN_KEY -->
 
         $table_rows
 

@@ -54,6 +54,7 @@ jobs:
         run: |
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Follow-up capture — ineligible
+          <!-- gpa:run-status:follow-up-capture:failed:$RUN_KEY -->
 
           | Field | Value |
           |-------|-------|
@@ -100,6 +101,7 @@ jobs:
           unmet_list=$(echo "$UNMET" | jq -r '.[] | "- " + .' 2>/dev/null || echo "- (none)")
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Follow-up capture — gate not satisfied
+          <!-- gpa:run-status:follow-up-capture:failed:$RUN_KEY -->
 
           | Field | Value |
           |-------|-------|
@@ -142,6 +144,7 @@ jobs:
           TOTAL_MARKERS: ${{ steps.capture.outputs.total_markers }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
         shell: bash
         run: |
           {
@@ -150,10 +153,15 @@ jobs:
             echo "| Field | Value |"
             echo "|-------|-------|"
             echo "| Run key | \`$RUN_KEY\` |"
-            echo "| Issue | #$ISSUE_NUMBER |"
+            echo "| Issue | [#$ISSUE_NUMBER](https://github.com/$REPO/issues/$ISSUE_NUMBER) |"
             echo "| Actor | $ACTOR |"
             echo "| Eligible | $ELIGIBLE |"
             echo "| Markers found | ${TOTAL_MARKERS:-n/a} |"
             echo "| Issues created | ${ISSUES_CREATED:-n/a} |"
             echo "| Skipped | ${SKIPPED:-n/a} |"
+            echo ""
+            echo "### Next steps"
+            echo ""
+            echo "- Review the created follow-up issues for accuracy"
+            echo "- Proceed to closeout: \`orchestration-dispatch\` with \`requested_stage: closeout\`"
           } >> "$GITHUB_STEP_SUMMARY"

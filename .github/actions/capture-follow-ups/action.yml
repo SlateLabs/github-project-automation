@@ -158,6 +158,7 @@ runs:
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
         ### Follow-up capture — no markers found
         <!-- $status_marker -->
+        <!-- gpa:run-status:follow-up-capture:completed:$RUN_KEY -->
 
         | Field | Value |
         |-------|-------|
@@ -303,6 +304,7 @@ runs:
         gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
         ### Follow-up capture — complete
         <!-- $status_marker -->
+        <!-- gpa:run-status:follow-up-capture:completed:$RUN_KEY -->
 
         $meta_rows
 

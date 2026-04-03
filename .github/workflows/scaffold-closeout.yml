@@ -55,6 +55,7 @@ jobs:
         run: |
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Closeout scaffold — ineligible
+          <!-- gpa:run-status:closeout:failed:$RUN_KEY -->
 
           | Field | Value |
           |-------|-------|
@@ -104,6 +105,7 @@ jobs:
 
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Closeout pre-scaffold gate — failed
+          <!-- gpa:run-status:closeout:failed:$RUN_KEY -->
 
           | Field | Value |
           |-------|-------|
@@ -170,6 +172,7 @@ jobs:
 
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Closeout gate — failed
+          <!-- gpa:run-status:closeout:failed:$RUN_KEY -->
 
           | Field | Value |
           |-------|-------|
@@ -208,6 +211,7 @@ jobs:
           GATE_PASSED: ${{ steps.gate.outputs.gate_passed }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
         shell: bash
         run: |
           {
@@ -216,10 +220,16 @@ jobs:
             echo "| Field | Value |"
             echo "|-------|-------|"
             echo "| Run key | \`$RUN_KEY\` |"
-            echo "| Issue | #$ISSUE_NUMBER |"
+            echo "| Issue | [#$ISSUE_NUMBER](https://github.com/$REPO/issues/$ISSUE_NUMBER) |"
             echo "| Actor | $ACTOR |"
             echo "| Eligible | $ELIGIBLE |"
             echo "| Pre-scaffold gate | ${PRE_GATE_PASSED:-n/a} |"
             echo "| Created | ${CREATED:-n/a} |"
             echo "| Gate passed | ${GATE_PASSED:-n/a} |"
+            echo ""
+            echo "### Next steps"
+            echo ""
+            echo "- Review the closeout retrospective sections"
+            echo "- Complete the exit checklist and process improvement dispositions"
+            echo "- Close the issue when the retrospective is finalized"
           } >> "$GITHUB_STEP_SUMMARY"

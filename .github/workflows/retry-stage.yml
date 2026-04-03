@@ -1,0 +1,202 @@
+name: Retry Stage
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number to retry a stage for'
+        required: true
+        type: number
+      target_stage:
+        description: 'Stage to retry'
+        required: true
+        type: choice
+        options:
+          - design
+          - plan
+          - execution
+          - follow-up-capture
+          - closeout
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate run key
+        id: run-key
+        shell: bash
+        env:
+          REPO_NAME: ${{ github.repository }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
+          TARGET_STAGE: ${{ inputs.target_stage }}
+        run: |
+          timestamp=$(date +%s%3N)
+          run_key="${REPO_NAME}/${ISSUE_NUM}/retry-${TARGET_STAGE}/${timestamp}"
+          echo "run_key=$run_key" >> "$GITHUB_OUTPUT"
+          echo "::notice::Run key: $run_key"
+
+      - name: Validate eligibility
+        id: eligibility
+        uses: ./.github/actions/validate-eligibility
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          requested_stage: ${{ inputs.target_stage }}
+          actor: ${{ github.actor }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Post ineligible comment
+        if: steps.eligibility.outputs.eligible != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
+          REASON: ${{ steps.eligibility.outputs.reason }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TARGET_STAGE: ${{ inputs.target_stage }}
+          ACTOR: ${{ github.actor }}
+          RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+          ### Retry stage — ineligible
+          <!-- gpa:run-status:$TARGET_STAGE:failed:$RUN_KEY -->
+
+          | Field | Value |
+          |-------|-------|
+          | **Run key** | \`$RUN_KEY\` |
+          | **Target stage** | \`$TARGET_STAGE\` |
+          | **Actor** | @$ACTOR |
+          | **Result** | :x: Ineligible for retry |
+          | **Reason** | $REASON |
+          | **Actions run** | [$RUN_ID]($RUN_URL) |
+          COMMENT_EOF
+          )"
+
+      - name: Fail on ineligible
+        if: steps.eligibility.outputs.eligible != 'true'
+        env:
+          REASON: ${{ steps.eligibility.outputs.reason }}
+        shell: bash
+        run: |
+          echo "::error::Issue is not eligible for retry: $REASON"
+          exit 1
+
+      - name: Map stage to workflow and dispatch
+        if: steps.eligibility.outputs.eligible == 'true'
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          TARGET_STAGE: ${{ inputs.target_stage }}
+          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ACTOR: ${{ github.actor }}
+          RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Map target_stage to the corresponding standalone workflow filename
+          case "$TARGET_STAGE" in
+            design)
+              workflow_file="scaffold-design-discussion.yml"
+              ;;
+            plan)
+              workflow_file="scaffold-impl-plan.yml"
+              ;;
+            execution)
+              workflow_file="scaffold-execution.yml"
+              ;;
+            follow-up-capture)
+              workflow_file="capture-follow-ups.yml"
+              ;;
+            closeout)
+              workflow_file="scaffold-closeout.yml"
+              ;;
+            *)
+              echo "::error::Unknown target stage: $TARGET_STAGE"
+              exit 1
+              ;;
+          esac
+
+          echo "::notice::Dispatching $workflow_file for issue #$ISSUE_NUMBER (stage: $TARGET_STAGE)"
+
+          # Dispatch the target workflow
+          gh workflow run "$workflow_file" -f "issue_number=$ISSUE_NUMBER" 2>&1 || {
+            echo "::error::Failed to dispatch $workflow_file"
+
+            gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+          ### Retry stage — dispatch failed
+          <!-- gpa:run-status:$TARGET_STAGE:failed:$RUN_KEY -->
+
+          | Field | Value |
+          |-------|-------|
+          | **Run key** | \`$RUN_KEY\` |
+          | **Target stage** | \`$TARGET_STAGE\` |
+          | **Workflow** | \`$workflow_file\` |
+          | **Actor** | @$ACTOR |
+          | **Result** | :x: Failed to dispatch workflow |
+          | **Actions run** | [$RUN_ID]($RUN_URL) |
+          COMMENT_EOF
+            )"
+            exit 1
+          }
+
+          echo "workflow_file=$workflow_file" >> "$GITHUB_OUTPUT"
+
+          # Post retry dispatched comment
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+          ### Retry stage — dispatched
+          <!-- gpa:run-status:$TARGET_STAGE:started:$RUN_KEY -->
+
+          | Field | Value |
+          |-------|-------|
+          | **Run key** | \`$RUN_KEY\` |
+          | **Target stage** | \`$TARGET_STAGE\` |
+          | **Workflow** | \`$workflow_file\` |
+          | **Actor** | @$ACTOR |
+          | **Result** | :arrows_counterclockwise: Retry dispatched |
+          | **Actions run** | [$RUN_ID]($RUN_URL) |
+
+          The \`$TARGET_STAGE\` stage workflow has been dispatched for issue #$ISSUE_NUMBER.
+          Check the Actions tab for the dispatched run status.
+          COMMENT_EOF
+          )"
+
+      - name: Job summary
+        if: always()
+        env:
+          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
+          ELIGIBLE: ${{ steps.eligibility.outputs.eligible }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          TARGET_STAGE: ${{ inputs.target_stage }}
+          WORKFLOW_FILE: ${{ steps.dispatch.outputs.workflow_file }}
+          ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          {
+            echo "## Retry Stage Summary"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Run key | \`$RUN_KEY\` |"
+            echo "| Issue | [#$ISSUE_NUMBER](https://github.com/$REPO/issues/$ISSUE_NUMBER) |"
+            echo "| Target stage | \`$TARGET_STAGE\` |"
+            echo "| Actor | $ACTOR |"
+            echo "| Eligible | $ELIGIBLE |"
+            echo "| Dispatched workflow | ${WORKFLOW_FILE:-n/a} |"
+            echo ""
+            echo "### Next steps"
+            echo ""
+            echo "- Check the [Actions tab](https://github.com/$REPO/actions) for the dispatched workflow run"
+            echo "- The dispatched workflow will post its own status comment on issue [#$ISSUE_NUMBER](https://github.com/$REPO/issues/$ISSUE_NUMBER)"
+          } >> "$GITHUB_STEP_SUMMARY"
