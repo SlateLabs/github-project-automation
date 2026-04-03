@@ -298,7 +298,7 @@ All three gates support `GATE-WAIVER` override by trusted actors (per `config/tr
 
 ### Query run history
 
-The `query-run-history` composite action scans issue comments for machine-readable run-status markers (`<!-- gpa:run-status:STAGE:OUTCOME:RUN_KEY -->`) and outputs structured JSON. It is read-only and makes no mutations.
+The `query-run-history` composite action scans issue comments for machine-readable run-status markers (`<!-- gpa:run-status:STAGE:OUTCOME:RUN_KEY -->`) and outputs structured JSON. It is read-only and makes no mutations. The standalone workflows, orchestration workflow, and retry wrapper use this history to render a best-effort `Previous run` link in their job summaries.
 
 **Inputs:** `issue_number`, `github_token`
 
@@ -317,7 +317,7 @@ All automation comments (scaffold actions, orchestration dispatch, retry-stage) 
 
 ### Retry stage workflow
 
-The `retry-stage.yml` workflow provides a single entry point for retrying any failed stage. It validates eligibility, maps the target stage to the correct standalone workflow, and dispatches it.
+The `retry-stage.yml` workflow provides a single entry point for retrying any failed stage. It validates eligibility, maps the target stage to the correct standalone workflow, and dispatches it with the same run key so the retry wrapper comment, child workflow comments, and job summaries stay correlated.
 
 **Usage:**
 ```bash
@@ -336,7 +336,7 @@ gh workflow run retry-stage.yml -f issue_number=<N> -f target_stage=<stage>
 | `follow-up-capture` | `capture-follow-ups.yml` |
 | `closeout` | `scaffold-closeout.yml` |
 
-The retry workflow validates eligibility before dispatching (issue must be open, no `do-not-automate` label, actor must be trusted). The dispatched workflow runs independently and posts its own status comment.
+The retry workflow validates eligibility before dispatching (issue must be open, no `do-not-automate` label, actor must be trusted). The dispatched workflow runs independently and posts its own status comment, but it reuses the retry wrapper's run key for cross-surface correlation.
 
 ## Operator Runbook
 
@@ -353,7 +353,7 @@ The retry workflow validates eligibility before dispatching (issue must be open,
        github_token: ${{ secrets.GITHUB_TOKEN }}
    ```
 
-3. **Actions tab:** Go to the Actions tab and filter by workflow name. Each workflow run's job summary includes a clickable link back to the source issue and next-step guidance.
+3. **Actions tab:** Go to the Actions tab and filter by workflow name. Each workflow run's job summary includes a clickable link back to the source issue, a best-effort `Previous run` link when discoverable from comments, and next-step guidance.
 
 4. **Run key format:** `REPO/ISSUE_NUMBER/STAGE_SLUG/TIMESTAMP_MS` — e.g., `SlateLabs/github-project-automation/42/design-scaffold/1711234567890`. The timestamp is milliseconds since epoch.
 

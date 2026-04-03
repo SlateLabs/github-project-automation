@@ -19,6 +19,7 @@ on:
           - closeout
 
 permissions:
+  actions: write
   contents: read
   issues: write
 
@@ -38,7 +39,7 @@ jobs:
           TARGET_STAGE: ${{ inputs.target_stage }}
         run: |
           timestamp=$(date +%s%3N)
-          run_key="${REPO_NAME}/${ISSUE_NUM}/retry-${TARGET_STAGE}/${timestamp}"
+          run_key="${REPO_NAME}/${ISSUE_NUM}/${TARGET_STAGE}/${timestamp}"
           echo "run_key=$run_key" >> "$GITHUB_OUTPUT"
           echo "::notice::Run key: $run_key"
 
@@ -129,7 +130,9 @@ jobs:
           echo "::notice::Dispatching $workflow_file for issue #$ISSUE_NUMBER (stage: $TARGET_STAGE)"
 
           # Dispatch the target workflow
-          gh workflow run "$workflow_file" -f "issue_number=$ISSUE_NUMBER" 2>&1 || {
+          gh workflow run "$workflow_file" \
+            -f "issue_number=$ISSUE_NUMBER" \
+            -f "run_key=$RUN_KEY" 2>&1 || {
             echo "::error::Failed to dispatch $workflow_file"
 
             gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
@@ -170,6 +173,14 @@ jobs:
           COMMENT_EOF
           )"
 
+      - name: Query run history
+        if: always()
+        id: run-history
+        uses: ./.github/actions/query-run-history
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Job summary
         if: always()
         env:
@@ -181,8 +192,17 @@ jobs:
           ACTOR: ${{ github.actor }}
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_HISTORY: ${{ steps.run-history.outputs.run_history }}
         shell: bash
         run: |
+          previous_run_key=$(echo "${RUN_HISTORY:-[]}" | jq -r --arg current_run_key "$RUN_KEY" 'map(select(.run_key != $current_run_key)) | .[0].run_key // ""')
+          previous_run_url=$(echo "${RUN_HISTORY:-[]}" | jq -r --arg current_run_key "$RUN_KEY" 'map(select(.run_key != $current_run_key)) | .[0].comment_url // ""')
+          if [ -n "$previous_run_key" ] && [ -n "$previous_run_url" ]; then
+            previous_run_value="[$previous_run_key]($previous_run_url)"
+          else
+            previous_run_value="n/a"
+          fi
+
           {
             echo "## Retry Stage Summary"
             echo ""
@@ -190,6 +210,7 @@ jobs:
             echo "|-------|-------|"
             echo "| Run key | \`$RUN_KEY\` |"
             echo "| Issue | [#$ISSUE_NUMBER](https://github.com/$REPO/issues/$ISSUE_NUMBER) |"
+            echo "| Previous run | $previous_run_value |"
             echo "| Target stage | \`$TARGET_STAGE\` |"
             echo "| Actor | $ACTOR |"
             echo "| Eligible | $ELIGIBLE |"

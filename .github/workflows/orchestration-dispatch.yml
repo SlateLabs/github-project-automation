@@ -489,6 +489,14 @@ jobs:
           run_key: ${{ steps.run-key.outputs.run_key }}
           actor: ${{ github.actor }}
 
+      - name: Query run history
+        if: always()
+        id: run-history
+        uses: ./.github/actions/query-run-history
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Job summary
         if: always()
         env:
@@ -499,6 +507,7 @@ jobs:
           REQUESTED_STAGE: ${{ inputs.requested_stage }}
           ACTOR: ${{ github.actor }}
           REPO: ${{ github.repository }}
+          RUN_HISTORY: ${{ steps.run-history.outputs.run_history }}
         shell: bash
         run: |
           # Determine next-step hint based on the requested stage
@@ -524,6 +533,14 @@ jobs:
               ;;
           esac
 
+          previous_run_key=$(echo "${RUN_HISTORY:-[]}" | jq -r --arg current_run_key "$RUN_KEY" 'map(select(.run_key != $current_run_key)) | .[0].run_key // ""')
+          previous_run_url=$(echo "${RUN_HISTORY:-[]}" | jq -r --arg current_run_key "$RUN_KEY" 'map(select(.run_key != $current_run_key)) | .[0].comment_url // ""')
+          if [ -n "$previous_run_key" ] && [ -n "$previous_run_url" ]; then
+            previous_run_value="[$previous_run_key]($previous_run_url)"
+          else
+            previous_run_value="n/a"
+          fi
+
           {
             echo "## Orchestration Dispatch Summary"
             echo ""
@@ -531,6 +548,7 @@ jobs:
             echo "|-------|-------|"
             echo "| Run key | \`$RUN_KEY\` |"
             echo "| Issue | [#$ISSUE_NUMBER](https://github.com/$REPO/issues/$ISSUE_NUMBER) |"
+            echo "| Previous run | $previous_run_value |"
             echo "| Stage | \`$REQUESTED_STAGE\` |"
             echo "| Actor | $ACTOR |"
             echo "| Eligible | $ELIGIBLE |"
