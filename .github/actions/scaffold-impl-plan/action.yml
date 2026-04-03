@@ -1,0 +1,191 @@
+name: 'Scaffold Implementation Plan'
+description: >
+  Posts an implementation plan comment on a source issue, pre-populated with all
+  headings required by the plan gate (discussion #3 §4, Gate 4→5). Idempotent:
+  skips creation if a plan comment already exists on the issue.
+
+inputs:
+  issue_number:
+    description: 'Source issue number'
+    required: true
+  github_token:
+    description: 'Token with issues:write scope'
+    required: true
+  run_key:
+    description: 'Orchestration run key for traceability'
+    required: false
+    default: ''
+  actor:
+    description: 'GitHub login of the actor triggering the scaffold'
+    required: false
+    default: ''
+  template_path:
+    description: 'Path to the plan comment template'
+    required: false
+    default: 'templates/implementation-plan.md'
+
+outputs:
+  comment_url:
+    description: 'URL of the created (or existing) plan comment'
+    value: ${{ steps.scaffold.outputs.comment_url }}
+  comment_id:
+    description: 'ID of the created (or existing) plan comment'
+    value: ${{ steps.scaffold.outputs.comment_id }}
+  created:
+    description: '"true" if a new comment was created, "false" if one already existed'
+    value: ${{ steps.scaffold.outputs.created }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Scaffold implementation plan
+      id: scaffold
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        ISSUE_NUMBER: ${{ inputs.issue_number }}
+        RUN_KEY: ${{ inputs.run_key }}
+        ACTOR: ${{ inputs.actor }}
+        TEMPLATE_PATH: ${{ inputs.template_path }}
+      run: |
+        set -euo pipefail
+
+        # --- 1. Fetch issue metadata ---
+        issue_json=$(gh issue view "$ISSUE_NUMBER" --json title,body,comments 2>&1) || {
+          echo "::error::Failed to fetch issue #$ISSUE_NUMBER: $issue_json"
+          exit 1
+        }
+
+        issue_title=$(echo "$issue_json" | jq -r '.title // ""')
+
+        # --- 2. Check-before-act: owned-artifact discovery ---
+        # Two-tier discovery for the owned plan comment:
+        #   Tier 1: Scaffold marker comment (<!-- gpa:impl-plan:#N -->)
+        #   Tier 2: Issue comment containing ## Implementation Plan heading (user-placed)
+        # No orphan recovery tier needed — comments live on the issue, can't be orphaned.
+        artifact_marker="gpa:impl-plan:#${ISSUE_NUMBER}"
+        repo_full="${GITHUB_REPOSITORY:-SlateLabs/github-project-automation}"
+
+        existing_url=""
+        existing_id=""
+        discovery_method=""
+
+        comment_count=$(echo "$issue_json" | jq '.comments | length' 2>/dev/null || echo 0)
+
+        # Tier 1: Search comments for scaffold marker
+        for (( i=0; i<comment_count; i++ )); do
+          cbody=$(echo "$issue_json" | jq -r ".comments[$i].body // \"\"")
+          if echo "$cbody" | grep -qF "$artifact_marker"; then
+            existing_url=$(echo "$issue_json" | jq -r ".comments[$i].url // \"\"")
+            existing_id=$(echo "$issue_json" | jq -r ".comments[$i].id // \"\"")
+            discovery_method="scaffold-marker"
+            break
+          fi
+        done
+
+        # Tier 2: Search comments for ## Implementation Plan heading (user-placed)
+        if [ -z "$existing_url" ]; then
+          for (( i=0; i<comment_count; i++ )); do
+            cbody=$(echo "$issue_json" | jq -r ".comments[$i].body // \"\"")
+            if echo "$cbody" | grep -qE '^#{1,2}\s+Implementation Plan'; then
+              existing_url=$(echo "$issue_json" | jq -r ".comments[$i].url // \"\"")
+              existing_id=$(echo "$issue_json" | jq -r ".comments[$i].id // \"\"")
+              discovery_method="heading-match"
+              break
+            fi
+          done
+        fi
+
+        if [ -n "$existing_url" ]; then
+          echo "::notice::Plan comment found via $discovery_method: $existing_url — skipping creation"
+
+          echo "comment_url=$existing_url" >> "$GITHUB_OUTPUT"
+          echo "comment_id=$existing_id" >> "$GITHUB_OUTPUT"
+          echo "created=false" >> "$GITHUB_OUTPUT"
+
+          # Post informational comment with owned-artifact marker
+          table_rows="| Field | Value |
+        |-------|-------|"
+          if [ -n "$RUN_KEY" ]; then
+            table_rows="${table_rows}
+        | **Run key** | \`$RUN_KEY\` |"
+          fi
+          if [ -n "$ACTOR" ]; then
+            table_rows="${table_rows}
+        | **Actor** | @$ACTOR |"
+          fi
+          table_rows="${table_rows}
+        | **Plan comment** | $existing_url |
+        | **Discovery** | $discovery_method |
+        | **Result** | :fast_forward: Skipped — plan comment already exists |"
+
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+        ### Implementation plan scaffold — already exists
+        <!-- $artifact_marker -->
+
+        $table_rows
+
+        An implementation plan comment already exists on this issue. No new comment was created.
+        COMMENT_EOF
+          )"
+
+          exit 0
+        fi
+
+        # --- 3. Render template ---
+        if [ ! -f "$TEMPLATE_PATH" ]; then
+          echo "::error::Template file not found at $TEMPLATE_PATH"
+          exit 1
+        fi
+
+        # Use python3 for safe template rendering — sed is unsafe because
+        # issue titles can contain the delimiter character, &, \, etc.
+        export ISSUE_TITLE_SAFE="$issue_title"
+        export REPO_FULL="$repo_full"
+        rendered_body=$(python3 -c 'import sys,os; t=open(sys.argv[1]).read(); t=t.replace("{{issue_title}}",os.environ["ISSUE_TITLE_SAFE"]); t=t.replace("{{issue_number}}",os.environ["ISSUE_NUMBER"]); t=t.replace("{{repo}}",os.environ["REPO_FULL"]); sys.stdout.write(t)' "$TEMPLATE_PATH")
+
+        # --- 4. Post plan comment on issue ---
+        comment_result=$(gh issue comment "$ISSUE_NUMBER" --body "$rendered_body" 2>&1) || {
+          echo "::error::Failed to post plan comment: $comment_result"
+          exit 1
+        }
+
+        # Extract comment URL from the gh output (format: <url>)
+        new_url=$(echo "$comment_result" | grep -oE 'https://github\.com/[^[:space:]]+' | head -1 || true)
+
+        if [ -z "$new_url" ]; then
+          echo "::warning::Comment posted but could not extract URL from output: $comment_result"
+          new_url="(see issue #$ISSUE_NUMBER comments)"
+        fi
+
+        echo "::notice::Plan comment created: $new_url"
+
+        echo "comment_url=$new_url" >> "$GITHUB_OUTPUT"
+        echo "comment_id=" >> "$GITHUB_OUTPUT"
+        echo "created=true" >> "$GITHUB_OUTPUT"
+
+        # --- 5. Post status comment ---
+        table_rows="| Field | Value |
+        |-------|-------|"
+        if [ -n "$RUN_KEY" ]; then
+          table_rows="${table_rows}
+        | **Run key** | \`$RUN_KEY\` |"
+        fi
+        if [ -n "$ACTOR" ]; then
+          table_rows="${table_rows}
+        | **Actor** | @$ACTOR |"
+        fi
+        table_rows="${table_rows}
+        | **Plan comment** | $new_url |
+        | **Result** | :white_check_mark: Plan comment created |"
+
+        gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+        ### Implementation plan scaffold — created
+        <!-- gpa:impl-plan:#${ISSUE_NUMBER} -->
+
+        $table_rows
+
+        An implementation plan comment has been created with all required gate headings.
+        Fill in each section with substantive content to pass the plan gate.
+        COMMENT_EOF
+        )"

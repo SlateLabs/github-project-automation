@@ -220,6 +220,19 @@ jobs:
           run_key: ${{ steps.run-key.outputs.run_key }}
           actor: ${{ github.actor }}
 
+      # For the plan stage, scaffold the plan comment BEFORE the gate check.
+      # The gate validates plan structure (headings, checklists, review expectations)
+      # against the existing or just-created plan comment.
+      - name: Scaffold implementation plan (pre-gate)
+        if: steps.eligibility.outputs.eligible == 'true' && inputs.requested_stage == 'plan'
+        id: scaffold-plan
+        uses: ./.github/actions/scaffold-impl-plan
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          run_key: ${{ steps.run-key.outputs.run_key }}
+          actor: ${{ github.actor }}
+
       - name: Check gate conditions
         id: gate
         if: steps.eligibility.outputs.eligible == 'true'
