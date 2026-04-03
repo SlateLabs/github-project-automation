@@ -2,8 +2,8 @@ name: 'Scaffold Execution Bootstrap'
 description: >
   Creates a feature branch and draft PR for a source issue, pre-populated with
   all headings required by the execution gate (discussion #3 §4, Gate 5→6).
-  Idempotent: skips creation if a PR with the owned-artifact marker already
-  exists for this issue.
+  Idempotent: skips creation if an open or merged PR with the owned-artifact
+  marker exists. Closed-unmerged PRs are ignored so reruns can recover.
 
 inputs:
   issue_number:
@@ -93,16 +93,18 @@ runs:
           fi
         done
 
-        # Also check closed/merged PRs for Tier 1 (in case PR was merged already)
+        # Also check merged PRs for Tier 1 (completed work should not be re-scaffolded).
+        # Closed-unmerged PRs are intentionally excluded so reruns can create a
+        # replacement PR after a prior attempt was abandoned.
         if [ -z "$existing_pr_url" ]; then
-          pr_list_closed=$(gh pr list --state all --json number,body,headRefName --limit 50 2>/dev/null || echo '[]')
-          pr_count_closed=$(echo "$pr_list_closed" | jq 'length')
+          pr_list_merged=$(gh pr list --state merged --json number,body,headRefName --limit 50 2>/dev/null || echo '[]')
+          pr_count_merged=$(echo "$pr_list_merged" | jq 'length')
 
-          for (( i=0; i<pr_count_closed; i++ )); do
-            pr_body=$(echo "$pr_list_closed" | jq -r ".[$i].body // \"\"")
+          for (( i=0; i<pr_count_merged; i++ )); do
+            pr_body=$(echo "$pr_list_merged" | jq -r ".[$i].body // \"\"")
             if echo "$pr_body" | grep -qF "$owned_artifact_marker"; then
-              existing_pr_number=$(echo "$pr_list_closed" | jq -r ".[$i].number")
-              existing_branch=$(echo "$pr_list_closed" | jq -r ".[$i].headRefName")
+              existing_pr_number=$(echo "$pr_list_merged" | jq -r ".[$i].number")
+              existing_branch=$(echo "$pr_list_merged" | jq -r ".[$i].headRefName")
               existing_pr_url="https://github.com/${repo_full}/pull/${existing_pr_number}"
               discovery_method="owned-artifact-marker"
               break
