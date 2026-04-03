@@ -333,13 +333,6 @@ class GatewayService:
 
         if actor_login in self.trust_policy.trusted_users:
             return ActorDecision("trusted", f"Actor '{actor_login}' is listed in trusted_users")
-        if actor_context.org_role == "admin":
-            return ActorDecision("trusted", f"Actor '{actor_login}' is an org admin")
-        if actor_context.repo_permission in {"admin", "maintain", "write"}:
-            return ActorDecision(
-                "trusted",
-                f"Actor '{actor_login}' has repo permission '{actor_context.repo_permission}'",
-            )
         if actor_context.org_role in self.trust_policy.deny_roles:
             return ActorDecision("denied", f"Actor '{actor_login}' has denied org role '{actor_context.org_role}'")
         if not actor_context.is_org_member and "outside_collaborator" in self.trust_policy.deny_roles:
@@ -349,7 +342,13 @@ class GatewayService:
                 "record-only",
                 f"Actor '{actor_login}' is org role '{actor_context.org_role}' and requires trusted review",
             )
-        return ActorDecision("denied", f"Actor '{actor_login}' is not trusted for kickoff automation")
+        return ActorDecision(
+            "denied",
+            (
+                f"Actor '{actor_login}' is not explicitly trusted for kickoff automation. "
+                "trusted_teams resolution remains deferred to issue #5."
+            ),
+        )
 
     def _log_fields(
         self,
@@ -374,4 +373,3 @@ class GatewayService:
         if reason:
             fields["reason"] = reason
         return fields
-

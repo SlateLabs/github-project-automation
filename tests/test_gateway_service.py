@@ -94,7 +94,7 @@ class GatewayServiceTests(unittest.TestCase):
             },
             trust_policy=TrustPolicy(
                 trusted_teams=("slatelabs-admins",),
-                trusted_users=("jflamb",),
+                trusted_users=("trusted-user",),
                 trusted_apps=(),
                 record_only_roles=("member",),
                 deny_roles=("outside_collaborator",),
@@ -228,6 +228,20 @@ class GatewayServiceTests(unittest.TestCase):
         self.assertEqual(body["outcome"], "dropped")
         self.assertEqual(self.github.dispatches, [])
         self.assertEqual(self.github.labels_added, [])
+
+    def test_org_admin_without_explicit_allowlist_is_dropped(self) -> None:
+        self.github.actor_context["org-admin"] = {
+            "login": "org-admin",
+            "org_role": "admin",
+            "repo_permission": "admin",
+            "repo_role_name": "admin",
+            "is_org_member": True,
+        }
+        status, body = self._request(self._payload(actor="org-admin"))
+        self.assertEqual(status, 202)
+        self.assertEqual(body["outcome"], "dropped")
+        self.assertIn("trusted_teams resolution remains deferred", body["reason"])
+        self.assertEqual(self.github.dispatches, [])
 
     def test_duplicate_active_run_is_deduplicated(self) -> None:
         prefix = "SlateLabs/github-project-automation/1/kickoff"

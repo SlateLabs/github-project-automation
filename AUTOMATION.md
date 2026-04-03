@@ -132,7 +132,7 @@ python3 scripts/validate-config.py
 
 Defined in `config/trust-policy.yml`. See [discussion #3 §8](https://github.com/SlateLabs/github-project-automation/discussions/3) for the full decision model.
 
-**Current limitation:** Only `trusted_users` is enforced. Org team membership resolution (`trusted_teams`) requires the org API and is deferred to [issue #5](https://github.com/SlateLabs/github-project-automation/issues/5). Actors not listed in `trusted_users` will be rejected even if they belong to a trusted team. The trust check fails closed — write access to the repo is necessary but not sufficient.
+**Current limitation:** The gateway currently enforces `trusted_users`, `trusted_apps`, `record_only_roles`, and `deny_roles`, but it still does **not** resolve `trusted_teams`. Team membership resolution requires the org API and is deferred to [issue #5](https://github.com/SlateLabs/github-project-automation/issues/5). Actors who are only trusted through team membership are denied for now. The trust check fails closed — org admin or repo write access alone is not sufficient.
 
 ## Stage model
 
