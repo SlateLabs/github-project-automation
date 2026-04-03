@@ -30,9 +30,34 @@ permissions:
   discussions: write
   pull-requests: write
 
+# ──────────────────────────────────────────────────────────────────────
+# Job graph:
+#
+#   intake
+#     ├── qualify-dedup    ──┐
+#     └── qualify-eligible ──┤
+#                            ▼
+#                         prepare
+#                            │
+#                          gate
+#                            │
+#                         advance
+#                            │
+#                         summary  (always runs)
+# ──────────────────────────────────────────────────────────────────────
+
 jobs:
-  orchestrate:
+  # ── intake ──────────────────────────────────────────────────────────
+  # Parse the incoming request and generate a run key.
+  intake:
     runs-on: ubuntu-latest
+    outputs:
+      issue_number: ${{ steps.normalize.outputs.issue_number }}
+      requested_stage: ${{ steps.normalize.outputs.requested_stage }}
+      actor: ${{ steps.normalize.outputs.actor }}
+      trigger: ${{ steps.normalize.outputs.trigger }}
+      run_key: ${{ steps.run-key.outputs.run_key }}
+      timestamp: ${{ steps.run-key.outputs.timestamp }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,11 +67,9 @@ jobs:
         shell: bash
         env:
           TRIGGER: ${{ github.event_name }}
-          # workflow_dispatch inputs
           WD_ISSUE_NUMBER: ${{ inputs.issue_number }}
           WD_REQUESTED_STAGE: ${{ inputs.requested_stage }}
           WD_ACTOR: ${{ github.actor }}
-          # repository_dispatch client_payload (passed via env to avoid injection)
           RD_ISSUE_NUMBER: ${{ github.event.client_payload.issue_number }}
           RD_REQUESTED_STAGE: ${{ github.event.client_payload.requested_stage }}
           RD_RUN_KEY: ${{ github.event.client_payload.run_key }}
@@ -184,17 +207,28 @@ jobs:
           echo "timestamp=$timestamp" >> "$GITHUB_OUTPUT"
           echo "::notice::Run key: $run_key (source: $TRIGGER)"
 
+  # ── qualify-dedup ───────────────────────────────────────────────────
+  # Has this exact request already been processed recently?
+  qualify-dedup:
+    needs: intake
+    runs-on: ubuntu-latest
+    outputs:
+      duplicate: ${{ steps.dedup.outputs.duplicate }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Check for recent duplicate run
         id: dedup
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ steps.normalize.outputs.issue_number }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
           REPO_NAME: ${{ github.repository }}
-          REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
-          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
+          REQUESTED_STAGE: ${{ needs.intake.outputs.requested_stage }}
+          RUN_KEY: ${{ needs.intake.outputs.run_key }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          ACTOR: ${{ steps.normalize.outputs.actor }}
+          ACTOR: ${{ needs.intake.outputs.actor }}
           RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -291,33 +325,39 @@ jobs:
             )"
           fi
 
-      - name: Exit on duplicate
-        if: steps.dedup.outputs.duplicate == 'true'
-        shell: bash
-        run: |
-          echo "::notice::Exiting cleanly — duplicate run detected within dedup window"
-          exit 0
+  # ── qualify-eligible ────────────────────────────────────────────────
+  # Is this issue eligible for automation?
+  qualify-eligible:
+    needs: intake
+    runs-on: ubuntu-latest
+    outputs:
+      eligible: ${{ steps.eligibility.outputs.eligible }}
+      reason: ${{ steps.eligibility.outputs.reason }}
+      issue_title: ${{ steps.eligibility.outputs.issue_title }}
+      issue_body: ${{ steps.eligibility.outputs.issue_body }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Validate eligibility
-        if: steps.dedup.outputs.duplicate != 'true'
         id: eligibility
         uses: ./.github/actions/validate-eligibility
         with:
-          issue_number: ${{ steps.normalize.outputs.issue_number }}
-          requested_stage: ${{ steps.normalize.outputs.requested_stage }}
-          actor: ${{ steps.normalize.outputs.actor }}
+          issue_number: ${{ needs.intake.outputs.issue_number }}
+          requested_stage: ${{ needs.intake.outputs.requested_stage }}
+          actor: ${{ needs.intake.outputs.actor }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Post ineligible comment
-        if: steps.dedup.outputs.duplicate != 'true' && steps.eligibility.outputs.eligible != 'true'
+        if: steps.eligibility.outputs.eligible != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ steps.normalize.outputs.issue_number }}
-          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+          RUN_KEY: ${{ needs.intake.outputs.run_key }}
           REASON: ${{ steps.eligibility.outputs.reason }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
-          ACTOR: ${{ steps.normalize.outputs.actor }}
+          REQUESTED_STAGE: ${{ needs.intake.outputs.requested_stage }}
+          ACTOR: ${{ needs.intake.outputs.actor }}
           RUN_ID: ${{ github.run_id }}
         shell: bash
         run: |
@@ -337,7 +377,7 @@ jobs:
           )"
 
       - name: Fail on ineligible
-        if: steps.dedup.outputs.duplicate != 'true' && steps.eligibility.outputs.eligible != 'true'
+        if: steps.eligibility.outputs.eligible != 'true'
         env:
           REASON: ${{ steps.eligibility.outputs.reason }}
         shell: bash
@@ -345,45 +385,54 @@ jobs:
           echo "::error::Issue is not eligible: $REASON"
           exit 1
 
-      # --- Pre-gate stage actions ---
+  # ── prepare ─────────────────────────────────────────────────────────
+  # Create the artifacts needed for this stage (scaffolds).
+  prepare:
+    needs: [intake, qualify-dedup, qualify-eligible]
+    if: needs.qualify-dedup.outputs.duplicate != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       # For the design stage, scaffold the discussion BEFORE the gate check.
       # The gate validates discussion quality (headings, open questions, review)
       # against the existing or just-created discussion.
       - name: Scaffold design discussion (pre-gate)
-        if: steps.eligibility.outputs.eligible == 'true' && steps.normalize.outputs.requested_stage == 'design'
+        if: needs.intake.outputs.requested_stage == 'design'
         id: scaffold-discussion
         uses: ./.github/actions/scaffold-design-discussion
         with:
-          issue_number: ${{ steps.normalize.outputs.issue_number }}
+          issue_number: ${{ needs.intake.outputs.issue_number }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          run_key: ${{ steps.run-key.outputs.run_key }}
-          actor: ${{ steps.normalize.outputs.actor }}
+          run_key: ${{ needs.intake.outputs.run_key }}
+          actor: ${{ needs.intake.outputs.actor }}
 
       # For the plan stage, scaffold the plan comment BEFORE the gate check.
       # The gate validates plan structure (headings, checklists, review expectations)
       # against the existing or just-created plan comment.
       - name: Scaffold implementation plan (pre-gate)
-        if: steps.eligibility.outputs.eligible == 'true' && steps.normalize.outputs.requested_stage == 'plan'
+        if: needs.intake.outputs.requested_stage == 'plan'
         id: scaffold-plan
         uses: ./.github/actions/scaffold-impl-plan
         with:
-          issue_number: ${{ steps.normalize.outputs.issue_number }}
+          issue_number: ${{ needs.intake.outputs.issue_number }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          run_key: ${{ steps.run-key.outputs.run_key }}
-          actor: ${{ steps.normalize.outputs.actor }}
+          run_key: ${{ needs.intake.outputs.run_key }}
+          actor: ${{ needs.intake.outputs.actor }}
 
       # For the execution stage, scaffold branch + draft PR BEFORE the gate check.
       # The gate validates execution artifacts (branch exists, PR exists, required headings)
       # against the existing or just-created PR.
       - name: Scaffold execution bootstrap (pre-gate)
-        if: steps.eligibility.outputs.eligible == 'true' && steps.normalize.outputs.requested_stage == 'execution'
+        if: needs.intake.outputs.requested_stage == 'execution'
         id: scaffold-execution
         uses: ./.github/actions/scaffold-execution
         with:
-          issue_number: ${{ steps.normalize.outputs.issue_number }}
+          issue_number: ${{ needs.intake.outputs.issue_number }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          run_key: ${{ steps.run-key.outputs.run_key }}
-          actor: ${{ steps.normalize.outputs.actor }}
+          run_key: ${{ needs.intake.outputs.run_key }}
+          actor: ${{ needs.intake.outputs.actor }}
 
       # For the closeout stage, enforce pre-scaffold prerequisites BEFORE
       # scaffolding. This matches the standalone scaffold-closeout.yml sequence:
@@ -391,13 +440,13 @@ jobs:
       # full gate (content checks). Without this, the orchestration path could
       # post a closeout retrospective on an issue that hasn't met prerequisites.
       - name: Pre-scaffold gate check (closeout)
-        if: steps.eligibility.outputs.eligible == 'true' && steps.normalize.outputs.requested_stage == 'closeout'
+        if: needs.intake.outputs.requested_stage == 'closeout'
         id: closeout-pre-gate
         uses: ./.github/actions/check-gate
         with:
-          issue_number: ${{ steps.normalize.outputs.issue_number }}
+          issue_number: ${{ needs.intake.outputs.issue_number }}
           requested_stage: closeout
-          issue_body: ${{ steps.eligibility.outputs.issue_body }}
+          issue_body: ${{ needs.qualify-eligible.outputs.issue_body }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           check_mode: pre-scaffold
 
@@ -405,14 +454,14 @@ jobs:
         if: steps.closeout-pre-gate.outputs.gate_passed == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ steps.normalize.outputs.issue_number }}
-          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+          RUN_KEY: ${{ needs.intake.outputs.run_key }}
           UNMET: ${{ steps.closeout-pre-gate.outputs.unmet_conditions }}
           WAIVED: ${{ steps.closeout-pre-gate.outputs.waived_conditions }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          ACTOR: ${{ steps.normalize.outputs.actor }}
+          ACTOR: ${{ needs.intake.outputs.actor }}
           RUN_ID: ${{ github.run_id }}
-          REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
+          REQUESTED_STAGE: ${{ needs.intake.outputs.requested_stage }}
         shell: bash
         run: |
           unmet_list=$(echo "$UNMET" | jq -r '.[] | "- :x: \(.)"' 2>/dev/null || echo "- (none)")
@@ -450,42 +499,51 @@ jobs:
           exit 1
 
       - name: Scaffold closeout retrospective (pre-gate)
-        if: steps.eligibility.outputs.eligible == 'true' && steps.normalize.outputs.requested_stage == 'closeout' && steps.closeout-pre-gate.outputs.gate_passed != 'false'
+        if: needs.intake.outputs.requested_stage == 'closeout' && steps.closeout-pre-gate.outputs.gate_passed != 'false'
         id: scaffold-closeout
         uses: ./.github/actions/scaffold-closeout
         with:
-          issue_number: ${{ steps.normalize.outputs.issue_number }}
+          issue_number: ${{ needs.intake.outputs.issue_number }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          run_key: ${{ steps.run-key.outputs.run_key }}
-          actor: ${{ steps.normalize.outputs.actor }}
+          run_key: ${{ needs.intake.outputs.run_key }}
+          actor: ${{ needs.intake.outputs.actor }}
 
-      # For the follow-up-capture stage, run the capture action AFTER the gate
-      # check passes (unlike design/plan/execution which scaffold BEFORE the gate).
-      # The gate validates that markers exist and execution is complete; the capture
-      # action then creates the actual backlog issues.
+  # ── gate ────────────────────────────────────────────────────────────
+  # Do the artifacts meet the quality bar for this stage?
+  gate:
+    needs: [intake, qualify-dedup, qualify-eligible, prepare]
+    if: needs.qualify-dedup.outputs.duplicate != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      gate_passed: ${{ steps.gate.outputs.gate_passed }}
+      unmet_conditions: ${{ steps.gate.outputs.unmet_conditions }}
+      waived_conditions: ${{ steps.gate.outputs.waived_conditions }}
+      state_valid: ${{ steps.state-check.outputs.state_valid }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Check gate conditions
         id: gate
-        if: steps.eligibility.outputs.eligible == 'true'
         uses: ./.github/actions/check-gate
         with:
-          issue_number: ${{ steps.normalize.outputs.issue_number }}
-          requested_stage: ${{ steps.normalize.outputs.requested_stage }}
-          issue_body: ${{ steps.eligibility.outputs.issue_body }}
+          issue_number: ${{ needs.intake.outputs.issue_number }}
+          requested_stage: ${{ needs.intake.outputs.requested_stage }}
+          issue_body: ${{ needs.qualify-eligible.outputs.issue_body }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           trust_policy_path: config/trust-policy.yml
 
       - name: Post gate failure comment
-        if: steps.gate.outputs.gate_passed != 'true' && steps.eligibility.outputs.eligible == 'true'
+        if: steps.gate.outputs.gate_passed != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ steps.normalize.outputs.issue_number }}
-          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+          RUN_KEY: ${{ needs.intake.outputs.run_key }}
           UNMET: ${{ steps.gate.outputs.unmet_conditions }}
           WAIVED: ${{ steps.gate.outputs.waived_conditions }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
-          ACTOR: ${{ steps.normalize.outputs.actor }}
+          REQUESTED_STAGE: ${{ needs.intake.outputs.requested_stage }}
+          ACTOR: ${{ needs.intake.outputs.actor }}
           RUN_ID: ${{ github.run_id }}
         shell: bash
         run: |
@@ -515,9 +573,9 @@ jobs:
           )"
 
       - name: Fail on gate not passed
-        if: steps.gate.outputs.gate_passed != 'true' && steps.eligibility.outputs.eligible == 'true'
+        if: steps.gate.outputs.gate_passed != 'true'
         env:
-          REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
+          REQUESTED_STAGE: ${{ needs.intake.outputs.requested_stage }}
         shell: bash
         run: |
           echo "::error::Gate conditions not met for stage '$REQUESTED_STAGE'"
@@ -529,18 +587,16 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ steps.normalize.outputs.issue_number }}
-          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+          RUN_KEY: ${{ needs.intake.outputs.run_key }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          ACTOR: ${{ steps.normalize.outputs.actor }}
+          ACTOR: ${{ needs.intake.outputs.actor }}
           RUN_ID: ${{ github.run_id }}
-          REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
+          REQUESTED_STAGE: ${{ needs.intake.outputs.requested_stage }}
         run: |
           # §Idempotency — Manual path dedup obligations, rule 2: current-state check
           # Verify the issue hasn't changed since the run started (still open, no
           # do-not-automate label added). Posts a mismatch comment per contract.
-          # Slice 4 MUST extend this with check-before-act for each non-idempotent
-          # operation it adds (branch creation, PR opening, etc.).
           issue_json=$(gh issue view "$ISSUE_NUMBER" --json state,labels 2>/dev/null || echo '{}')
           issue_state=$(echo "$issue_json" | jq -r '.state // "UNKNOWN"')
           has_block_label=$(echo "$issue_json" | jq -r '.labels[]? | select(.name == "do-not-automate") | .name' || true)
@@ -554,7 +610,6 @@ jobs:
 
           if [ -n "$mismatch" ]; then
             echo "::error::$mismatch"
-            # Post status mismatch comment per §Idempotency current-state checks contract
             gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Orchestration run — superseded (state mismatch)
           <!-- gpa:run-status:$REQUESTED_STAGE:failed:$RUN_KEY -->
@@ -575,16 +630,25 @@ jobs:
 
           echo "state_valid=true" >> "$GITHUB_OUTPUT"
 
+  # ── advance ─────────────────────────────────────────────────────────
+  # Record the transition and handle post-gate actions.
+  advance:
+    needs: [intake, qualify-dedup, gate]
+    if: needs.qualify-dedup.outputs.duplicate != 'true' && needs.gate.outputs.gate_passed == 'true' && needs.gate.outputs.state_valid == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Post success comment
-        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ steps.normalize.outputs.issue_number }}
-          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
-          WAIVED: ${{ steps.gate.outputs.waived_conditions }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+          RUN_KEY: ${{ needs.intake.outputs.run_key }}
+          WAIVED: ${{ needs.gate.outputs.waived_conditions }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
-          ACTOR: ${{ steps.normalize.outputs.actor }}
+          REQUESTED_STAGE: ${{ needs.intake.outputs.requested_stage }}
+          ACTOR: ${{ needs.intake.outputs.actor }}
           RUN_ID: ${{ github.run_id }}
         shell: bash
         run: |
@@ -615,34 +679,43 @@ jobs:
       # and execution is complete. Unlike pre-gate scaffolds, this runs AFTER
       # the gate passes because it creates external artifacts (new issues).
       - name: Capture follow-ups (post-gate)
-        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && steps.normalize.outputs.requested_stage == 'follow-up-capture'
+        if: needs.intake.outputs.requested_stage == 'follow-up-capture'
         id: capture-follow-ups
         uses: ./.github/actions/capture-follow-ups
         with:
-          issue_number: ${{ steps.normalize.outputs.issue_number }}
+          issue_number: ${{ needs.intake.outputs.issue_number }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          run_key: ${{ steps.run-key.outputs.run_key }}
-          actor: ${{ steps.normalize.outputs.actor }}
+          run_key: ${{ needs.intake.outputs.run_key }}
+          actor: ${{ needs.intake.outputs.actor }}
+
+  # ── summary ─────────────────────────────────────────────────────────
+  # Always-runs job that produces the Actions job summary.
+  summary:
+    needs: [intake, qualify-dedup, qualify-eligible, prepare, gate, advance]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Query run history
-        if: always()
         id: run-history
         uses: ./.github/actions/query-run-history
         with:
-          issue_number: ${{ steps.normalize.outputs.issue_number }}
+          issue_number: ${{ needs.intake.outputs.issue_number }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Job summary
-        if: always()
         env:
-          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
-          ELIGIBLE: ${{ steps.eligibility.outputs.eligible }}
-          GATE_PASSED: ${{ steps.gate.outputs.gate_passed }}
-          ISSUE_NUMBER: ${{ steps.normalize.outputs.issue_number }}
-          REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
-          ACTOR: ${{ steps.normalize.outputs.actor }}
+          RUN_KEY: ${{ needs.intake.outputs.run_key }}
+          ELIGIBLE: ${{ needs.qualify-eligible.outputs.eligible }}
+          DUPLICATE: ${{ needs.qualify-dedup.outputs.duplicate }}
+          GATE_PASSED: ${{ needs.gate.outputs.gate_passed }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+          REQUESTED_STAGE: ${{ needs.intake.outputs.requested_stage }}
+          ACTOR: ${{ needs.intake.outputs.actor }}
           REPO: ${{ github.repository }}
-          TRIGGER: ${{ steps.normalize.outputs.trigger }}
+          TRIGGER: ${{ needs.intake.outputs.trigger }}
           RUN_HISTORY: ${{ steps.run-history.outputs.run_history }}
         shell: bash
         run: |
@@ -688,7 +761,8 @@ jobs:
             echo "| Trigger | \`$TRIGGER\` |"
             echo "| Stage | \`$REQUESTED_STAGE\` |"
             echo "| Actor | $ACTOR |"
-            echo "| Eligible | $ELIGIBLE |"
+            echo "| Duplicate | ${DUPLICATE:-false} |"
+            echo "| Eligible | ${ELIGIBLE:-n/a} |"
             echo "| Gate passed | ${GATE_PASSED:-n/a} |"
             echo ""
             echo "### Next steps"
