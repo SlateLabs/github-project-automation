@@ -423,9 +423,10 @@ runs:
 
             # 1. Check for FOLLOW-UP markers in comments
             followup_comments_json=$(gh issue view "$ISSUE_NUMBER" --comments --json comments 2>/dev/null || echo '{"comments":[]}')
-            # Enforce marker-contract fidelity: marker must have 5 fields separated by 4 pipes
+            # Enforce full 5-field marker contract: all required fields must be non-empty after trimming.
             # Format: <!-- FOLLOW-UP: title | category | reason | impact | blocking -->
-            followup_marker_count=$(echo "$followup_comments_json" | jq '[.comments[].body // "" | test("(?s)<!--\\s*FOLLOW-UP:(?:[^|]*\\|){4}.*?-->")] | map(select(.)) | length')
+            # This must match the same validation the capture-follow-ups action applies.
+            followup_marker_count=$(echo "$followup_comments_json" | python3 -c "import sys,json,re; data=json.load(sys.stdin); cs=data.get('comments',[]); count=sum(1 for c in cs for m in re.finditer(r'<!--\s*FOLLOW-UP:\s*(.*?)-->',c.get('body',''),re.DOTALL) if len([f for f in (f.strip() for f in m.group(1).split('|')) if f])==5 and len(m.group(1).split('|'))==5); print(count)")
 
             if [ "$followup_marker_count" -eq 0 ]; then
               if ! check_waiver "follow-up-capture-markers"; then

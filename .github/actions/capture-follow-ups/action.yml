@@ -212,16 +212,12 @@ runs:
             exit 1
           fi
 
-          # Render template
-          rendered_body=$(echo "$template_content" \
-            | sed "s|{{repo}}|$repo_full|g" \
-            | sed "s|{{source_issue}}|$ISSUE_NUMBER|g" \
-            | sed "s|{{sequence}}|$seq|g" \
-            | sed "s|{{category}}|$category|g" \
-            | sed "s|{{reason}}|$reason|g" \
-            | sed "s|{{impact}}|$impact|g" \
-            | sed "s|{{blocking}}|$blocking|g" \
-            | sed "s|{{run_key}}|$RUN_KEY|g")
+          # Render template — use python3 str.replace (same pattern as other scaffold
+          # actions) to avoid sed corruption of & and backslash in free-text fields.
+          rendered_body=$(TMPL_REPO="$repo_full" TMPL_SOURCE_ISSUE="$ISSUE_NUMBER" \
+            TMPL_SEQ="$seq" TMPL_CATEGORY="$category" TMPL_REASON="$reason" \
+            TMPL_IMPACT="$impact" TMPL_BLOCKING="$blocking" TMPL_RUN_KEY="$RUN_KEY" \
+            python3 -c 'import sys,os; t=open(sys.argv[1]).read(); t=t.replace("{{repo}}",os.environ["TMPL_REPO"]); t=t.replace("{{source_issue}}",os.environ["TMPL_SOURCE_ISSUE"]); t=t.replace("{{sequence}}",os.environ["TMPL_SEQ"]); t=t.replace("{{category}}",os.environ["TMPL_CATEGORY"]); t=t.replace("{{reason}}",os.environ["TMPL_REASON"]); t=t.replace("{{impact}}",os.environ["TMPL_IMPACT"]); t=t.replace("{{blocking}}",os.environ["TMPL_BLOCKING"]); t=t.replace("{{run_key}}",os.environ["TMPL_RUN_KEY"]); sys.stdout.write(t)' "$TEMPLATE_PATH")
 
           # Build label list — handle missing labels gracefully
           labels="follow-up"
