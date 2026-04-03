@@ -18,6 +18,8 @@ config/
   repos.yml           — participating repos and their configuration
 templates/            — shared prompt/scaffold templates
 scripts/              — validation and utility scripts
+gateway/              — Cloud Run listener runtime for org-project webhook intake
+tests/                — automated coverage for gateway and contract logic
 .github/
   workflows/          — orchestration workflows (dispatch, standalone, retry)
   actions/            — composite actions (validate-eligibility, check-gate, query-run-history, scaffolds)
@@ -42,11 +44,99 @@ scripts/              — validation and utility scripts
 
 Both paths converge on the same gate-checking logic. Eligibility validation is shared but not yet at full parity: the manual path validates issue state, actor trust, labels, and body content; the webhook gateway path will additionally validate live project-field state (Status transition, Repository mapping, project linkage) once implemented (see [issue #9](https://github.com/SlateLabs/github-project-automation/issues/9)).
 
+## Webhook gateway contract
+
+The gateway is the org-level listener for `projects_v2_item` events. It stays intentionally thin:
+
+- Validate `X-GitHub-Delivery`, `X-GitHub-Event`, and `X-Hub-Signature-256`
+- Accept only `projects_v2_item` deliveries that prove a `Status: Backlog -> Ready` transition
+- Resolve the project item via GraphQL to read the linked issue, `Repository`, `Status`, and `Workflow Status`/`Workflow Stage` fields
+- Enforce kickoff eligibility (`Issue` item type, linked source issue, configured participating repo, `Ready` status, `Backlog` workflow stage, no `do-not-automate` label)
+- Enforce trusted-actor outcomes using `config/trust-policy.yml`
+- Deduplicate by delivery id, active run prefix, and 60-second recent-completion window
+- Dispatch `repository_dispatch` with event type `orchestration-start`
+
+### HTTP surface
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/healthz` | Liveness / readiness probe |
+| `POST` | `/github/webhook` | GitHub org-project webhook intake |
+
+### Environment variables
+
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `GITHUB_WEBHOOK_SECRET` | Yes | HMAC secret for `X-Hub-Signature-256` validation |
+| `GITHUB_DISPATCH_TOKEN` | Yes | Token used for GraphQL lookups, issue labeling, and `repository_dispatch` |
+| `GITHUB_API_URL` | No | Override GitHub API base URL; defaults to `https://api.github.com` |
+| `GPA_REPO_CONFIG_PATH` | No | Path to `config/repos.yml` |
+| `GPA_TRUST_POLICY_PATH` | No | Path to `config/trust-policy.yml` |
+| `GPA_DEDUP_WINDOW_MS` | No | Dedup window; defaults to `60000` |
+| `PORT` | No | HTTP port; defaults to `8080` |
+
+### Kickoff payload contract
+
+The listener is deliberately strict because `projects_v2_item` webhooks are still preview. The accepted kickoff shape is:
+
+- `X-GitHub-Event: projects_v2_item`
+- `projects_v2_item.node_id` or `projects_v2_item.id`
+- `changes.field_value.field_name == "Status"`
+- `changes.field_value.from == "Backlog"`
+- `changes.field_value.to == "Ready"`
+
+If the listener cannot prove that the event is a kickoff transition, it fails closed with a `202 skipped` response rather than guessing from partial payload state.
+
+### Trusted-actor outcomes
+
+| Outcome | Behavior |
+|---------|----------|
+| `trusted` | Dispatch `repository_dispatch` to the participating repo |
+| `record-only` | Add `pending-review` label to the source issue; no dispatch; does not record a completed run (preserves the ability for a trusted actor to immediately re-trigger the same prefix) |
+| `denied` | Log and drop the event with no repo mutation |
+
+### Response codes
+
+| Code | Meaning |
+|------|---------|
+| `200` | Kickoff dispatch accepted and sent |
+| `202` | Event skipped, deduplicated, dropped, or pending-review |
+| `400` | Missing headers or invalid JSON payload |
+| `401` | Invalid webhook signature |
+| `422` | Project item is ineligible for kickoff automation |
+| `502` | GitHub API call failed while resolving, labeling, or dispatching (dispatch retries exhausted) |
+
+### Dispatch retry/backoff
+
+If `repository_dispatch` fails (GitHub API error), the gateway retries up to 3 times with exponential backoff: **1s, 4s, 16s**. Each retry attempt is logged with `outcome: dispatch-retry`, the attempt number, and the backoff duration. After all 3 attempts fail, the gateway logs `outcome: dispatch-failed`, clears the active-run slot, and returns `502`.
+
+### Structured logs
+
+Every gateway outcome emits JSON including:
+
+- `delivery_id`
+- `actor`
+- `repo`
+- `issue`
+- `requested_stage`
+- `run_key`
+- `outcome`
+- `reason` when applicable
+
+### Local verification
+
+Run the gateway tests and the existing config validation with:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py'
+python3 scripts/validate-config.py
+```
+
 ## Trust policy
 
 Defined in `config/trust-policy.yml`. See [discussion #3 §8](https://github.com/SlateLabs/github-project-automation/discussions/3) for the full decision model.
 
-**Current limitation:** Only `trusted_users` is enforced. Org team membership resolution (`trusted_teams`) requires the org API and is deferred to [issue #5](https://github.com/SlateLabs/github-project-automation/issues/5). Actors not listed in `trusted_users` will be rejected even if they belong to a trusted team. The trust check fails closed — write access to the repo is necessary but not sufficient.
+**Current limitation:** The gateway currently enforces `trusted_users`, `trusted_apps`, `record_only_roles`, and `deny_roles`, but it still does **not** resolve `trusted_teams`. Team membership resolution requires the org API and is deferred to [issue #5](https://github.com/SlateLabs/github-project-automation/issues/5). Actors who are only trusted through team membership are denied for now. The trust check fails closed — org admin or repo write access alone is not sufficient.
 
 ## Stage model
 
