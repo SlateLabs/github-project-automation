@@ -130,7 +130,26 @@ runs:
               closed_pr_number=$(echo "$pr_list_closed" | jq -r ".[$i].number")
               closed_pr_branch=$(echo "$pr_list_closed" | jq -r ".[$i].headRefName")
 
-              echo "::notice::Found closed-unmerged execution PR #${closed_pr_number} — reopening for recovery"
+              echo "::notice::Found closed-unmerged execution PR #${closed_pr_number} — verifying issue state before reopening"
+
+              # Check-before-act: re-verify issue state before the reopen mutation.
+              # The same guard that protects branch/PR creation (below) must also
+              # protect recovery — reopening a PR is a visible state change.
+              recovery_state_json=$(gh issue view "$ISSUE_NUMBER" --json state,labels 2>&1) || {
+                echo "::error::Failed to re-check issue #$ISSUE_NUMBER state before recovery: $recovery_state_json"
+                exit 1
+              }
+              recovery_issue_state=$(echo "$recovery_state_json" | jq -r '.state // ""')
+              recovery_block_label=$(echo "$recovery_state_json" | jq -r '.labels[]?.name // empty' | grep -cF 'do-not-automate' || true)
+
+              if [ "$recovery_issue_state" != "OPEN" ]; then
+                echo "::error::Issue #$ISSUE_NUMBER is no longer open (state: $recovery_issue_state) — aborting closed-unmerged recovery before reopening PR #${closed_pr_number}"
+                exit 1
+              fi
+              if [ "$recovery_block_label" -gt 0 ]; then
+                echo "::error::Issue #$ISSUE_NUMBER now has do-not-automate label — aborting closed-unmerged recovery before reopening PR #${closed_pr_number}"
+                exit 1
+              fi
 
               # Reopen the PR via API
               reopen_result=$(gh api "repos/{owner}/{repo}/pulls/${closed_pr_number}" \

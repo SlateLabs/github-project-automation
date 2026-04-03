@@ -145,7 +145,7 @@ When triggered via orchestration, the scaffold runs **before** the execution gat
 
 **Recovery from abandoned PRs:** If a prior execution PR was closed without merge, the scaffold reopens it on the next run rather than creating a duplicate. The reopened PR retains its branch, body, and review history so the operator can continue from where they left off. To force a clean start, delete the branch and the closed PR before rerunning the scaffold.
 
-**Check-before-act guard:** Immediately before creating a branch or PR, the scaffold re-verifies that the source issue is still open and does not have the `do-not-automate` label. If the issue state changed after eligibility validation, the scaffold aborts without creating artifacts.
+**Check-before-act guard:** Before any state-mutating operation — creating a branch, creating a PR, or reopening a closed-unmerged PR for recovery — the scaffold re-verifies that the source issue is still open and does not have the `do-not-automate` label. If the issue state changed after eligibility validation, the scaffold aborts without mutating any artifacts. This guard covers both the fresh-creation path and the closed-unmerged recovery path.
 
 **Permissions required:** `contents: write`, `issues: write`, `pull-requests: write`
 
