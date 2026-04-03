@@ -149,6 +149,73 @@ When triggered via orchestration, the scaffold runs **before** the execution gat
 
 **Permissions required:** `contents: write`, `issues: write`, `pull-requests: write`
 
+### Follow-up capture
+
+**Trigger:** `workflow_dispatch` via the standalone workflow or automatically via `orchestration-dispatch` when `requested_stage: follow-up-capture`.
+
+**What it does:**
+1. Scans all comments on the source issue for structured `<!-- FOLLOW-UP: ... -->` markers
+2. For each marker, checks whether a backlog issue with the corresponding owned-artifact marker already exists (idempotency)
+3. If no existing issue: renders `templates/follow-up-item.md` with marker metadata and creates a new issue with labels
+4. If an existing issue already covers this marker: skips creation
+5. Posts a summary status comment on the source issue listing all created and skipped follow-up issues
+
+**Standalone usage:**
+```
+gh workflow run capture-follow-ups.yml -f issue_number=<N>
+```
+
+**Via orchestration:**
+```
+gh workflow run orchestration-dispatch.yml -f issue_number=<N> -f requested_stage=follow-up-capture
+```
+Both the standalone workflow and the orchestration path run the gate check **before** the capture action. The gate validates that valid FOLLOW-UP markers exist (all 5 fields present), that execution is complete (a merged PR references the issue), and that no open PRs remain (current work is finished). Once the gate passes, the capture action creates backlog issues from the markers.
+
+**Marker format:**
+```
+<!-- FOLLOW-UP: <title> | <category> | <reason> | <impact> | <blocking: yes|no> -->
+```
+
+| Field | Description | Allowed values |
+|-------|-------------|----------------|
+| `title` | Short title for the new backlog issue | Free text |
+| `category` | Follow-up category per discussion #3 §10 | `technical-debt`, `accessibility`, `usability`, `documentation`, `automation`, `defect` |
+| `reason` | Why this was deferred | Free text |
+| `impact` | Impact if this follow-up is ignored | Free text |
+| `blocking` | Whether this blocks further slices | `yes` or `no` |
+
+Example:
+```
+<!-- FOLLOW-UP: Pre-mutation guards for design/plan scaffolds | technical-debt | Lower blast radius (comments vs PRs), not needed for Slice 4 | Scaffold actions could mutate artifacts on closed issues | no -->
+```
+
+Markers use HTML comments so they are invisible in rendered markdown but machine-parseable.
+
+**Created issue format:** Each created issue gets:
+- Title: `[follow-up] <marker title>`
+- Body: rendered from `templates/follow-up-item.md` with source traceability (source issue, category, reason, blocking status, run key)
+- Labels: `follow-up` + category label (e.g., `technical-debt`) + `blocking` if applicable
+- Owned-artifact marker: `<!-- gpa:owned-artifact:follow-up:REPO#SOURCE:SEQ -->` for dedup
+
+**Label requirements:** The following labels should exist in the repo for full functionality:
+- `follow-up` — applied to all captured follow-up issues
+- `technical-debt`, `accessibility`, `usability`, `documentation`, `automation`, `defect` — category labels
+- `blocking` — applied when the marker specifies `blocking: yes`
+
+If a label does not exist, the action attempts to create the issue without it and logs a warning. Missing labels do not cause the action to fail.
+
+**Idempotency:** Each marker is assigned a stable sequence number (1-indexed across all comments in comment-date order). The created issue embeds an owned-artifact marker with this sequence (`gpa:owned-artifact:follow-up:REPO#SOURCE:SEQ`). Re-running the action on the same issue checks for existing issues with matching markers and skips them. Status comments use a distinct marker (`<!-- gpa:follow-up-status:#N -->`) and are not treated as follow-up artifacts.
+
+**Check-before-act guard:** Before creating each follow-up issue, the action re-verifies that the source issue is still open and does not have the `do-not-automate` label. If the issue state changed during processing, the action aborts without creating further issues.
+
+**Gate check (follow-up-capture):**
+- At least one valid `<!-- FOLLOW-UP: title | category | reason | impact | blocking -->` marker must exist in the issue comments (all 5 fields required)
+- A merged PR referencing the source issue (or matching the branch convention `<issue-number>-*`) must exist (execution is complete)
+- No open PRs referencing the source issue may remain (ensures current execution work is finished, not just historical PRs)
+- All conditions support `GATE-WAIVER` override by trusted actors
+
+**Permissions required:** `contents: read`, `issues: write`
+
 ## Operator actions
 
 | Action | How |
@@ -158,5 +225,6 @@ When triggered via orchestration, the scaffold runs **before** the execution gat
 | Scaffold a design discussion | `gh workflow run scaffold-design-discussion.yml -f issue_number=<N>` |
 | Scaffold an implementation plan | `gh workflow run scaffold-impl-plan.yml -f issue_number=<N>` |
 | Scaffold execution bootstrap | `gh workflow run scaffold-execution.yml -f issue_number=<N>` |
+| Capture follow-ups | `gh workflow run capture-follow-ups.yml -f issue_number=<N>` |
 | Waive a gate | Post `GATE-WAIVER: <gate-name> — <reason>` on the issue/PR |
 | Block automation | Add `do-not-automate` label to the issue |

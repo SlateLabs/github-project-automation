@@ -379,8 +379,14 @@ runs:
             fi
 
             # 2. Check for PR referencing this issue
-            pr_json=$(gh pr list --search "issue:${ISSUE_NUMBER}" --json number,isDraft,body --jq '.[0]' 2>/dev/null || echo '')
+            pr_json=$(gh pr list --search "\"#${ISSUE_NUMBER}\" in:title,body" --json number,isDraft,body --jq '.[0]' 2>/dev/null || echo '')
             pr_number=$(echo "$pr_json" | jq -r '.number // empty' 2>/dev/null || true)
+            if [ -z "$pr_number" ]; then
+              # Fallback: check open PRs matching branch convention
+              pr_json=$(gh pr list --state open --json number,isDraft,body,headRefName --limit 100 \
+                --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))][0]" 2>/dev/null || echo '')
+              pr_number=$(echo "$pr_json" | jq -r '.number // empty' 2>/dev/null || true)
+            fi
             if [ -z "$pr_number" ]; then
               if ! check_waiver "execution-pr"; then
                 unmet+=("A pull request referencing issue #${ISSUE_NUMBER} must exist")
@@ -405,6 +411,55 @@ runs:
                 if ! check_waiver "execution-test-plan"; then
                   unmet+=("PR #$pr_number body is missing required ## Test plan heading")
                 fi
+              fi
+            fi
+            ;;
+
+          follow-up-capture)
+            # Gate: Follow-up capture (discussion #3 §10, §14 Slice 5)
+            # Conditions:
+            #   1. At least one <!-- FOLLOW-UP: ... --> marker exists in issue comments
+            #   2. A merged PR referencing this issue exists (execution is complete)
+
+            # 1. Check for FOLLOW-UP markers in comments
+            followup_comments_json=$(gh issue view "$ISSUE_NUMBER" --comments --json comments 2>/dev/null || echo '{"comments":[]}')
+            # Enforce full 5-field marker contract: all required fields must be non-empty after trimming.
+            # Format: <!-- FOLLOW-UP: title | category | reason | impact | blocking -->
+            # This must match the same validation the capture-follow-ups action applies.
+            # Category must match the documented taxonomy (discussion #3 §10).
+            # Valid categories: technical-debt accessibility usability documentation automation defect
+            # This must stay in sync with the same list in capture-follow-ups/action.yml.
+            followup_marker_count=$(echo "$followup_comments_json" | python3 -c "import sys,json,re;vc={'technical-debt','accessibility','usability','documentation','automation','defect'};data=json.load(sys.stdin);cs=data.get('comments',[]);count=sum(1 for c in cs for m in re.finditer(r'<!--\s*FOLLOW-UP:\s*(.*?)-->',c.get('body',''),re.DOTALL) if len([f for f in (f.strip() for f in m.group(1).split('|')) if f])==5 and len(m.group(1).split('|'))==5 and m.group(1).split('|')[1].strip() in vc and m.group(1).split('|')[4].strip().lower() in ('yes','no'));print(count)")
+
+            if [ "$followup_marker_count" -eq 0 ]; then
+              if ! check_waiver "follow-up-capture-markers"; then
+                unmet+=("No valid <!-- FOLLOW-UP: title | category | reason | impact | blocking --> markers found in issue comments — add markers before running follow-up capture")
+              fi
+            fi
+
+            # 2. Check for a merged PR referencing this issue
+            merged_prs=$(gh pr list --state merged --search "\"#${ISSUE_NUMBER}\" in:title,body" --json number --limit 100 --jq 'length' 2>/dev/null || echo "0")
+            if [ "$merged_prs" -eq 0 ]; then
+              # Fallback: check for merged PRs with branch matching <issue-number>-*
+              merged_branch_prs=$(gh pr list --state merged --json number,headRefName --limit 500 \
+                --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))] | length" 2>/dev/null || echo "0")
+              if [ "$merged_branch_prs" -eq 0 ]; then
+                if ! check_waiver "follow-up-capture-merged-pr"; then
+                  unmet+=("No merged PR found referencing issue #${ISSUE_NUMBER} — execution must be complete before capturing follow-ups")
+                fi
+              fi
+            fi
+
+            # 3. Verify no open PRs remain for this issue (execution truly complete)
+            # For umbrella issues like #1, earlier merged slice PRs satisfy check 2
+            # but open PRs signal that current work is still in progress.
+            open_prs=$(gh pr list --state open --search "\"#${ISSUE_NUMBER}\" in:title,body" --json number --limit 100 --jq 'length' 2>/dev/null || echo "0")
+            open_branch_prs=$(gh pr list --state open --json number,headRefName --limit 200 \
+              --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))] | length" 2>/dev/null || echo "0")
+            total_open=$((open_prs + open_branch_prs))
+            if [ "$total_open" -gt 0 ]; then
+              if ! check_waiver "follow-up-capture-open-prs"; then
+                unmet+=("$total_open open PR(s) still reference issue #${ISSUE_NUMBER} — all execution PRs must be merged or closed before capturing follow-ups")
               fi
             fi
             ;;

@@ -17,6 +17,7 @@ on:
           - design
           - plan
           - execution
+          - follow-up-capture
           - review
           - merge
           - closeout
@@ -247,6 +248,11 @@ jobs:
           run_key: ${{ steps.run-key.outputs.run_key }}
           actor: ${{ github.actor }}
 
+      # For the follow-up-capture stage, run the capture action AFTER the gate
+      # check passes (unlike design/plan/execution which scaffold BEFORE the gate).
+      # The gate validates that markers exist and execution is complete; the capture
+      # action then creates the actual backlog issues.
+
       - name: Check gate conditions
         id: gate
         if: steps.eligibility.outputs.eligible == 'true'
@@ -390,6 +396,19 @@ jobs:
           $waived_section
           COMMENT_EOF
           )"
+
+      # Post-gate action: capture follow-ups after gate confirms markers exist
+      # and execution is complete. Unlike pre-gate scaffolds, this runs AFTER
+      # the gate passes because it creates external artifacts (new issues).
+      - name: Capture follow-ups (post-gate)
+        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && inputs.requested_stage == 'follow-up-capture'
+        id: capture-follow-ups
+        uses: ./.github/actions/capture-follow-ups
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          run_key: ${{ steps.run-key.outputs.run_key }}
+          actor: ${{ github.actor }}
 
       - name: Job summary
         if: always()
