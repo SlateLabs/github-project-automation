@@ -181,11 +181,13 @@ runs:
 
         branch_name="${ISSUE_NUMBER}-${branch_slug}"
 
+        # Resolve default branch upfront (needed for PR creation even if branch already exists)
+        default_branch=$(gh api "repos/{owner}/{repo}" --jq '.default_branch' 2>/dev/null || echo "main")
+
         # Check if branch already exists on remote
         branch_exists=$(gh api "repos/{owner}/{repo}/branches/${branch_name}" --jq '.name' 2>/dev/null || true)
         if [ -z "$branch_exists" ]; then
           # Get default branch SHA to create from
-          default_branch=$(gh api "repos/{owner}/{repo}" --jq '.default_branch' 2>/dev/null || echo "main")
           default_sha=$(gh api "repos/{owner}/{repo}/git/ref/heads/${default_branch}" --jq '.object.sha' 2>/dev/null || true)
 
           if [ -z "$default_sha" ]; then

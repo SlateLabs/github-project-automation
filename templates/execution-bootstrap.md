@@ -2,6 +2,8 @@
 
 <!-- gpa:owned-artifact:execution-bootstrap:{{repo}}#{{issue_number}} -->
 
+Refs #{{issue_number}}
+
 > Source issue: {{repo}}#{{issue_number}}
 > Created by orchestration automation
 
