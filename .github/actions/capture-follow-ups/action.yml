@@ -128,10 +128,15 @@ runs:
               echo "::warning::FOLLOW-UP marker at sequence $global_seq has unrecognized category '$category' — will create issue but skip category label"
             fi
 
-            # Normalize blocking to yes/no
-            case "$blocking" in
-              yes|Yes|YES) blocking="yes" ;;
-              *) blocking="no" ;;
+            # Validate and normalize blocking to yes/no — reject invalid values
+            blocking_lower=$(echo "$blocking" | tr '[:upper:]' '[:lower:]')
+            case "$blocking_lower" in
+              yes) blocking="yes" ;;
+              no) blocking="no" ;;
+              *)
+                echo "::warning::Skipping FOLLOW-UP marker at sequence $global_seq: blocking field '$blocking' is not 'yes' or 'no'"
+                continue
+                ;;
             esac
 
             # Write parsed marker to temp file (tab-separated)
