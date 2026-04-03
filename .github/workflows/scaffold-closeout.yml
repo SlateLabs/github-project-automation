@@ -75,8 +75,64 @@ jobs:
           echo "::error::Issue is not eligible: $REASON"
           exit 1
 
-      - name: Scaffold closeout
+      - name: Pre-scaffold gate check
         if: steps.eligibility.outputs.eligible == 'true'
+        id: pre-gate
+        uses: ./.github/actions/check-gate
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          requested_stage: closeout
+          issue_body: ${{ steps.eligibility.outputs.issue_body }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          check_mode: pre-scaffold
+
+      - name: Post pre-scaffold gate failure comment
+        if: steps.pre-gate.outputs.gate_passed == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
+          UNMET: ${{ steps.pre-gate.outputs.unmet_conditions }}
+          WAIVED: ${{ steps.pre-gate.outputs.waived_conditions }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ACTOR: ${{ github.actor }}
+          RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          unmet_list=$(echo "$UNMET" | jq -r '.[] | "- :x: \(.)"' 2>/dev/null || echo "- (none)")
+          waived_list=$(echo "$WAIVED" | jq -r '.[] | "- :fast_forward: \(.)"' 2>/dev/null || echo "- (none)")
+
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+          ### Closeout pre-scaffold gate — failed
+
+          | Field | Value |
+          |-------|-------|
+          | **Run key** | \`$RUN_KEY\` |
+          | **Actor** | @$ACTOR |
+          | **Result** | :x: Prerequisites not met — scaffold not posted |
+          | **Actions run** | [$RUN_ID]($RUN_URL) |
+
+          **Unmet prerequisites:**
+          $unmet_list
+
+          **Waived conditions:**
+          $waived_list
+
+          Resolve the unmet prerequisites and re-run the workflow.
+          COMMENT_EOF
+          )"
+
+      - name: Fail on pre-scaffold gate failure
+        if: steps.pre-gate.outputs.gate_passed == 'false'
+        env:
+          UNMET: ${{ steps.pre-gate.outputs.unmet_conditions }}
+        shell: bash
+        run: |
+          echo "::error::Pre-scaffold gate failed. Unmet prerequisites: $UNMET"
+          exit 1
+
+      - name: Scaffold closeout
+        if: steps.eligibility.outputs.eligible == 'true' && steps.pre-gate.outputs.gate_passed == 'true'
         id: scaffold
         uses: ./.github/actions/scaffold-closeout
         with:
@@ -86,7 +142,7 @@ jobs:
           actor: ${{ github.actor }}
 
       - name: Check closeout gate
-        if: steps.eligibility.outputs.eligible == 'true' && steps.scaffold.outputs.created != ''
+        if: steps.eligibility.outputs.eligible == 'true' && steps.pre-gate.outputs.gate_passed == 'true' && steps.scaffold.outputs.created != ''
         id: gate
         uses: ./.github/actions/check-gate
         with:
@@ -147,6 +203,7 @@ jobs:
         env:
           RUN_KEY: ${{ steps.run-key.outputs.run_key }}
           ELIGIBLE: ${{ steps.eligibility.outputs.eligible }}
+          PRE_GATE_PASSED: ${{ steps.pre-gate.outputs.gate_passed }}
           CREATED: ${{ steps.scaffold.outputs.created }}
           GATE_PASSED: ${{ steps.gate.outputs.gate_passed }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
@@ -162,6 +219,7 @@ jobs:
             echo "| Issue | #$ISSUE_NUMBER |"
             echo "| Actor | $ACTOR |"
             echo "| Eligible | $ELIGIBLE |"
+            echo "| Pre-scaffold gate | ${PRE_GATE_PASSED:-n/a} |"
             echo "| Created | ${CREATED:-n/a} |"
             echo "| Gate passed | ${GATE_PASSED:-n/a} |"
           } >> "$GITHUB_STEP_SUMMARY"

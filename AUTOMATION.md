@@ -253,7 +253,7 @@ These three gates complete the 8-stage model so every transition has a real mach
 **Review gate (Gate 6→7):**
 - A PR referencing the issue must exist (open or merged)
 - The PR must have at least one `APPROVED` review
-- No unresolved `CHANGES_REQUESTED` reviews may remain (a `CHANGES_REQUESTED` review is resolved if the same user later submitted an `APPROVED` or `DISMISSED` review)
+- No unresolved `CHANGES_REQUESTED` reviews may remain (a `CHANGES_REQUESTED` review is resolved if the same user submitted an `APPROVED` or `DISMISSED` review *after* the `CHANGES_REQUESTED` timestamp — chronological ordering is enforced)
 - Waiver keys: `review-pr`, `review-approval`, `review-changes-requested`
 - **Not yet implemented** (per gate contract rule 2 — skipped checks are logged): CI status checks on PR head commit, unresolved review thread check, `## Review Checklist` completion/waiver handling, trusted/non-author approval semantics
 
@@ -270,12 +270,12 @@ These three gates complete the 8-stage model so every transition has a real mach
 - A closeout scaffold comment with the owned-artifact marker must exist
 - The closeout comment must contain `## Closeout` heading
 - The closeout comment must contain `## Deferred Work` section (may be "None identified.")
-- The closeout comment must contain `## Process Improvement` section with at least one item dispositioned as `adopt`, `backlog`, or `reject`
+- The closeout comment must contain `## Process Improvement` section with at least one real authored item dispositioned as `**adopt**`, `**backlog**`, or `**reject**` (bold markdown format; HTML comments and template placeholder text are excluded from the check)
 - Waiver keys: `closeout-merged-pr`, `closeout-branch-deleted`, `closeout-follow-ups`, `closeout-scaffold`, `closeout-heading`, `closeout-deferred-work`, `closeout-process-improvement`, `closeout-process-improvement-dispositions`
 
 All three gates support `GATE-WAIVER` override by trusted actors (per `config/trust-policy.yml`).
 
-**Standalone closeout workflow:** The `scaffold-closeout.yml` workflow enforces the closeout gate after scaffolding — the sequence is `validate-eligibility → scaffold-closeout → check-gate(closeout) → status comment`. If the gate fails, the workflow posts a failure comment listing unmet conditions and exits non-zero.
+**Standalone closeout workflow:** The `scaffold-closeout.yml` workflow enforces closeout prerequisites *before* scaffolding and runs the full gate *after*. The sequence is `validate-eligibility → check-gate(closeout, pre-scaffold) → scaffold-closeout → check-gate(closeout, full) → status comment`. If the pre-scaffold gate fails (merged PR, branch deleted, follow-ups), the scaffold is not posted. If the post-scaffold gate fails (content checks), the workflow posts a failure comment listing unmet conditions and exits non-zero.
 
 ## Operator actions
 

@@ -21,6 +21,14 @@ inputs:
     description: 'Path to trust-policy.yml for waiver author validation'
     required: false
     default: 'config/trust-policy.yml'
+  check_mode:
+    description: >
+      Gate check mode. "full" (default) runs all checks for the requested stage.
+      "pre-scaffold" runs only pre-scaffold prerequisite checks (closeout stage only:
+      merged PR, branch deleted, follow-ups) — used to enforce preconditions before
+      the scaffold action mutates.
+    required: false
+    default: 'full'
 
 outputs:
   gate_passed:
@@ -45,6 +53,7 @@ runs:
         REQUESTED_STAGE: ${{ inputs.requested_stage }}
         ISSUE_BODY: ${{ inputs.issue_body }}
         TRUST_POLICY_PATH: ${{ inputs.trust_policy_path }}
+        CHECK_MODE: ${{ inputs.check_mode }}
       run: |
         set -euo pipefail
 
@@ -513,9 +522,9 @@ runs:
                 unmet+=("No PR found referencing issue #${ISSUE_NUMBER} — a PR must exist for review gate")
               fi
             else
-              # Fetch reviews for the PR
+              # Fetch reviews for the PR (include submitted_at for chronological ordering)
               reviews_json=$(gh api "repos/{owner}/{repo}/pulls/${review_pr_number}/reviews" \
-                --jq '[.[] | {state: .state, user: .user.login}]' 2>/dev/null || echo '[]')
+                --jq '[.[] | {state: .state, user: .user.login, submitted_at: .submitted_at}]' 2>/dev/null || echo '[]')
 
               # Check for at least one APPROVED review
               approved_count=$(echo "$reviews_json" | jq '[.[] | select(.state == "APPROVED")] | length')
@@ -526,15 +535,18 @@ runs:
               fi
 
               # Check for unresolved CHANGES_REQUESTED reviews.
-              # A CHANGES_REQUESTED review is resolved if the same user later submitted
-              # an APPROVED or DISMISSED review.
+              # A CHANGES_REQUESTED review is resolved if the same user LATER submitted
+              # an APPROVED or DISMISSED review (chronological ordering via submitted_at).
               changes_requested_users=$(echo "$reviews_json" | jq -r '[.[] | select(.state == "CHANGES_REQUESTED") | .user] | unique | .[]' 2>/dev/null || true)
               unresolved_cr=""
               while IFS= read -r cr_user; do
                 [ -z "$cr_user" ] && continue
-                # Check if this user later approved or dismissed
-                resolved=$(echo "$reviews_json" | jq --arg user "$cr_user" \
-                  '[.[] | select(.user == $user and (.state == "APPROVED" or .state == "DISMISSED"))] | length')
+                # Find the latest CHANGES_REQUESTED timestamp for this user
+                latest_cr_time=$(echo "$reviews_json" | jq -r --arg user "$cr_user" \
+                  '[.[] | select(.user == $user and .state == "CHANGES_REQUESTED") | .submitted_at] | sort | last')
+                # Check if this user has an APPROVED or DISMISSED review AFTER the latest CR
+                resolved=$(echo "$reviews_json" | jq --arg user "$cr_user" --arg cr_time "$latest_cr_time" \
+                  '[.[] | select(.user == $user and (.state == "APPROVED" or .state == "DISMISSED") and .submitted_at > $cr_time)] | length')
                 if [ "$resolved" -eq 0 ]; then
                   unresolved_cr="${unresolved_cr}${cr_user} "
                 fi
@@ -671,6 +683,10 @@ runs:
             fi
 
             # 4–7. Check closeout scaffold comment content
+            # In pre-scaffold mode, skip content checks — only prerequisites above are enforced
+            if [ "${CHECK_MODE:-full}" = "pre-scaffold" ]; then
+              echo "::notice::Pre-scaffold mode: skipping closeout scaffold content checks (4–7)"
+            else
             repo_full_closeout="${GITHUB_REPOSITORY:-SlateLabs/github-project-automation}"
             closeout_artifact_marker="gpa:owned-artifact:closeout:${repo_full_closeout}#${ISSUE_NUMBER}"
 
@@ -710,16 +726,22 @@ runs:
                   unmet+=("Closeout comment is missing required ## Process Improvement section")
                 fi
               else
-                # Check that at least one item is dispositioned as adopt, backlog, or reject
+                # Check that at least one real authored item is dispositioned as adopt, backlog, or reject.
+                # Strip HTML comments and template placeholder lines so only user-authored content is checked.
                 pi_section=$(echo "$closeout_comment_body" | sed -n '/^##\{0,1\} Process Improvement/,/^##\{0,1\} [^P]/p' | tail -n +2)
-                pi_disposition_re='(adopt|backlog|reject)'
-                if ! echo "$pi_section" | grep -qiE "$pi_disposition_re"; then
+                pi_authored=$(echo "$pi_section" \
+                  | sed '/<!--/,/-->/d' \
+                  | grep -v '^- _To be filled' \
+                  | grep -v '^\s*$')
+                pi_disposition_re='\*\*\s*(adopt|backlog|reject)\s*\*\*'
+                if ! echo "$pi_authored" | grep -qiE "$pi_disposition_re"; then
                   if ! check_waiver "closeout-process-improvement-dispositions"; then
                     unmet+=("## Process Improvement section must contain at least one item dispositioned as adopt, backlog, or reject")
                   fi
                 fi
               fi
             fi
+            fi  # end of CHECK_MODE != pre-scaffold
             ;;
 
           *)
