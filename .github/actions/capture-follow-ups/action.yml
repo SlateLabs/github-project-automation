@@ -125,7 +125,8 @@ runs:
               fi
             done
             if [ "$category_valid" = "false" ]; then
-              echo "::warning::FOLLOW-UP marker at sequence $global_seq has unrecognized category '$category' — will create issue but skip category label"
+              echo "::warning::Skipping FOLLOW-UP marker at sequence $global_seq: category '$category' is not in the allowed taxonomy (technical-debt accessibility usability documentation automation defect)"
+              continue
             fi
 
             # Validate and normalize blocking to yes/no — reject invalid values
