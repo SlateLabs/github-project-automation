@@ -58,14 +58,14 @@ runs:
         reason=""
 
         # --- 1. Issue exists and is an Issue (not a PR) ---
-        issue_json=$(gh issue view "$ISSUE_NUMBER" --json number,title,body,state,labels,isPullRequest 2>&1) || {
+        issue_json=$(gh issue view "$ISSUE_NUMBER" --json number,title,body,state,labels,url 2>&1) || {
           echo "eligible=false" >> "$GITHUB_OUTPUT"
           echo "reason=Issue #$ISSUE_NUMBER not found or not accessible" >> "$GITHUB_OUTPUT"
           exit 0
         }
 
-        is_pr=$(echo "$issue_json" | jq -r '.isPullRequest // false')
-        if [ "$is_pr" = "true" ]; then
+        issue_url=$(echo "$issue_json" | jq -r '.url // ""')
+        if echo "$issue_url" | grep -q '/pull/'; then
           echo "eligible=false" >> "$GITHUB_OUTPUT"
           echo "reason=#$ISSUE_NUMBER is a pull request, not an issue" >> "$GITHUB_OUTPUT"
           exit 0
