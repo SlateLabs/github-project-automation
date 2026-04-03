@@ -69,9 +69,18 @@ The orchestration workflow accepts `repository_dispatch` events with `event_type
 |-------|------|------------|
 | `issue_number` | integer | Positive integer (`>= 1`) |
 | `requested_stage` | string | One of: `kickoff`, `clarification`, `design`, `plan`, `execution`, `follow-up-capture`, `review`, `merge`, `closeout` |
-| `run_key` | string | Matches `<owner>/<repo>/<number>/<stage>/<timestamp>` format |
+| `run_key` | string | Canonical format `<owner>/<repo>/<number>/<stage>/<timestamp>` — must be payload-consistent (see below) |
 | `actor` | string | Non-empty |
 | `timestamp` | string | Non-empty |
+
+**Run key consistency (enforced at workflow start):** Beyond regex format, the `run_key` must be *payload-consistent* — its parsed components must agree with the other payload fields and the receiving repository:
+
+- `<owner>/<repo>` must match `github.repository` (the repo receiving the dispatch)
+- `<number>` must match `client_payload.issue_number`
+- `<stage>` must match `client_payload.requested_stage`
+- `<timestamp>` must match `client_payload.timestamp`
+
+A run key that passes the format regex but fails any consistency check is rejected. This prevents correlation breaks, dedup bypasses, and audit trail mismatches that would occur if a well-formatted but internally inconsistent run key were accepted.
 
 On validation failure, the workflow posts a diagnostic comment on the issue (if `issue_number` is parseable) listing all validation errors, then exits with a non-zero status.
 

@@ -49,6 +49,7 @@ run_validation() {
   local wd_issue_number="${7:-}"
   local wd_requested_stage="${8:-}"
   local wd_actor="${9:-}"
+  local current_repo="${10:-}"
 
   local output_file
   output_file=$(mktemp)
@@ -89,6 +90,26 @@ run_validation() {
         errors+=("missing required field: run_key")
       elif ! echo "$rd_run_key" | grep -qE '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[0-9]+/[A-Za-z0-9_-]+/[0-9]+$'; then
         errors+=("run_key does not match canonical format")
+      else
+        # Parse run_key and validate consistency with payload fields
+        rk_owner=$(echo "$rd_run_key" | cut -d/ -f1)
+        rk_repo=$(echo "$rd_run_key" | cut -d/ -f2)
+        rk_issue=$(echo "$rd_run_key" | cut -d/ -f3)
+        rk_stage=$(echo "$rd_run_key" | cut -d/ -f4)
+        rk_timestamp=$(echo "$rd_run_key" | cut -d/ -f5)
+
+        if [ -n "${current_repo:-}" ] && [ "${rk_owner}/${rk_repo}" != "$current_repo" ]; then
+          errors+=("run_key repo '${rk_owner}/${rk_repo}' does not match current repo '${current_repo}'")
+        fi
+        if [ -n "${rd_issue_number:-}" ] && [ "$rk_issue" != "$rd_issue_number" ]; then
+          errors+=("run_key issue_number '${rk_issue}' does not match client_payload.issue_number '${rd_issue_number}'")
+        fi
+        if [ -n "${rd_requested_stage:-}" ] && [ "$rk_stage" != "$rd_requested_stage" ]; then
+          errors+=("run_key stage '${rk_stage}' does not match client_payload.requested_stage '${rd_requested_stage}'")
+        fi
+        if [ -n "${rd_timestamp:-}" ] && [ "$rk_timestamp" != "$rd_timestamp" ]; then
+          errors+=("run_key timestamp '${rk_timestamp}' does not match client_payload.timestamp '${rd_timestamp}'")
+        fi
       fi
 
       if [ -z "${rd_actor:-}" ]; then
@@ -320,6 +341,97 @@ else
   FAIL=$((FAIL + 1))
   echo "  ✗ run_key with dots/hyphens should be accepted"
   TESTS+=("FAIL: run_key with special chars rejected")
+fi
+
+echo ""
+echo "=== Run Key Consistency Tests ==="
+
+echo ""
+echo "16. run_key repo mismatch rejected"
+if run_validation "repository_dispatch" \
+  "42" "kickoff" "WrongOrg/wrong-repo/42/kickoff/1711234567890" "actor1" "1711234567890" \
+  "" "" "" "SlateLabs/github-project-automation"; then
+  FAIL=$((FAIL + 1))
+  echo "  ✗ Should have failed with repo mismatch"
+  TESTS+=("FAIL: repo mismatch accepted")
+else
+  assert_contains "error mentions repo mismatch" "run_key repo.*does not match current repo" "$LAST_ERRORS"
+fi
+
+echo ""
+echo "17. run_key issue_number mismatch rejected"
+if run_validation "repository_dispatch" \
+  "42" "kickoff" "SlateLabs/github-project-automation/99/kickoff/1711234567890" "actor1" "1711234567890" \
+  "" "" "" "SlateLabs/github-project-automation"; then
+  FAIL=$((FAIL + 1))
+  echo "  ✗ Should have failed with issue_number mismatch"
+  TESTS+=("FAIL: issue_number mismatch accepted")
+else
+  assert_contains "error mentions issue_number mismatch" "run_key issue_number.*does not match" "$LAST_ERRORS"
+fi
+
+echo ""
+echo "18. run_key stage mismatch rejected"
+if run_validation "repository_dispatch" \
+  "42" "kickoff" "SlateLabs/github-project-automation/42/design/1711234567890" "actor1" "1711234567890" \
+  "" "" "" "SlateLabs/github-project-automation"; then
+  FAIL=$((FAIL + 1))
+  echo "  ✗ Should have failed with stage mismatch"
+  TESTS+=("FAIL: stage mismatch accepted")
+else
+  assert_contains "error mentions stage mismatch" "run_key stage.*does not match" "$LAST_ERRORS"
+fi
+
+echo ""
+echo "19. run_key timestamp mismatch rejected"
+if run_validation "repository_dispatch" \
+  "42" "kickoff" "SlateLabs/github-project-automation/42/kickoff/9999999999999" "actor1" "1711234567890" \
+  "" "" "" "SlateLabs/github-project-automation"; then
+  FAIL=$((FAIL + 1))
+  echo "  ✗ Should have failed with timestamp mismatch"
+  TESTS+=("FAIL: timestamp mismatch accepted")
+else
+  assert_contains "error mentions timestamp mismatch" "run_key timestamp.*does not match" "$LAST_ERRORS"
+fi
+
+echo ""
+echo "20. Consistent run_key with current_repo passes"
+if run_validation "repository_dispatch" \
+  "42" "kickoff" "SlateLabs/github-project-automation/42/kickoff/1711234567890" "jflamb" "1711234567890" \
+  "" "" "" "SlateLabs/github-project-automation"; then
+  assert_eq "issue_number" "42" "$(get_output issue_number)"
+  assert_eq "trigger" "repository_dispatch" "$(get_output trigger)"
+else
+  FAIL=$((FAIL + 1))
+  echo "  ✗ Consistent run_key should pass validation"
+  TESTS+=("FAIL: consistent run_key rejected")
+fi
+
+echo ""
+echo "21. run_key consistency skipped when current_repo is empty (no GITHUB_REPOSITORY)"
+if run_validation "repository_dispatch" \
+  "42" "kickoff" "AnyOrg/any-repo/42/kickoff/1711234567890" "actor1" "1711234567890" \
+  "" "" "" ""; then
+  assert_eq "issue_number" "42" "$(get_output issue_number)"
+else
+  FAIL=$((FAIL + 1))
+  echo "  ✗ Should pass when current_repo is empty (repo check skipped)"
+  TESTS+=("FAIL: empty current_repo caused rejection")
+fi
+
+echo ""
+echo "22. Multiple run_key mismatches reported together"
+if run_validation "repository_dispatch" \
+  "42" "kickoff" "WrongOrg/wrong-repo/99/design/9999999999999" "actor1" "1711234567890" \
+  "" "" "" "SlateLabs/github-project-automation"; then
+  FAIL=$((FAIL + 1))
+  echo "  ✗ Should have failed with multiple mismatches"
+  TESTS+=("FAIL: multiple mismatches accepted")
+else
+  assert_contains "mentions repo mismatch" "run_key repo" "$LAST_ERRORS"
+  assert_contains "mentions issue_number mismatch" "run_key issue_number" "$LAST_ERRORS"
+  assert_contains "mentions stage mismatch" "run_key stage" "$LAST_ERRORS"
+  assert_contains "mentions timestamp mismatch" "run_key timestamp" "$LAST_ERRORS"
 fi
 
 echo ""

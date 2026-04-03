@@ -53,6 +53,7 @@ jobs:
           RD_ACTOR: ${{ github.event.client_payload.actor }}
           RD_TIMESTAMP: ${{ github.event.client_payload.timestamp }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
@@ -86,10 +87,31 @@ jobs:
             fi
 
             # run_key: must match <owner>/<repo>/<number>/<stage>/<timestamp>
+            # AND parsed components must be consistent with the other payload fields
             if [ -z "${RD_RUN_KEY:-}" ]; then
               errors+=("missing required field: run_key")
             elif ! echo "$RD_RUN_KEY" | grep -qE '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[0-9]+/[A-Za-z0-9_-]+/[0-9]+$'; then
               errors+=("run_key does not match canonical format '<owner>/<repo>/<number>/<stage>/<timestamp>', got: '${RD_RUN_KEY}'")
+            else
+              # Parse run_key and validate consistency with payload fields
+              rk_owner=$(echo "$RD_RUN_KEY" | cut -d/ -f1)
+              rk_repo=$(echo "$RD_RUN_KEY" | cut -d/ -f2)
+              rk_issue=$(echo "$RD_RUN_KEY" | cut -d/ -f3)
+              rk_stage=$(echo "$RD_RUN_KEY" | cut -d/ -f4)
+              rk_timestamp=$(echo "$RD_RUN_KEY" | cut -d/ -f5)
+
+              if [ -n "${CURRENT_REPO:-}" ] && [ "${rk_owner}/${rk_repo}" != "$CURRENT_REPO" ]; then
+                errors+=("run_key repo '${rk_owner}/${rk_repo}' does not match current repo '${CURRENT_REPO}'")
+              fi
+              if [ -n "${RD_ISSUE_NUMBER:-}" ] && [ "$rk_issue" != "$RD_ISSUE_NUMBER" ]; then
+                errors+=("run_key issue_number '${rk_issue}' does not match client_payload.issue_number '${RD_ISSUE_NUMBER}'")
+              fi
+              if [ -n "${RD_REQUESTED_STAGE:-}" ] && [ "$rk_stage" != "$RD_REQUESTED_STAGE" ]; then
+                errors+=("run_key stage '${rk_stage}' does not match client_payload.requested_stage '${RD_REQUESTED_STAGE}'")
+              fi
+              if [ -n "${RD_TIMESTAMP:-}" ] && [ "$rk_timestamp" != "$RD_TIMESTAMP" ]; then
+                errors+=("run_key timestamp '${rk_timestamp}' does not match client_payload.timestamp '${RD_TIMESTAMP}'")
+              fi
             fi
 
             # actor: must be non-empty
