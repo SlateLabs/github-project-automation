@@ -22,9 +22,10 @@ on:
           - closeout
 
 permissions:
-  contents: read
+  contents: write
   issues: write
   discussions: write
+  pull-requests: write
 
 jobs:
   orchestrate:
@@ -227,6 +228,19 @@ jobs:
         if: steps.eligibility.outputs.eligible == 'true' && inputs.requested_stage == 'plan'
         id: scaffold-plan
         uses: ./.github/actions/scaffold-impl-plan
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          run_key: ${{ steps.run-key.outputs.run_key }}
+          actor: ${{ github.actor }}
+
+      # For the execution stage, scaffold branch + draft PR BEFORE the gate check.
+      # The gate validates execution artifacts (branch exists, PR exists, required headings)
+      # against the existing or just-created PR.
+      - name: Scaffold execution bootstrap (pre-gate)
+        if: steps.eligibility.outputs.eligible == 'true' && inputs.requested_stage == 'execution'
+        id: scaffold-execution
+        uses: ./.github/actions/scaffold-execution
         with:
           issue_number: ${{ inputs.issue_number }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
