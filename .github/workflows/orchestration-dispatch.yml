@@ -24,6 +24,7 @@ on:
 permissions:
   contents: read
   issues: write
+  discussions: write
 
 jobs:
   orchestrate:
@@ -204,6 +205,20 @@ jobs:
         run: |
           echo "::error::Issue is not eligible: $REASON"
           exit 1
+
+      # --- Pre-gate stage actions ---
+      # For the design stage, scaffold the discussion BEFORE the gate check.
+      # The gate validates discussion quality (headings, open questions, review)
+      # against the existing or just-created discussion.
+      - name: Scaffold design discussion (pre-gate)
+        if: steps.eligibility.outputs.eligible == 'true' && inputs.requested_stage == 'design'
+        id: scaffold-discussion
+        uses: ./.github/actions/scaffold-design-discussion
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          run_key: ${{ steps.run-key.outputs.run_key }}
+          actor: ${{ github.actor }}
 
       - name: Check gate conditions
         id: gate
