@@ -1,0 +1,321 @@
+name: 'Capture Follow-ups'
+description: >
+  Parses structured FOLLOW-UP markers from issue comments and creates backlog
+  issues for each unique marker. Idempotent: skips creation if an issue with
+  the owned-artifact marker already exists. Handles missing labels gracefully.
+  Per discussion #3 §10 (Backlog capture rule).
+
+inputs:
+  issue_number:
+    description: 'Source issue number to scan for follow-up markers'
+    required: true
+  github_token:
+    description: 'Token with issues:write scope'
+    required: true
+  run_key:
+    description: 'Orchestration run key for traceability'
+    required: false
+    default: ''
+  actor:
+    description: 'GitHub login of the actor triggering the capture'
+    required: false
+    default: ''
+  template_path:
+    description: 'Path to the follow-up issue body template'
+    required: false
+    default: 'templates/follow-up-item.md'
+
+outputs:
+  issues_created:
+    description: 'Number of new backlog issues created'
+    value: ${{ steps.capture.outputs.issues_created }}
+  issue_urls:
+    description: 'Newline-separated list of created issue URLs'
+    value: ${{ steps.capture.outputs.issue_urls }}
+  skipped:
+    description: 'Number of markers skipped (duplicates already exist)'
+    value: ${{ steps.capture.outputs.skipped }}
+  total_markers:
+    description: 'Total number of FOLLOW-UP markers found'
+    value: ${{ steps.capture.outputs.total_markers }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Capture follow-ups
+      id: capture
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        ISSUE_NUMBER: ${{ inputs.issue_number }}
+        RUN_KEY: ${{ inputs.run_key }}
+        ACTOR: ${{ inputs.actor }}
+        TEMPLATE_PATH: ${{ inputs.template_path }}
+      run: |
+        set -euo pipefail
+
+        repo_full="${GITHUB_REPOSITORY:-SlateLabs/github-project-automation}"
+        status_marker="gpa:follow-up-status:#${ISSUE_NUMBER}"
+
+        # --- 1. Pre-mutation guard: verify issue state ---
+        issue_state_json=$(gh issue view "$ISSUE_NUMBER" --json state,labels 2>&1) || {
+          echo "::error::Failed to fetch issue #$ISSUE_NUMBER: $issue_state_json"
+          exit 1
+        }
+        issue_state=$(echo "$issue_state_json" | jq -r '.state // ""')
+        has_block_label=$(echo "$issue_state_json" | jq -r '.labels[]?.name // empty' | grep -cF 'do-not-automate' || true)
+
+        if [ "$issue_state" != "OPEN" ]; then
+          echo "::error::Issue #$ISSUE_NUMBER is not open (state: $issue_state) — aborting follow-up capture"
+          exit 1
+        fi
+        if [ "$has_block_label" -gt 0 ]; then
+          echo "::error::Issue #$ISSUE_NUMBER has do-not-automate label — aborting follow-up capture"
+          exit 1
+        fi
+
+        # --- 2. Fetch all comments and parse FOLLOW-UP markers ---
+        comments_json=$(gh issue view "$ISSUE_NUMBER" --json comments --jq '.comments' 2>&1) || {
+          echo "::error::Failed to fetch comments for issue #$ISSUE_NUMBER: $comments_json"
+          exit 1
+        }
+
+        # Parse all markers across all comments.
+        # Format: <!-- FOLLOW-UP: <title> | <category> | <reason> | <blocking> -->
+        # Sequence number is 1-indexed across all comments in order.
+        markers_file=$(mktemp)
+        trap 'rm -f "$markers_file"' EXIT
+
+        comment_count=$(echo "$comments_json" | jq 'length')
+        global_seq=0
+
+        for (( ci=0; ci<comment_count; ci++ )); do
+          comment_body=$(echo "$comments_json" | jq -r ".[$ci].body // \"\"")
+
+          # Extract FOLLOW-UP markers from this comment.
+          # Use grep + sed to parse; handle multiline safely.
+          while IFS= read -r marker_line; do
+            [ -z "$marker_line" ] && continue
+            global_seq=$((global_seq + 1))
+
+            # Strip the HTML comment wrapper
+            # Input: <!-- FOLLOW-UP: title | category | reason | blocking -->
+            inner=$(echo "$marker_line" | sed -E 's/<!--[[:space:]]*FOLLOW-UP:[[:space:]]*//;s/[[:space:]]*-->//')
+
+            # Split on pipe delimiter (trim whitespace around each field)
+            title=$(echo "$inner" | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$1); print $1}')
+            category=$(echo "$inner" | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); print $2}')
+            reason=$(echo "$inner" | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$3); print $3}')
+            blocking=$(echo "$inner" | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$4); print $4}')
+
+            # Validate required fields — skip malformed markers
+            if [ -z "$title" ]; then
+              echo "::warning::Skipping malformed FOLLOW-UP marker at sequence $global_seq: missing title"
+              continue
+            fi
+
+            # Validate category against allowed values
+            valid_categories="technical-debt accessibility usability documentation automation defect"
+            category_valid="false"
+            for vc in $valid_categories; do
+              if [ "$vc" = "$category" ]; then
+                category_valid="true"
+                break
+              fi
+            done
+            if [ "$category_valid" = "false" ]; then
+              echo "::warning::FOLLOW-UP marker at sequence $global_seq has unrecognized category '$category' — will create issue but skip category label"
+            fi
+
+            # Normalize blocking to yes/no
+            case "$blocking" in
+              yes|Yes|YES) blocking="yes" ;;
+              *) blocking="no" ;;
+            esac
+
+            # Write parsed marker to temp file (tab-separated)
+            printf '%s\t%s\t%s\t%s\t%s\n' "$global_seq" "$title" "$category" "$reason" "$blocking" >> "$markers_file"
+          done < <(echo "$comment_body" | grep -oE '<!--\s*FOLLOW-UP:\s*[^>]+-->' || true)
+        done
+
+        total_markers=$(wc -l < "$markers_file" | tr -d ' ')
+        echo "::notice::Found $total_markers FOLLOW-UP marker(s) in issue #$ISSUE_NUMBER"
+
+        if [ "$total_markers" -eq 0 ]; then
+          echo "issues_created=0" >> "$GITHUB_OUTPUT"
+          echo "issue_urls=" >> "$GITHUB_OUTPUT"
+          echo "skipped=0" >> "$GITHUB_OUTPUT"
+          echo "total_markers=0" >> "$GITHUB_OUTPUT"
+
+          # Post informational status comment
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+        ### Follow-up capture — no markers found
+        <!-- $status_marker -->
+
+        | Field | Value |
+        |-------|-------|
+        | **Run key** | \`$RUN_KEY\` |
+        | **Actor** | @$ACTOR |
+        | **Result** | :information_source: No FOLLOW-UP markers found |
+
+        No \`<!-- FOLLOW-UP: ... -->\` markers were found in issue comments.
+        COMMENT_EOF
+          )"
+          exit 0
+        fi
+
+        # --- 3. Check template exists ---
+        if [ ! -f "$TEMPLATE_PATH" ]; then
+          echo "::error::Template file not found at $TEMPLATE_PATH"
+          exit 1
+        fi
+        template_content=$(cat "$TEMPLATE_PATH")
+
+        # --- 4. Process each marker ---
+        issues_created=0
+        skipped=0
+        created_urls=""
+        skipped_titles=""
+
+        # Fetch existing open issues to check for owned-artifact markers (idempotency)
+        existing_issues=$(gh issue list --state all --limit 200 --json number,body,title 2>/dev/null || echo '[]')
+
+        while IFS=$'\t' read -r seq title category reason blocking; do
+          owned_marker="gpa:owned-artifact:follow-up:${repo_full}#${ISSUE_NUMBER}:${seq}"
+
+          # Check if an issue with this owned-artifact marker already exists
+          existing_match=$(echo "$existing_issues" | jq -r --arg marker "$owned_marker" \
+            '.[] | select(.body | contains($marker)) | .number' 2>/dev/null | head -1 || true)
+
+          if [ -n "$existing_match" ]; then
+            echo "::notice::Follow-up #$seq ('$title') already exists as issue #$existing_match — skipping"
+            skipped=$((skipped + 1))
+            skipped_titles="${skipped_titles}| $seq | $title | #$existing_match | Skipped (exists) |"$'\n'
+            continue
+          fi
+
+          # Pre-mutation guard: re-verify issue state before each creation
+          guard_json=$(gh issue view "$ISSUE_NUMBER" --json state,labels 2>&1) || {
+            echo "::error::Failed to re-check issue #$ISSUE_NUMBER state before creating follow-up #$seq: $guard_json"
+            exit 1
+          }
+          guard_state=$(echo "$guard_json" | jq -r '.state // ""')
+          guard_block=$(echo "$guard_json" | jq -r '.labels[]?.name // empty' | grep -cF 'do-not-automate' || true)
+
+          if [ "$guard_state" != "OPEN" ]; then
+            echo "::error::Issue #$ISSUE_NUMBER is no longer open (state: $guard_state) — aborting before creating follow-up #$seq"
+            exit 1
+          fi
+          if [ "$guard_block" -gt 0 ]; then
+            echo "::error::Issue #$ISSUE_NUMBER now has do-not-automate label — aborting before creating follow-up #$seq"
+            exit 1
+          fi
+
+          # Render template
+          rendered_body=$(echo "$template_content" \
+            | sed "s|{{repo}}|$repo_full|g" \
+            | sed "s|{{source_issue}}|$ISSUE_NUMBER|g" \
+            | sed "s|{{sequence}}|$seq|g" \
+            | sed "s|{{category}}|$category|g" \
+            | sed "s|{{reason}}|$reason|g" \
+            | sed "s|{{blocking}}|$blocking|g" \
+            | sed "s|{{run_key}}|$RUN_KEY|g")
+
+          # Build label list — handle missing labels gracefully
+          labels="follow-up"
+
+          # Only add category label if it's a recognized category
+          valid_categories="technical-debt accessibility usability documentation automation defect"
+          for vc in $valid_categories; do
+            if [ "$vc" = "$category" ]; then
+              labels="${labels},$category"
+              break
+            fi
+          done
+
+          if [ "$blocking" = "yes" ]; then
+            labels="${labels},blocking"
+          fi
+
+          # Create the issue — use --label flag, gh handles missing labels
+          # with a warning (non-fatal on newer gh versions) or we catch the error
+          issue_title_prefixed="[follow-up] $title"
+
+          # Try creating with labels first; if it fails due to missing labels,
+          # retry without labels and log a warning
+          new_issue_url=""
+          create_output=$(gh issue create \
+            --title "$issue_title_prefixed" \
+            --body "$rendered_body" \
+            --label "$labels" 2>&1) && {
+            new_issue_url="$create_output"
+          } || {
+            echo "::warning::Failed to create issue with labels ($labels), retrying without labels: $create_output"
+            new_issue_url=$(gh issue create \
+              --title "$issue_title_prefixed" \
+              --body "$rendered_body" 2>&1) || {
+              echo "::error::Failed to create follow-up issue #$seq ('$title'): $new_issue_url"
+              exit 1
+            }
+            echo "::warning::Issue created without labels — manually add labels: $labels"
+          }
+
+          echo "::notice::Created follow-up issue for marker #$seq: $new_issue_url"
+          issues_created=$((issues_created + 1))
+          created_urls="${created_urls}${new_issue_url}"$'\n'
+
+        done < "$markers_file"
+
+        # --- 5. Post summary status comment ---
+        summary_rows=""
+        if [ -n "$created_urls" ]; then
+          while IFS= read -r url; do
+            [ -z "$url" ] && continue
+            summary_rows="${summary_rows}| :white_check_mark: Created | $url |"$'\n'
+          done <<< "$created_urls"
+        fi
+        if [ -n "$skipped_titles" ]; then
+          summary_rows="${summary_rows}${skipped_titles}"
+        fi
+
+        table_header="| Status | Detail |
+        |--------|--------|"
+
+        meta_rows="| Field | Value |
+        |-------|-------|"
+        if [ -n "$RUN_KEY" ]; then
+          meta_rows="${meta_rows}
+        | **Run key** | \`$RUN_KEY\` |"
+        fi
+        if [ -n "$ACTOR" ]; then
+          meta_rows="${meta_rows}
+        | **Actor** | @$ACTOR |"
+        fi
+        meta_rows="${meta_rows}
+        | **Markers found** | $total_markers |
+        | **Issues created** | $issues_created |
+        | **Skipped (existing)** | $skipped |"
+
+        gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+        ### Follow-up capture — complete
+        <!-- $status_marker -->
+
+        $meta_rows
+
+        $table_header
+        $summary_rows
+
+        Follow-up issues have been created from \`<!-- FOLLOW-UP: ... -->\` markers in this issue's comments.
+        COMMENT_EOF
+        )"
+
+        # --- 6. Set outputs ---
+        echo "issues_created=$issues_created" >> "$GITHUB_OUTPUT"
+        echo "skipped=$skipped" >> "$GITHUB_OUTPUT"
+        echo "total_markers=$total_markers" >> "$GITHUB_OUTPUT"
+
+        {
+          echo "issue_urls<<URLS_EOF"
+          echo "$created_urls"
+          echo "URLS_EOF"
+        } >> "$GITHUB_OUTPUT"
