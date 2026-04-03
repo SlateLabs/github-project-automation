@@ -148,6 +148,31 @@ def validate_plan_template():
     print("templates/implementation-plan.md: OK")
 
 
+def validate_execution_template():
+    """Validate that the execution bootstrap template exists and contains expected headings."""
+    execution_template = REPO_ROOT / "templates" / "execution-bootstrap.md"
+    if not execution_template.exists():
+        errors.append(f"templates/execution-bootstrap.md: file not found at {execution_template}")
+        return
+
+    content = execution_template.read_text()
+
+    # Required headings per discussion #3 §4 (execution gate, Gate 5→6)
+    required_headings = [
+        "## Summary",
+        "## Test plan",
+        "## Review Checklist",
+    ]
+    missing = [h for h in required_headings if h not in content]
+    if missing:
+        errors.append(
+            f"templates/execution-bootstrap.md: missing required headings: {missing}"
+        )
+        return
+
+    print("templates/execution-bootstrap.md: OK")
+
+
 def main():
     print("Validating configuration files...\n")
 
@@ -155,6 +180,7 @@ def main():
     validate_repos_config()
     validate_templates()
     validate_plan_template()
+    validate_execution_template()
 
     print()
     if errors:

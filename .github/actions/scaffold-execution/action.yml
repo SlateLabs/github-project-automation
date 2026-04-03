@@ -1,0 +1,354 @@
+name: 'Scaffold Execution Bootstrap'
+description: >
+  Creates a feature branch and draft PR for a source issue, pre-populated with
+  all headings required by the execution gate (discussion #3 §4, Gate 5→6).
+  Idempotent: skips creation if an open or merged PR with the owned-artifact
+  marker exists. Closed-unmerged PRs are reopened for deterministic recovery.
+
+inputs:
+  issue_number:
+    description: 'Source issue number'
+    required: true
+  github_token:
+    description: 'Token with contents:write, issues:write, pull-requests:write scope'
+    required: true
+  run_key:
+    description: 'Orchestration run key for traceability'
+    required: false
+    default: ''
+  actor:
+    description: 'GitHub login of the actor triggering the scaffold'
+    required: false
+    default: ''
+  template_path:
+    description: 'Path to the PR body template'
+    required: false
+    default: 'templates/execution-bootstrap.md'
+
+outputs:
+  pr_url:
+    description: 'URL of the created (or existing) PR'
+    value: ${{ steps.scaffold.outputs.pr_url }}
+  pr_number:
+    description: 'Number of the created (or existing) PR'
+    value: ${{ steps.scaffold.outputs.pr_number }}
+  branch_name:
+    description: 'Name of the created (or existing) branch'
+    value: ${{ steps.scaffold.outputs.branch_name }}
+  created:
+    description: '"true" if a new PR was created, "false" if one already existed'
+    value: ${{ steps.scaffold.outputs.created }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Scaffold execution bootstrap
+      id: scaffold
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        ISSUE_NUMBER: ${{ inputs.issue_number }}
+        RUN_KEY: ${{ inputs.run_key }}
+        ACTOR: ${{ inputs.actor }}
+        TEMPLATE_PATH: ${{ inputs.template_path }}
+      run: |
+        set -euo pipefail
+
+        # --- 1. Fetch issue metadata ---
+        issue_json=$(gh issue view "$ISSUE_NUMBER" --json title,body,comments 2>&1) || {
+          echo "::error::Failed to fetch issue #$ISSUE_NUMBER: $issue_json"
+          exit 1
+        }
+
+        issue_title=$(echo "$issue_json" | jq -r '.title // ""')
+
+        # --- 2. Check-before-act: owned-artifact discovery ---
+        # Two-tier discovery for the owned execution PR:
+        #   Tier 1: Owned-artifact marker in PR body
+        #            (<!-- gpa:owned-artifact:execution-bootstrap:REPO#N -->)
+        #   Tier 2: Open PR with branch matching <issue-number>-*
+        # Status comments use a distinct marker (gpa:execution-status:#N) and are
+        # NOT treated as the execution artifact.
+        repo_full="${GITHUB_REPOSITORY:-SlateLabs/github-project-automation}"
+        owned_artifact_marker="gpa:owned-artifact:execution-bootstrap:${repo_full}#${ISSUE_NUMBER}"
+        status_marker="gpa:execution-status:#${ISSUE_NUMBER}"
+
+        existing_pr_url=""
+        existing_pr_number=""
+        existing_branch=""
+        discovery_method=""
+
+        # Tier 1: Search open PRs for the owned-artifact marker in body
+        pr_list=$(gh pr list --state open --json number,body,headRefName --limit 50 2>/dev/null || echo '[]')
+        pr_count=$(echo "$pr_list" | jq 'length')
+
+        for (( i=0; i<pr_count; i++ )); do
+          pr_body=$(echo "$pr_list" | jq -r ".[$i].body // \"\"")
+          if echo "$pr_body" | grep -qF "$owned_artifact_marker"; then
+            existing_pr_number=$(echo "$pr_list" | jq -r ".[$i].number")
+            existing_branch=$(echo "$pr_list" | jq -r ".[$i].headRefName")
+            existing_pr_url="https://github.com/${repo_full}/pull/${existing_pr_number}"
+            discovery_method="owned-artifact-marker"
+            break
+          fi
+        done
+
+        # Also check merged PRs for Tier 1 (completed work should not be re-scaffolded).
+        # Closed-unmerged PRs are handled separately below (reopened for recovery).
+        if [ -z "$existing_pr_url" ]; then
+          pr_list_merged=$(gh pr list --state merged --json number,body,headRefName --limit 50 2>/dev/null || echo '[]')
+          pr_count_merged=$(echo "$pr_list_merged" | jq 'length')
+
+          for (( i=0; i<pr_count_merged; i++ )); do
+            pr_body=$(echo "$pr_list_merged" | jq -r ".[$i].body // \"\"")
+            if echo "$pr_body" | grep -qF "$owned_artifact_marker"; then
+              existing_pr_number=$(echo "$pr_list_merged" | jq -r ".[$i].number")
+              existing_branch=$(echo "$pr_list_merged" | jq -r ".[$i].headRefName")
+              existing_pr_url="https://github.com/${repo_full}/pull/${existing_pr_number}"
+              discovery_method="owned-artifact-marker"
+              break
+            fi
+          done
+        fi
+
+        # Recovery: Search closed-unmerged PRs for the owned-artifact marker.
+        # If found, reopen the PR so the operator can continue from where they
+        # left off. This makes closed-unmerged recovery deterministic end-to-end
+        # rather than silently creating a duplicate PR on the same branch.
+        if [ -z "$existing_pr_url" ]; then
+          pr_list_closed=$(gh pr list --state closed --json number,body,headRefName,mergedAt --limit 50 2>/dev/null || echo '[]')
+          pr_count_closed=$(echo "$pr_list_closed" | jq 'length')
+
+          for (( i=0; i<pr_count_closed; i++ )); do
+            pr_body=$(echo "$pr_list_closed" | jq -r ".[$i].body // \"\"")
+            merged_at=$(echo "$pr_list_closed" | jq -r ".[$i].mergedAt // \"\"")
+            # Skip merged PRs (they appear in --state closed too via API; belt-and-suspenders)
+            if [ -n "$merged_at" ] && [ "$merged_at" != "null" ]; then
+              continue
+            fi
+            if echo "$pr_body" | grep -qF "$owned_artifact_marker"; then
+              closed_pr_number=$(echo "$pr_list_closed" | jq -r ".[$i].number")
+              closed_pr_branch=$(echo "$pr_list_closed" | jq -r ".[$i].headRefName")
+
+              echo "::notice::Found closed-unmerged execution PR #${closed_pr_number} — verifying issue state before reopening"
+
+              # Check-before-act: re-verify issue state before the reopen mutation.
+              # The same guard that protects branch/PR creation (below) must also
+              # protect recovery — reopening a PR is a visible state change.
+              recovery_state_json=$(gh issue view "$ISSUE_NUMBER" --json state,labels 2>&1) || {
+                echo "::error::Failed to re-check issue #$ISSUE_NUMBER state before recovery: $recovery_state_json"
+                exit 1
+              }
+              recovery_issue_state=$(echo "$recovery_state_json" | jq -r '.state // ""')
+              recovery_block_label=$(echo "$recovery_state_json" | jq -r '.labels[]?.name // empty' | grep -cF 'do-not-automate' || true)
+
+              if [ "$recovery_issue_state" != "OPEN" ]; then
+                echo "::error::Issue #$ISSUE_NUMBER is no longer open (state: $recovery_issue_state) — aborting closed-unmerged recovery before reopening PR #${closed_pr_number}"
+                exit 1
+              fi
+              if [ "$recovery_block_label" -gt 0 ]; then
+                echo "::error::Issue #$ISSUE_NUMBER now has do-not-automate label — aborting closed-unmerged recovery before reopening PR #${closed_pr_number}"
+                exit 1
+              fi
+
+              # Reopen the PR via API
+              reopen_result=$(gh api "repos/{owner}/{repo}/pulls/${closed_pr_number}" \
+                -X PATCH -f "state=open" 2>&1) || {
+                echo "::error::Failed to reopen PR #${closed_pr_number}: $reopen_result"
+                exit 1
+              }
+
+              existing_pr_number="$closed_pr_number"
+              existing_branch="$closed_pr_branch"
+              existing_pr_url="https://github.com/${repo_full}/pull/${existing_pr_number}"
+              discovery_method="closed-unmerged-reopened"
+              break
+            fi
+          done
+        fi
+
+        # Tier 2: Search for open PR with branch matching <issue-number>-*
+        if [ -z "$existing_pr_url" ]; then
+          for (( i=0; i<pr_count; i++ )); do
+            pr_branch=$(echo "$pr_list" | jq -r ".[$i].headRefName // \"\"")
+            if echo "$pr_branch" | grep -qE "^${ISSUE_NUMBER}-"; then
+              existing_pr_number=$(echo "$pr_list" | jq -r ".[$i].number")
+              existing_branch="$pr_branch"
+              existing_pr_url="https://github.com/${repo_full}/pull/${existing_pr_number}"
+              discovery_method="branch-pattern-match"
+              break
+            fi
+          done
+        fi
+
+        if [ -n "$existing_pr_url" ]; then
+          echo "::notice::PR found via $discovery_method: $existing_pr_url — skipping creation"
+
+          echo "pr_url=$existing_pr_url" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$existing_pr_number" >> "$GITHUB_OUTPUT"
+          echo "branch_name=$existing_branch" >> "$GITHUB_OUTPUT"
+          echo "created=false" >> "$GITHUB_OUTPUT"
+
+          # Post informational status comment (distinct marker — not the PR artifact)
+          table_rows="| Field | Value |
+        |-------|-------|"
+          if [ -n "$RUN_KEY" ]; then
+            table_rows="${table_rows}
+        | **Run key** | \`$RUN_KEY\` |"
+          fi
+          if [ -n "$ACTOR" ]; then
+            table_rows="${table_rows}
+        | **Actor** | @$ACTOR |"
+          fi
+          table_rows="${table_rows}
+        | **PR** | $existing_pr_url |
+        | **Branch** | \`$existing_branch\` |
+        | **Discovery** | $discovery_method |
+        | **Result** | :fast_forward: Skipped — PR already exists |"
+
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+        ### Execution bootstrap scaffold — already exists
+        <!-- $status_marker -->
+
+        $table_rows
+
+        A PR for this issue already exists. No new branch or PR was created.
+        COMMENT_EOF
+          )"
+
+          exit 0
+        fi
+
+        # --- 3. Derive branch name from issue title ---
+        # Format: <issue-number>-<slug> where slug is the lowercase, hyphenated title
+        export ISSUE_TITLE_SAFE="$issue_title"
+
+        branch_slug=$(python3 -c '
+        import re, os
+        title = os.environ["ISSUE_TITLE_SAFE"]
+        # Lowercase, replace non-alphanum with hyphens, collapse runs, trim
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+        # Truncate to keep branch name reasonable (max 60 chars for slug)
+        slug = slug[:60].rstrip("-")
+        print(slug)
+        ' 2>&1) || {
+          echo "::error::Failed to generate branch slug: $branch_slug"
+          exit 1
+        }
+
+        branch_name="${ISSUE_NUMBER}-${branch_slug}"
+
+        # --- Check-before-act: re-verify issue state before mutations ---
+        # Between eligibility validation and now, the issue may have been closed
+        # or had do-not-automate added. Re-check before creating any artifacts.
+        issue_state_json=$(gh issue view "$ISSUE_NUMBER" --json state,labels 2>&1) || {
+          echo "::error::Failed to re-check issue #$ISSUE_NUMBER state: $issue_state_json"
+          exit 1
+        }
+        issue_state=$(echo "$issue_state_json" | jq -r '.state // ""')
+        has_block_label=$(echo "$issue_state_json" | jq -r '.labels[]?.name // empty' | grep -cF 'do-not-automate' || true)
+
+        if [ "$issue_state" != "OPEN" ]; then
+          echo "::error::Issue #$ISSUE_NUMBER is no longer open (state: $issue_state) — aborting scaffold before creating artifacts"
+          exit 1
+        fi
+        if [ "$has_block_label" -gt 0 ]; then
+          echo "::error::Issue #$ISSUE_NUMBER now has do-not-automate label — aborting scaffold before creating artifacts"
+          exit 1
+        fi
+
+        # Resolve default branch upfront (needed for PR creation even if branch already exists)
+        default_branch=$(gh api "repos/{owner}/{repo}" --jq '.default_branch' 2>/dev/null || echo "main")
+
+        # Check if branch already exists on remote
+        branch_exists=$(gh api "repos/{owner}/{repo}/branches/${branch_name}" --jq '.name' 2>/dev/null || true)
+        if [ -z "$branch_exists" ]; then
+          # Get default branch SHA to create from
+          default_sha=$(gh api "repos/{owner}/{repo}/git/ref/heads/${default_branch}" --jq '.object.sha' 2>/dev/null || true)
+
+          if [ -z "$default_sha" ]; then
+            echo "::error::Could not resolve SHA for default branch '$default_branch'"
+            exit 1
+          fi
+
+          # Create branch via API
+          create_result=$(gh api "repos/{owner}/{repo}/git/refs" \
+            -f "ref=refs/heads/${branch_name}" \
+            -f "sha=${default_sha}" 2>&1) || {
+            echo "::error::Failed to create branch '$branch_name': $create_result"
+            exit 1
+          }
+
+          echo "::notice::Branch created: $branch_name"
+        else
+          echo "::notice::Branch already exists: $branch_name"
+        fi
+
+        # --- 4. Render template ---
+        if [ ! -f "$TEMPLATE_PATH" ]; then
+          echo "::error::Template file not found at $TEMPLATE_PATH"
+          exit 1
+        fi
+
+        export REPO_FULL="$repo_full"
+        rendered_body=$(python3 -c 'import sys,os; t=open(sys.argv[1]).read(); t=t.replace("{{issue_title}}",os.environ["ISSUE_TITLE_SAFE"]); t=t.replace("{{issue_number}}",os.environ["ISSUE_NUMBER"]); t=t.replace("{{repo}}",os.environ["REPO_FULL"]); sys.stdout.write(t)' "$TEMPLATE_PATH")
+
+        # --- 5. Create draft PR ---
+        # Use gh api to create the PR so we can set the body reliably
+        # (gh pr create requires a local checkout on the branch)
+        pr_title="feat: ${issue_title}"
+        repo_owner="${GITHUB_REPOSITORY_OWNER:-SlateLabs}"
+        repo_name="${GITHUB_REPOSITORY#*/}"
+        repo_name="${repo_name:-github-project-automation}"
+
+        pr_result=$(gh api "repos/${repo_owner}/${repo_name}/pulls" \
+          -f "title=${pr_title}" \
+          -f "head=${branch_name}" \
+          -f "base=${default_branch}" \
+          -f "body=${rendered_body}" \
+          -F "draft=true" 2>&1) || {
+          echo "::error::Failed to create draft PR: $pr_result"
+          exit 1
+        }
+
+        new_pr_number=$(echo "$pr_result" | jq -r '.number // ""')
+        new_pr_url=$(echo "$pr_result" | jq -r '.html_url // ""')
+
+        if [ -z "$new_pr_number" ] || [ "$new_pr_number" = "null" ]; then
+          echo "::error::PR created but could not extract number. Response: $pr_result"
+          exit 1
+        fi
+
+        echo "::notice::Draft PR created: $new_pr_url"
+
+        echo "pr_url=$new_pr_url" >> "$GITHUB_OUTPUT"
+        echo "pr_number=$new_pr_number" >> "$GITHUB_OUTPUT"
+        echo "branch_name=$branch_name" >> "$GITHUB_OUTPUT"
+        echo "created=true" >> "$GITHUB_OUTPUT"
+
+        # --- 6. Post backlink comment on source issue ---
+        table_rows="| Field | Value |
+        |-------|-------|"
+        if [ -n "$RUN_KEY" ]; then
+          table_rows="${table_rows}
+        | **Run key** | \`$RUN_KEY\` |"
+        fi
+        if [ -n "$ACTOR" ]; then
+          table_rows="${table_rows}
+        | **Actor** | @$ACTOR |"
+        fi
+        table_rows="${table_rows}
+        | **PR** | $new_pr_url |
+        | **Branch** | \`$branch_name\` |
+        | **Result** | :white_check_mark: Execution bootstrap created |"
+
+        gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+        ### Execution bootstrap scaffold — created
+        <!-- $status_marker -->
+
+        $table_rows
+
+        A feature branch and draft PR have been created for this issue.
+        Fill in the PR body sections and mark the PR ready for review when implementation is complete.
+        COMMENT_EOF
+        )"

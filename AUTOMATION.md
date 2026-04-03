@@ -114,6 +114,41 @@ When triggered via orchestration, the scaffold runs **before** the plan gate che
 
 **Permissions required:** `contents: read`, `issues: write`
 
+### Execution bootstrap scaffold
+
+**Trigger:** `workflow_dispatch` via the standalone workflow or automatically via `orchestration-dispatch` when `requested_stage: execution`.
+
+**What it does:**
+1. Discovers whether an execution PR already exists using two-tier owned-artifact lookup:
+   - **Tier 1:** Owned-artifact marker (`<!-- gpa:owned-artifact:execution-bootstrap:REPO#N -->`) embedded in the PR body (rendered from the template)
+   - **Tier 2:** Open PR with branch matching `<issue-number>-*` (convention-based fallback)
+   - Status comments use a distinct marker (`<!-- gpa:execution-status:#N -->`) and are **not** treated as the execution artifact
+2. If no PR exists: derives a branch name from the issue title (`<issue-number>-<slug>`), creates the branch via the GitHub API, renders `templates/execution-bootstrap.md` with issue metadata, opens a draft PR, and posts a backlink comment on the source issue
+3. If a PR already exists: skips creation and posts an informational status comment
+
+**Standalone usage:**
+```
+gh workflow run scaffold-execution.yml -f issue_number=<N>
+```
+
+**Via orchestration:**
+```
+gh workflow run orchestration-dispatch.yml -f issue_number=<N> -f requested_stage=execution
+```
+When triggered via orchestration, the scaffold runs **before** the execution gate check. This means `requested_stage: execution` on an issue with no PR will create the branch and draft PR first, then the gate validates the PR (headings present, not draft, branch exists). The first run typically scaffolds the PR in draft state and then fails the gate on the draft check — the operator fills in the PR, marks it ready for review, and re-triggers to pass.
+
+**PR template:** `templates/execution-bootstrap.md` contains all headings required by the execution gate (Summary, Test plan) plus Review Checklist for operator self-check.
+
+**Branch naming:** `<issue-number>-<slug>` where the slug is derived from the issue title (lowercased, non-alphanumeric characters replaced with hyphens, truncated to 60 characters). This matches the pattern expected by the execution gate check in `check-gate`.
+
+**Idempotency:** The scaffold identifies its own output via the owned-artifact marker (`<!-- gpa:owned-artifact:execution-bootstrap:REPO#N -->`) embedded in the PR body. Status comments posted alongside the PR use a distinct marker (`<!-- gpa:execution-status:#N -->`) and are never mistaken for the execution artifact. Running the scaffold twice for the same issue will not create duplicate branches or PRs.
+
+**Recovery from abandoned PRs:** If a prior execution PR was closed without merge, the scaffold reopens it on the next run rather than creating a duplicate. The reopened PR retains its branch, body, and review history so the operator can continue from where they left off. To force a clean start, delete the branch and the closed PR before rerunning the scaffold.
+
+**Check-before-act guard:** Before any state-mutating operation — creating a branch, creating a PR, or reopening a closed-unmerged PR for recovery — the scaffold re-verifies that the source issue is still open and does not have the `do-not-automate` label. If the issue state changed after eligibility validation, the scaffold aborts without mutating any artifacts. This guard covers both the fresh-creation path and the closed-unmerged recovery path.
+
+**Permissions required:** `contents: write`, `issues: write`, `pull-requests: write`
+
 ## Operator actions
 
 | Action | How |
@@ -122,5 +157,6 @@ When triggered via orchestration, the scaffold runs **before** the plan gate che
 | Retry failed run | Re-trigger via `workflow_dispatch` with issue number and target stage |
 | Scaffold a design discussion | `gh workflow run scaffold-design-discussion.yml -f issue_number=<N>` |
 | Scaffold an implementation plan | `gh workflow run scaffold-impl-plan.yml -f issue_number=<N>` |
+| Scaffold execution bootstrap | `gh workflow run scaffold-execution.yml -f issue_number=<N>` |
 | Waive a gate | Post `GATE-WAIVER: <gate-name> — <reason>` on the issue/PR |
 | Block automation | Add `do-not-automate` label to the issue |
