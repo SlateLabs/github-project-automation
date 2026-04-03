@@ -466,31 +466,45 @@ runs:
 
           review)
             # Gate: Review (§4 Gate 6→7)
-            # Conditions:
+            # Implemented checks:
             #   1. A PR referencing this issue exists (open or merged)
             #   2. PR has at least one approving review
             #   3. No unresolved changes-requested reviews remain
+            # Skipped checks (§4 Gate 6→7 — not yet implemented per gate contract rule 2):
+            #   - SKIPPED: All required CI status checks pass on the PR head commit
+            #   - SKIPPED: No unresolved review threads remain (or each has a GATE-WAIVER reply)
+            #   - SKIPPED: PR body contains ## Review Checklist with items for accessibility,
+            #     usability/content, documentation, hygiene — each marked complete or waived
+            #   - SKIPPED: Approving review is from a trusted actor (non-author)
 
-            # Find PR referencing this issue (open or merged)
+            # Find PR referencing this issue — deterministic: prefer branch convention,
+            # then search by issue reference. For open PRs, prefer most recently updated.
             review_pr_json=""
             review_pr_number=""
 
-            # Search open PRs first
-            review_pr_json=$(gh pr list --state open --search "\"#${ISSUE_NUMBER}\" in:title,body" \
-              --json number,headRefName --jq '.[0]' 2>/dev/null || echo '')
+            # Primary: branch convention (deterministic)
+            review_pr_json=$(gh pr list --state open --json number,headRefName,updatedAt --limit 100 \
+              --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))] | sort_by(.updatedAt) | reverse | .[0]" 2>/dev/null || echo '')
             review_pr_number=$(echo "$review_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
 
             if [ -z "$review_pr_number" ]; then
-              # Fallback: branch convention
-              review_pr_json=$(gh pr list --state open --json number,headRefName --limit 100 \
-                --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))][0]" 2>/dev/null || echo '')
+              # Fallback: search by issue reference (most recently updated)
+              review_pr_json=$(gh pr list --state open --search "\"#${ISSUE_NUMBER}\" in:title,body" \
+                --json number,headRefName,updatedAt --jq 'sort_by(.updatedAt) | reverse | .[0]' 2>/dev/null || echo '')
               review_pr_number=$(echo "$review_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
             fi
 
             if [ -z "$review_pr_number" ]; then
-              # Check merged PRs
+              # Check merged PRs (most recently merged)
+              review_pr_json=$(gh pr list --state merged --json number,headRefName,mergedAt --limit 500 \
+                --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))] | sort_by(.mergedAt) | reverse | .[0]" 2>/dev/null || echo '')
+              review_pr_number=$(echo "$review_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
+            fi
+
+            if [ -z "$review_pr_number" ]; then
+              # Last resort: search merged PRs by reference
               review_pr_json=$(gh pr list --state merged --search "\"#${ISSUE_NUMBER}\" in:title,body" \
-                --json number --jq '.[0]' 2>/dev/null || echo '')
+                --json number,mergedAt --jq 'sort_by(.mergedAt) | reverse | .[0]' 2>/dev/null || echo '')
               review_pr_number=$(echo "$review_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
             fi
 
@@ -532,25 +546,33 @@ runs:
                 fi
               fi
             fi
+
+            # Document skipped checks in output for operator visibility
+            echo "::notice::Review gate skipped checks (not yet implemented): CI status checks, unresolved review threads, Review Checklist completion, trusted/non-author approval semantics"
             ;;
 
           merge)
             # Gate: Merge (§4 Gate 7→8)
-            # Conditions:
+            # Implemented checks:
             #   1. A merged PR referencing this issue exists
             #   2. The merged PR had an approving review
+            # Skipped checks (§4 Gate 7→8 — not yet implemented per gate contract rule 2):
+            #   - SKIPPED: PR is mergeable (no merge conflicts, branch protection satisfied)
+            #   - SKIPPED: PR labels do not include do-not-merge
+            #   - SKIPPED: The most recent commit status is success
 
+            # Deterministic PR selection: prefer branch convention, sorted by merge time
             merged_pr_number=""
 
-            # Search merged PRs by issue reference
-            merged_pr_json=$(gh pr list --state merged --search "\"#${ISSUE_NUMBER}\" in:title,body" \
-              --json number --jq '.[0]' 2>/dev/null || echo '')
+            # Primary: branch convention (most recently merged)
+            merged_pr_json=$(gh pr list --state merged --json number,headRefName,mergedAt --limit 500 \
+              --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))] | sort_by(.mergedAt) | reverse | .[0]" 2>/dev/null || echo '')
             merged_pr_number=$(echo "$merged_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
 
             if [ -z "$merged_pr_number" ]; then
-              # Fallback: branch convention
-              merged_pr_json=$(gh pr list --state merged --json number,headRefName --limit 500 \
-                --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))][0]" 2>/dev/null || echo '')
+              # Fallback: search by issue reference (most recently merged)
+              merged_pr_json=$(gh pr list --state merged --search "\"#${ISSUE_NUMBER}\" in:title,body" \
+                --json number,mergedAt --jq 'sort_by(.mergedAt) | reverse | .[0]' 2>/dev/null || echo '')
               merged_pr_number=$(echo "$merged_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
             fi
 
@@ -569,63 +591,133 @@ runs:
                 fi
               fi
             fi
+
+            # Document skipped checks in output for operator visibility
+            echo "::notice::Merge gate skipped checks (not yet implemented): mergeability/conflict check, do-not-merge label check, latest commit status check"
             ;;
 
           closeout)
             # Gate: Closeout (§4 Gate 8→done)
-            # Conditions:
+            # Conditions per discussion #3:
             #   1. A merged PR referencing this issue exists
-            #   2. Follow-up capture evidence (FOLLOW-UP markers or follow-up issues exist)
-            #   3. A closeout scaffold comment exists (owned-artifact marker)
+            #   2. The source branch is deleted
+            #   3. Follow-up capture evidence (valid FOLLOW-UP markers or follow-up status comment)
+            #   4. A closeout scaffold comment exists with owned-artifact marker
+            #   5. Closeout comment contains ## Closeout heading
+            #   6. Closeout comment contains ## Deferred Work section
+            #   7. Closeout comment contains ## Process Improvement section with dispositioned items
 
-            # 1. Check for merged PR
+            # 1. Check for merged PR — deterministic selection for umbrella issues
+            # Use most-recently-merged PR matching branch convention, not arbitrary first match.
             closeout_merged_pr=""
-            closeout_merged_json=$(gh pr list --state merged --search "\"#${ISSUE_NUMBER}\" in:title,body" \
-              --json number --jq '.[0].number' 2>/dev/null || true)
-            closeout_merged_pr=$(echo "$closeout_merged_json" | tr -d '[:space:]')
+            closeout_merged_branch=""
 
-            if [ -z "$closeout_merged_pr" ] || [ "$closeout_merged_pr" = "null" ]; then
-              # Fallback: branch convention
-              closeout_merged_pr=$(gh pr list --state merged --json number,headRefName --limit 500 \
-                --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))][0].number" 2>/dev/null || true)
-              closeout_merged_pr=$(echo "$closeout_merged_pr" | tr -d '[:space:]')
+            # Primary: branch convention (deterministic — sorted by merge time descending)
+            closeout_branch_json=$(gh pr list --state merged --json number,headRefName,mergedAt --limit 500 \
+              --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))] | sort_by(.mergedAt) | reverse | .[0]" 2>/dev/null || echo '')
+            closeout_merged_pr=$(echo "$closeout_branch_json" | jq -r '.number // empty' 2>/dev/null || true)
+            closeout_merged_branch=$(echo "$closeout_branch_json" | jq -r '.headRefName // empty' 2>/dev/null || true)
+
+            if [ -z "$closeout_merged_pr" ]; then
+              # Fallback: search by issue reference (also sorted for determinism)
+              closeout_search_json=$(gh pr list --state merged --search "\"#${ISSUE_NUMBER}\" in:title,body" \
+                --json number,headRefName,mergedAt --jq 'sort_by(.mergedAt) | reverse | .[0]' 2>/dev/null || echo '')
+              closeout_merged_pr=$(echo "$closeout_search_json" | jq -r '.number // empty' 2>/dev/null || true)
+              closeout_merged_branch=$(echo "$closeout_search_json" | jq -r '.headRefName // empty' 2>/dev/null || true)
             fi
 
-            if [ -z "$closeout_merged_pr" ] || [ "$closeout_merged_pr" = "null" ]; then
+            if [ -z "$closeout_merged_pr" ]; then
               if ! check_waiver "closeout-merged-pr"; then
                 unmet+=("No merged PR found referencing issue #${ISSUE_NUMBER} — a merged PR is required for closeout")
               fi
             fi
 
-            # 2. Check for follow-up capture evidence
-            # Either FOLLOW-UP markers in comments OR existing follow-up issues with
-            # owned-artifact markers satisfy this condition.
+            # 2. Check source branch is deleted (§4 Gate 8→done check 2)
+            if [ -n "$closeout_merged_branch" ]; then
+              branch_still_exists=$(gh api "repos/{owner}/{repo}/branches/${closeout_merged_branch}" --jq '.name' 2>/dev/null || true)
+              if [ -n "$branch_still_exists" ]; then
+                if ! check_waiver "closeout-branch-deleted"; then
+                  unmet+=("Source branch '${closeout_merged_branch}' from merged PR #${closeout_merged_pr} still exists — delete it before closeout")
+                fi
+              fi
+            fi
+
+            # 3. Check for follow-up capture evidence
             closeout_comments_json=$(gh issue view "$ISSUE_NUMBER" --comments --json comments 2>/dev/null || echo '{"comments":[]}')
 
-            # Check for FOLLOW-UP markers in comments
-            followup_marker_found=$(echo "$closeout_comments_json" | jq -r '.comments[].body // ""' \
-              | grep -cE '<!--\s*FOLLOW-UP:' || true)
+            # Use proper 5-field FOLLOW-UP marker validation (same as follow-up-capture gate)
+            # Valid categories: technical-debt accessibility usability documentation automation defect
+            followup_valid_count=$(echo "$closeout_comments_json" | python3 -c "
+            import sys,json,re
+            vc={'technical-debt','accessibility','usability','documentation','automation','defect'}
+            data=json.load(sys.stdin)
+            cs=data.get('comments',[])
+            count=sum(1 for c in cs for m in re.finditer(r'<!--\s*FOLLOW-UP:\s*(.*?)-->',c.get('body',''),re.DOTALL)
+              if len(m.group(1).split('|'))==5
+              and all(f.strip() for f in m.group(1).split('|'))
+              and m.group(1).split('|')[1].strip() in vc
+              and m.group(1).split('|')[4].strip().lower() in ('yes','no'))
+            print(count)" 2>/dev/null || echo "0")
 
-            # Check for follow-up status comment (capture was run)
+            # Also check for follow-up status comment (capture stage was run)
             followup_status_marker="gpa:follow-up-status:#${ISSUE_NUMBER}"
             followup_status_found=$(echo "$closeout_comments_json" | jq -r '.comments[].body // ""' \
               | grep -cF "$followup_status_marker" || true)
 
-            if [ "$followup_marker_found" -eq 0 ] && [ "$followup_status_found" -eq 0 ]; then
+            if [ "$followup_valid_count" -eq 0 ] && [ "$followup_status_found" -eq 0 ]; then
               if ! check_waiver "closeout-follow-ups"; then
-                unmet+=("No follow-up capture evidence found — run follow-up-capture stage or add FOLLOW-UP markers before closeout")
+                unmet+=("No follow-up capture evidence found — run follow-up-capture stage or add valid FOLLOW-UP markers (all 5 fields required) before closeout")
               fi
             fi
 
-            # 3. Check for closeout scaffold comment (owned-artifact marker)
+            # 4–7. Check closeout scaffold comment content
             repo_full_closeout="${GITHUB_REPOSITORY:-SlateLabs/github-project-automation}"
             closeout_artifact_marker="gpa:owned-artifact:closeout:${repo_full_closeout}#${ISSUE_NUMBER}"
-            closeout_scaffold_found=$(echo "$closeout_comments_json" | jq -r '.comments[].body // ""' \
-              | grep -cF "$closeout_artifact_marker" || true)
 
-            if [ "$closeout_scaffold_found" -eq 0 ]; then
+            # Find the closeout comment by owned-artifact marker
+            closeout_comment_body=""
+            closeout_comment_count=$(echo "$closeout_comments_json" | jq '.comments | length')
+            for (( ci=0; ci<closeout_comment_count; ci++ )); do
+              ci_body=$(echo "$closeout_comments_json" | jq -r ".comments[$ci].body // \"\"")
+              if echo "$ci_body" | grep -qF "$closeout_artifact_marker"; then
+                closeout_comment_body="$ci_body"
+                break
+              fi
+            done
+
+            if [ -z "$closeout_comment_body" ]; then
               if ! check_waiver "closeout-scaffold"; then
                 unmet+=("No closeout scaffold comment found — the closeout retrospective must be posted before advancing")
+              fi
+            else
+              # 5. Check for ## Closeout heading (§4 Gate 8→done check 3)
+              if ! echo "$closeout_comment_body" | grep -qE '^#{1,2}\s+Closeout'; then
+                if ! check_waiver "closeout-heading"; then
+                  unmet+=("Closeout comment is missing required ## Closeout heading")
+                fi
+              fi
+
+              # 6. Check for ## Deferred Work section (§4 Gate 8→done check 4)
+              if ! echo "$closeout_comment_body" | grep -qE '^#{1,2}\s+Deferred Work'; then
+                if ! check_waiver "closeout-deferred-work"; then
+                  unmet+=("Closeout comment is missing required ## Deferred Work section")
+                fi
+              fi
+
+              # 7. Check for ## Process Improvement section with dispositioned items (§4 Gate 8→done check 5)
+              if ! echo "$closeout_comment_body" | grep -qE '^#{1,2}\s+Process Improvement'; then
+                if ! check_waiver "closeout-process-improvement"; then
+                  unmet+=("Closeout comment is missing required ## Process Improvement section")
+                fi
+              else
+                # Check that at least one item is dispositioned as adopt, backlog, or reject
+                pi_section=$(echo "$closeout_comment_body" | sed -n '/^##\{0,1\} Process Improvement/,/^##\{0,1\} [^P]/p' | tail -n +2)
+                pi_disposition_re='(adopt|backlog|reject)'
+                if ! echo "$pi_section" | grep -qiE "$pi_disposition_re"; then
+                  if ! check_waiver "closeout-process-improvement-dispositions"; then
+                    unmet+=("## Process Improvement section must contain at least one item dispositioned as adopt, backlog, or reject")
+                  fi
+                fi
               fi
             fi
             ;;

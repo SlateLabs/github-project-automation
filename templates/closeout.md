@@ -1,6 +1,6 @@
 <!-- gpa:owned-artifact:closeout:{{repo}}#{{issue_number}} -->
 
-## Closeout Retrospective
+## Closeout
 
 > **Source issue:** {{repo}}#{{issue_number}}
 > **Issue title:** {{issue_title}}
@@ -35,6 +35,28 @@
 
 {{follow_up_summary}}
 
+## Deferred Work
+
+<!-- List any work that was explicitly deferred during this issue's lifecycle.
+     Use "None identified." if nothing was deferred. -->
+
+None identified.
+
+## Process Improvement
+
+<!-- List at least one process improvement observation and disposition it as:
+     adopt — start doing this going forward
+     backlog — worth doing but not urgent; create a follow-up issue
+     reject — considered but not worth changing
+
+     Example:
+     - **adopt**: Gate checks should run in the standalone workflow, not just orchestration
+     - **backlog**: Follow-up marker validation could be stricter (#XX)
+     - **reject**: Splitting closeout into two stages adds overhead without clear benefit
+-->
+
+- _To be filled in during retrospective — at least one item required, dispositioned as adopt/backlog/reject_
+
 ### Exit checklist
 
 - [ ] All acceptance criteria from the implementation plan are met
@@ -42,4 +64,5 @@
 - [ ] Follow-up items captured and triaged
 - [ ] No open branches remain for this issue
 - [ ] Documentation updated if required
+- [ ] Process improvement items dispositioned above
 - [ ] Issue is ready to close

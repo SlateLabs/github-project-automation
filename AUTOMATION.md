@@ -248,26 +248,34 @@ When triggered via orchestration, the scaffold runs **before** the closeout gate
 
 ### Gate checks — review, merge, closeout
 
-These three gates complete the 8-stage model so every transition has a real machine-testable check.
+These three gates complete the 8-stage model so every transition has a real machine-testable check. PR selection across all three gates is **deterministic**: branch-convention matches (`<issue-number>-*` or `<issue-number>/*`) are preferred and sorted by recency, so umbrella issues with multiple slice PRs always evaluate the most recent one.
 
 **Review gate (Gate 6→7):**
 - A PR referencing the issue must exist (open or merged)
 - The PR must have at least one `APPROVED` review
 - No unresolved `CHANGES_REQUESTED` reviews may remain (a `CHANGES_REQUESTED` review is resolved if the same user later submitted an `APPROVED` or `DISMISSED` review)
 - Waiver keys: `review-pr`, `review-approval`, `review-changes-requested`
+- **Not yet implemented** (per gate contract rule 2 — skipped checks are logged): CI status checks on PR head commit, unresolved review thread check, `## Review Checklist` completion/waiver handling, trusted/non-author approval semantics
 
 **Merge gate (Gate 7→8):**
 - A merged PR referencing the issue must exist
 - The merged PR must have had at least one `APPROVED` review
 - Waiver keys: `merge-pr`, `merge-approval`
+- **Not yet implemented** (per gate contract rule 2 — skipped checks are logged): mergeability/conflict check, `do-not-merge` label check, latest commit status check
 
 **Closeout gate (Gate 8→done):**
 - A merged PR referencing the issue must exist
-- Follow-up capture evidence must exist (either `<!-- FOLLOW-UP: ... -->` markers in comments, or a follow-up status comment indicating the capture stage was run)
+- The source branch from the merged PR must be deleted
+- Follow-up capture evidence must exist: either valid `<!-- FOLLOW-UP: title | category | reason | impact | blocking -->` markers (all 5 fields required, category from the documented taxonomy) in issue comments, or a follow-up status comment (`gpa:follow-up-status`) indicating the capture stage was run
 - A closeout scaffold comment with the owned-artifact marker must exist
-- Waiver keys: `closeout-merged-pr`, `closeout-follow-ups`, `closeout-scaffold`
+- The closeout comment must contain `## Closeout` heading
+- The closeout comment must contain `## Deferred Work` section (may be "None identified.")
+- The closeout comment must contain `## Process Improvement` section with at least one item dispositioned as `adopt`, `backlog`, or `reject`
+- Waiver keys: `closeout-merged-pr`, `closeout-branch-deleted`, `closeout-follow-ups`, `closeout-scaffold`, `closeout-heading`, `closeout-deferred-work`, `closeout-process-improvement`, `closeout-process-improvement-dispositions`
 
 All three gates support `GATE-WAIVER` override by trusted actors (per `config/trust-policy.yml`).
+
+**Standalone closeout workflow:** The `scaffold-closeout.yml` workflow enforces the closeout gate after scaffolding — the sequence is `validate-eligibility → scaffold-closeout → check-gate(closeout) → status comment`. If the gate fails, the workflow posts a failure comment listing unmet conditions and exits non-zero.
 
 ## Operator actions
 
