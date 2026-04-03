@@ -21,6 +21,7 @@ from gateway.github_api import (
 
 REQUESTED_STAGE = "kickoff"
 DISPATCH_EVENT_TYPE = "orchestration-start"
+DISPATCH_RETRY_BACKOFFS = (1.0, 4.0, 16.0)
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,7 @@ class GatewayService:
         dedup_store: InMemoryDedupStore,
         logger: Callable[[dict[str, Any]], None],
         clock: Callable[[], int] | None = None,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.webhook_secret = webhook_secret.encode("utf-8")
         self.github_client = github_client
@@ -56,6 +58,7 @@ class GatewayService:
         self.dedup_store = dedup_store
         self.logger = logger
         self.clock = clock or (lambda: int(time.time() * 1000))
+        self.sleep = sleep or time.sleep
 
     def handle_delivery(self, headers: dict[str, str], raw_body: bytes) -> GatewayResult:
         delivery_id = headers.get("X-GitHub-Delivery", "")
@@ -190,7 +193,7 @@ class GatewayService:
         try:
             if decision.outcome == "record-only":
                 self.github_client.ensure_issue_label(repo_full_name, issue_number, "pending-review")
-                self.dedup_store.mark_completed(prefix, run_key, now_ms)
+                self.dedup_store.clear_active(prefix)
                 self.logger(
                     self._log_fields(
                         delivery_id=delivery_id,
@@ -211,11 +214,22 @@ class GatewayService:
                     },
                 )
 
-            self.github_client.dispatch_repository_event(
-                repo_full_name,
-                DISPATCH_EVENT_TYPE,
-                client_payload,
-            )
+            last_error = self._dispatch_with_retry(repo_full_name, client_payload, delivery_id, actor, issue_number, run_key)
+            if last_error is not None:
+                self.dedup_store.clear_active(prefix)
+                self.logger(
+                    self._log_fields(
+                        delivery_id=delivery_id,
+                        actor=actor,
+                        repo=repo_full_name,
+                        issue=issue_number,
+                        run_key=run_key,
+                        outcome="dispatch-failed",
+                        reason=str(last_error),
+                    )
+                )
+                return GatewayResult(502, {"outcome": "dispatch-failed", "reason": str(last_error), "run_key": run_key})
+
             self.dedup_store.mark_completed(prefix, run_key, now_ms)
             self.logger(
                 self._log_fields(
@@ -242,6 +256,47 @@ class GatewayService:
                 )
             )
             return GatewayResult(502, {"outcome": "error", "reason": str(exc), "run_key": run_key})
+
+    def _dispatch_with_retry(
+        self,
+        repo_full_name: str,
+        client_payload: dict[str, Any],
+        delivery_id: str,
+        actor: str,
+        issue_number: int,
+        run_key: str,
+    ) -> GitHubApiError | None:
+        """Attempt repository_dispatch with exponential backoff.
+
+        Returns None on success, or the last GitHubApiError after all
+        retries are exhausted.
+        """
+        last_error: GitHubApiError | None = None
+        for attempt, backoff in enumerate(DISPATCH_RETRY_BACKOFFS):
+            try:
+                self.github_client.dispatch_repository_event(
+                    repo_full_name,
+                    DISPATCH_EVENT_TYPE,
+                    client_payload,
+                )
+                return None
+            except GitHubApiError as exc:
+                last_error = exc
+                self.logger(
+                    {
+                        "delivery_id": delivery_id,
+                        "actor": actor,
+                        "repo": repo_full_name,
+                        "issue": issue_number,
+                        "run_key": run_key,
+                        "outcome": "dispatch-retry",
+                        "attempt": attempt + 1,
+                        "backoff_s": backoff,
+                        "reason": str(exc),
+                    }
+                )
+                self.sleep(backoff)
+        return last_error
 
     def _valid_signature(self, signature: str, raw_body: bytes) -> bool:
         if not signature.startswith("sha256="):

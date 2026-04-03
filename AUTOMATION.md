@@ -92,7 +92,7 @@ If the listener cannot prove that the event is a kickoff transition, it fails cl
 | Outcome | Behavior |
 |---------|----------|
 | `trusted` | Dispatch `repository_dispatch` to the participating repo |
-| `record-only` | Add `pending-review` label to the source issue; no dispatch |
+| `record-only` | Add `pending-review` label to the source issue; no dispatch; does not record a completed run (preserves the ability for a trusted actor to immediately re-trigger the same prefix) |
 | `denied` | Log and drop the event with no repo mutation |
 
 ### Response codes
@@ -104,7 +104,11 @@ If the listener cannot prove that the event is a kickoff transition, it fails cl
 | `400` | Missing headers or invalid JSON payload |
 | `401` | Invalid webhook signature |
 | `422` | Project item is ineligible for kickoff automation |
-| `502` | GitHub API call failed while resolving, labeling, or dispatching |
+| `502` | GitHub API call failed while resolving, labeling, or dispatching (dispatch retries exhausted) |
+
+### Dispatch retry/backoff
+
+If `repository_dispatch` fails (GitHub API error), the gateway retries up to 3 times with exponential backoff: **1s, 4s, 16s**. Each retry attempt is logged with `outcome: dispatch-retry`, the attempt number, and the backoff duration. After all 3 attempts fail, the gateway logs `outcome: dispatch-failed`, clears the active-run slot, and returns `502`.
 
 ### Structured logs
 

@@ -7,7 +7,7 @@ import unittest
 
 from gateway.app import GatewayApplication
 from gateway.dedup import InMemoryDedupStore
-from gateway.github_api import ConfiguredRepo, ProjectItemContext, TrustPolicy
+from gateway.github_api import ConfiguredRepo, GitHubApiError, ProjectItemContext, TrustPolicy
 from gateway.service import GatewayService
 
 
@@ -50,6 +50,7 @@ class FakeGitHubClient:
         }
         self.labels_added: list[tuple[str, int, str]] = []
         self.dispatches: list[tuple[str, str, dict[str, object]]] = []
+        self.dispatch_failures: int = 0
 
     def get_project_item_context(self, item_node_id: str) -> ProjectItemContext:
         assert item_node_id == "PVTI_123"
@@ -68,6 +69,9 @@ class FakeGitHubClient:
         event_type: str,
         client_payload: dict[str, object],
     ) -> None:
+        if self.dispatch_failures > 0:
+            self.dispatch_failures -= 1
+            raise GitHubApiError("dispatch failed (simulated)")
         self.dispatches.append((repo_full_name, event_type, client_payload))
 
 
@@ -82,6 +86,7 @@ class GatewayServiceTests(unittest.TestCase):
         self.secret = "top-secret"
         self.github = FakeGitHubClient()
         self.now_ms = 1_710_000_000_000
+        self.slept: list[float] = []
         self.service = GatewayService(
             webhook_secret=self.secret,
             github_client=self.github,
@@ -102,6 +107,7 @@ class GatewayServiceTests(unittest.TestCase):
             dedup_store=InMemoryDedupStore(),
             logger=self.logs.append,
             clock=lambda: self.now_ms,
+            sleep=self.slept.append,
         )
         self.app = GatewayApplication(self.service)
 
@@ -270,6 +276,78 @@ class GatewayServiceTests(unittest.TestCase):
         status, body = self.app.handle("GET", "/healthz", {}, b"")
         self.assertEqual(status, 200)
         self.assertEqual(body, {"ok": True})
+
+    # --- Blocker 1: record-only must not poison dedup window ---
+
+    def test_record_only_does_not_block_subsequent_trusted_dispatch(self) -> None:
+        """Approval flow: record-only actor triggers pending-review, then a
+        trusted actor re-triggers the same prefix within the 60s dedup window
+        and gets a successful dispatch (not deduplicated)."""
+        # Step 1: member-user triggers record-only / pending-review
+        status1, body1 = self._request(self._payload(actor="member-user"), delivery_id="d-member")
+        self.assertEqual(status1, 202)
+        self.assertEqual(body1["outcome"], "pending-review")
+
+        # Step 2: trusted-user re-triggers the same prefix within the dedup window
+        self.now_ms += 5_000  # 5 seconds later
+        status2, body2 = self._request(self._payload(actor="trusted-user"), delivery_id="d-trusted")
+        self.assertEqual(status2, 200)
+        self.assertEqual(body2["outcome"], "dispatched")
+        self.assertEqual(len(self.github.dispatches), 1)
+
+    def test_record_only_clears_active_run(self) -> None:
+        """record-only path must clear its active-run slot so it doesn't block
+        subsequent dispatches via the active-run check either."""
+        prefix = "SlateLabs/github-project-automation/1/kickoff"
+        self._request(self._payload(actor="member-user"), delivery_id="d-ro")
+        self.assertFalse(self.service.dedup_store.has_active_run(prefix, self.now_ms))
+        self.assertFalse(self.service.dedup_store.has_recent_completion(prefix, self.now_ms))
+
+    # --- Blocker 2: dispatch retry/backoff ---
+
+    def test_dispatch_retries_on_transient_failure_then_succeeds(self) -> None:
+        """If the first dispatch attempt fails, retry with backoff and succeed."""
+        self.github.dispatch_failures = 2  # fail twice, succeed on 3rd
+        status, body = self._request(self._payload())
+        self.assertEqual(status, 200)
+        self.assertEqual(body["outcome"], "dispatched")
+        self.assertEqual(len(self.github.dispatches), 1)
+        self.assertEqual(self.slept, [1.0, 4.0])
+
+    def test_dispatch_terminal_failure_after_all_retries(self) -> None:
+        """If all 3 retry attempts fail, return dispatch-failed."""
+        self.github.dispatch_failures = 3  # fail all 3 attempts
+        status, body = self._request(self._payload())
+        self.assertEqual(status, 502)
+        self.assertEqual(body["outcome"], "dispatch-failed")
+        self.assertEqual(self.github.dispatches, [])
+        self.assertEqual(self.slept, [1.0, 4.0, 16.0])
+
+    def test_dispatch_retry_backoff_sequence(self) -> None:
+        """Backoff durations must be exactly 1s, 4s, 16s."""
+        self.github.dispatch_failures = 3
+        self._request(self._payload())
+        self.assertEqual(self.slept, [1.0, 4.0, 16.0])
+
+    def test_dispatch_retry_logs_each_attempt(self) -> None:
+        """Each retry attempt is logged with attempt number and backoff."""
+        self.github.dispatch_failures = 2
+        self._request(self._payload())
+        retry_logs = [log for log in self.logs if log.get("outcome") == "dispatch-retry"]
+        self.assertEqual(len(retry_logs), 2)
+        self.assertEqual(retry_logs[0]["attempt"], 1)
+        self.assertEqual(retry_logs[0]["backoff_s"], 1.0)
+        self.assertEqual(retry_logs[1]["attempt"], 2)
+        self.assertEqual(retry_logs[1]["backoff_s"], 4.0)
+
+    def test_dispatch_terminal_failure_clears_active_run(self) -> None:
+        """After terminal dispatch failure, the active run is cleared so the
+        prefix is not permanently locked."""
+        prefix = "SlateLabs/github-project-automation/1/kickoff"
+        self.github.dispatch_failures = 3
+        self._request(self._payload())
+        self.assertFalse(self.service.dedup_store.has_active_run(prefix, self.now_ms))
+        self.assertFalse(self.service.dedup_store.has_recent_completion(prefix, self.now_ms))
 
 
 if __name__ == "__main__":
