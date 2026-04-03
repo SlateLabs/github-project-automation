@@ -209,6 +209,7 @@ runs:
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
         ### Execution bootstrap scaffold — already exists
         <!-- $status_marker -->
+        <!-- gpa:run-status:execution:skipped:$RUN_KEY -->
 
         $table_rows
 
@@ -345,6 +346,7 @@ runs:
         gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
         ### Execution bootstrap scaffold — created
         <!-- $status_marker -->
+        <!-- gpa:run-status:execution:completed:$RUN_KEY -->
 
         $table_rows
 

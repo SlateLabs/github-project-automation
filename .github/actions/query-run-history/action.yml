@@ -1,0 +1,104 @@
+name: 'Query Run History'
+description: >
+  Scans automation-owned comments on a source issue for machine-readable
+  run-status markers (<!-- gpa:run-status:STAGE:OUTCOME:RUN_KEY -->) and
+  outputs a structured JSON array of all runs. Read-only — no mutations.
+
+inputs:
+  issue_number:
+    description: 'Source issue number'
+    required: true
+  github_token:
+    description: 'Token with issues:read scope'
+    required: true
+
+outputs:
+  run_history:
+    description: 'JSON array of run records [{stage, outcome, run_key, timestamp, actor, comment_url}]'
+    value: ${{ steps.query.outputs.run_history }}
+  run_count:
+    description: 'Total number of run-status markers found'
+    value: ${{ steps.query.outputs.run_count }}
+  latest_run_key:
+    description: 'Run key from the most recent run-status marker (empty if none)'
+    value: ${{ steps.query.outputs.latest_run_key }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Query run history from issue comments
+      id: query
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        ISSUE_NUMBER: ${{ inputs.issue_number }}
+      run: |
+        set -euo pipefail
+
+        # --- 1. Fetch issue comments ---
+        comments_json=$(gh issue view "$ISSUE_NUMBER" --json comments \
+          --jq '.comments' 2>&1) || {
+          echo "::error::Failed to fetch comments for issue #$ISSUE_NUMBER: $comments_json"
+          exit 1
+        }
+
+        comment_count=$(echo "$comments_json" | jq 'length' 2>/dev/null || echo 0)
+
+        # --- 2. Scan for run-status markers ---
+        # Marker format: <!-- gpa:run-status:STAGE:OUTCOME:RUN_KEY -->
+        # OUTCOME is one of: started, completed, skipped, failed
+        # RUN_KEY format: REPO/ISSUE/STAGE-SLUG/TIMESTAMP
+        run_history="[]"
+
+        for (( i=0; i<comment_count; i++ )); do
+          cbody=$(echo "$comments_json" | jq -r ".[$i].body // \"\"")
+          cauthor=$(echo "$comments_json" | jq -r ".[$i].author.login // \"unknown\"")
+          curl=$(echo "$comments_json" | jq -r ".[$i].url // \"\"")
+
+          # Extract all run-status markers from this comment
+          # grep returns non-zero if no match — suppress with || true
+          markers=$(echo "$cbody" | grep -oE '<!-- gpa:run-status:[a-zA-Z0-9_-]+:[a-zA-Z0-9_-]+:[^ ]+ -->' || true)
+
+          if [ -z "$markers" ]; then
+            continue
+          fi
+
+          while IFS= read -r marker; do
+            [ -z "$marker" ] && continue
+
+            # Parse: <!-- gpa:run-status:STAGE:OUTCOME:RUN_KEY -->
+            # Strip the comment delimiters first
+            inner=$(echo "$marker" | sed 's/^<!-- gpa:run-status://; s/ -->$//')
+
+            # Split on first two colons: stage:outcome:run_key (run_key may contain colons)
+            stage=$(echo "$inner" | cut -d: -f1)
+            outcome=$(echo "$inner" | cut -d: -f2)
+            run_key=$(echo "$inner" | cut -d: -f3-)
+
+            # Extract timestamp from run_key (last path segment)
+            timestamp=$(echo "$run_key" | rev | cut -d/ -f1 | rev)
+
+            # Build JSON record
+            record=$(jq -n \
+              --arg stage "$stage" \
+              --arg outcome "$outcome" \
+              --arg run_key "$run_key" \
+              --arg timestamp "$timestamp" \
+              --arg actor "$cauthor" \
+              --arg comment_url "$curl" \
+              '{stage: $stage, outcome: $outcome, run_key: $run_key, timestamp: $timestamp, actor: $actor, comment_url: $comment_url}')
+
+            run_history=$(echo "$run_history" | jq --argjson rec "$record" '. + [$rec]')
+          done <<< "$markers"
+        done
+
+        # --- 3. Sort by timestamp descending and output ---
+        run_history=$(echo "$run_history" | jq 'sort_by(.timestamp) | reverse')
+        run_count=$(echo "$run_history" | jq 'length')
+        latest_run_key=$(echo "$run_history" | jq -r '.[0].run_key // ""')
+
+        echo "run_history=$(echo "$run_history" | jq -c '.')" >> "$GITHUB_OUTPUT"
+        echo "run_count=$run_count" >> "$GITHUB_OUTPUT"
+        echo "latest_run_key=$latest_run_key" >> "$GITHUB_OUTPUT"
+
+        echo "::notice::Found $run_count run-status markers on issue #$ISSUE_NUMBER"

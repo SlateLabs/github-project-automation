@@ -140,6 +140,7 @@ jobs:
             echo "::warning::Skipping: a recent run for this issue/stage completed within the ${DEDUP_WINDOW_SECONDS}s dedup window"
             gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Orchestration run — skipped (duplicate)
+          <!-- gpa:run-status:$REQUESTED_STAGE:skipped:$RUN_KEY -->
 
           | Field | Value |
           |-------|-------|
@@ -187,6 +188,7 @@ jobs:
         run: |
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Orchestration run — ineligible
+          <!-- gpa:run-status:$REQUESTED_STAGE:failed:$RUN_KEY -->
 
           | Field | Value |
           |-------|-------|
@@ -283,6 +285,7 @@ jobs:
 
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Orchestration run — closeout pre-scaffold gate failed
+          <!-- gpa:run-status:$REQUESTED_STAGE:failed:$RUN_KEY -->
 
           | Field | Value |
           |-------|-------|
@@ -356,6 +359,7 @@ jobs:
 
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Orchestration run — gate not satisfied
+          <!-- gpa:run-status:$REQUESTED_STAGE:failed:$RUN_KEY -->
 
           | Field | Value |
           |-------|-------|
@@ -418,6 +422,7 @@ jobs:
             # Post status mismatch comment per §Idempotency current-state checks contract
             gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Orchestration run — superseded (state mismatch)
+          <!-- gpa:run-status:$REQUESTED_STAGE:failed:$RUN_KEY -->
 
           | Field | Value |
           |-------|-------|
@@ -458,6 +463,7 @@ jobs:
 
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Orchestration run — stage transition accepted
+          <!-- gpa:run-status:$REQUESTED_STAGE:completed:$RUN_KEY -->
 
           | Field | Value |
           |-------|-------|
@@ -483,6 +489,14 @@ jobs:
           run_key: ${{ steps.run-key.outputs.run_key }}
           actor: ${{ github.actor }}
 
+      - name: Query run history
+        if: always()
+        id: run-history
+        uses: ./.github/actions/query-run-history
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Job summary
         if: always()
         env:
@@ -492,17 +506,55 @@ jobs:
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           REQUESTED_STAGE: ${{ inputs.requested_stage }}
           ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+          RUN_HISTORY: ${{ steps.run-history.outputs.run_history }}
         shell: bash
         run: |
+          # Determine next-step hint based on the requested stage
+          next_step=""
+          case "$REQUESTED_STAGE" in
+            design)
+              next_step="Fill in the design discussion, resolve open questions, then re-trigger with \`requested_stage: design\`"
+              ;;
+            plan)
+              next_step="Fill in the implementation plan with substantive content, then re-trigger with \`requested_stage: plan\`"
+              ;;
+            execution)
+              next_step="Implement the feature, fill in the PR, mark ready for review, then re-trigger with \`requested_stage: execution\`"
+              ;;
+            follow-up-capture)
+              next_step="Review created follow-up issues, then proceed to closeout with \`requested_stage: closeout\`"
+              ;;
+            closeout)
+              next_step="Complete the retrospective sections and exit checklist, then close the issue"
+              ;;
+            *)
+              next_step="Check issue [#$ISSUE_NUMBER](https://github.com/$REPO/issues/$ISSUE_NUMBER) for current status"
+              ;;
+          esac
+
+          previous_run_key=$(echo "${RUN_HISTORY:-[]}" | jq -r --arg current_run_key "$RUN_KEY" 'map(select(.run_key != $current_run_key)) | .[0].run_key // ""')
+          previous_run_url=$(echo "${RUN_HISTORY:-[]}" | jq -r --arg current_run_key "$RUN_KEY" 'map(select(.run_key != $current_run_key)) | .[0].comment_url // ""')
+          if [ -n "$previous_run_key" ] && [ -n "$previous_run_url" ]; then
+            previous_run_value="[$previous_run_key]($previous_run_url)"
+          else
+            previous_run_value="n/a"
+          fi
+
           {
             echo "## Orchestration Dispatch Summary"
             echo ""
             echo "| Field | Value |"
             echo "|-------|-------|"
             echo "| Run key | \`$RUN_KEY\` |"
-            echo "| Issue | #$ISSUE_NUMBER |"
+            echo "| Issue | [#$ISSUE_NUMBER](https://github.com/$REPO/issues/$ISSUE_NUMBER) |"
+            echo "| Previous run | $previous_run_value |"
             echo "| Stage | \`$REQUESTED_STAGE\` |"
             echo "| Actor | $ACTOR |"
             echo "| Eligible | $ELIGIBLE |"
             echo "| Gate passed | ${GATE_PASSED:-n/a} |"
+            echo ""
+            echo "### Next steps"
+            echo ""
+            echo "- $next_step"
           } >> "$GITHUB_STEP_SUMMARY"

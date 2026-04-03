@@ -170,6 +170,7 @@ runs:
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
         ### Design discussion scaffold — already exists
         <!-- $artifact_marker -->
+        <!-- gpa:run-status:design:skipped:$RUN_KEY -->
 
         $table_rows
 
@@ -180,7 +181,26 @@ runs:
           exit 0
         fi
 
-        # --- 3. Render template ---
+        # --- 3. Check-before-act: re-verify issue state before mutation ---
+        # Between eligibility validation and now, the issue may have been closed
+        # or had do-not-automate added. Re-check before creating any artifacts.
+        issue_state_json=$(gh issue view "$ISSUE_NUMBER" --json state,labels 2>&1) || {
+          echo "::error::Failed to re-check issue #$ISSUE_NUMBER state: $issue_state_json"
+          exit 1
+        }
+        issue_state=$(echo "$issue_state_json" | jq -r '.state // ""')
+        has_block_label=$(echo "$issue_state_json" | jq -r '.labels[]?.name // empty' | grep -cF 'do-not-automate' || true)
+
+        if [ "$issue_state" != "OPEN" ]; then
+          echo "::error::Issue #$ISSUE_NUMBER is no longer open (state: $issue_state) — aborting scaffold before creating discussion"
+          exit 1
+        fi
+        if [ "$has_block_label" -gt 0 ]; then
+          echo "::error::Issue #$ISSUE_NUMBER has do-not-automate label — aborting scaffold before creating discussion"
+          exit 1
+        fi
+
+        # --- 4. Render template ---
         if [ ! -f "$TEMPLATE_PATH" ]; then
           echo "::error::Template file not found at $TEMPLATE_PATH"
           exit 1
@@ -194,7 +214,7 @@ runs:
         export REPO_FULL="$repo_full"
         rendered_body=$(python3 -c 'import sys,os; t=open(sys.argv[1]).read(); t=t.replace("{{issue_title}}",os.environ["ISSUE_TITLE_SAFE"]); t=t.replace("{{issue_number}}",os.environ["ISSUE_NUMBER"]); t=t.replace("{{repo}}",os.environ["REPO_FULL"]); sys.stdout.write(t)' "$TEMPLATE_PATH")
 
-        # --- 4. Resolve discussion category ID via GraphQL ---
+        # --- 5. Resolve discussion category ID via GraphQL ---
         repo_owner="${GITHUB_REPOSITORY_OWNER:-SlateLabs}"
         repo_name="${GITHUB_REPOSITORY#*/}"
         repo_name="${repo_name:-github-project-automation}"
@@ -228,7 +248,7 @@ runs:
           exit 1
         fi
 
-        # --- 5. Create discussion via GraphQL ---
+        # --- 6. Create discussion via GraphQL ---
         discussion_title="Design: $issue_title"
 
         create_result=$(gh api graphql -f query='
@@ -268,7 +288,7 @@ runs:
         echo "discussion_number=$new_number" >> "$GITHUB_OUTPUT"
         echo "created=true" >> "$GITHUB_OUTPUT"
 
-        # --- 6. Post comment on source issue ---
+        # --- 7. Post comment on source issue ---
         # Build table rows conditionally to avoid blank lines that break Markdown tables
         table_rows="| Field | Value |
         |-------|-------|"
@@ -287,6 +307,7 @@ runs:
         gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
         ### Design discussion scaffold — created
         <!-- gpa:design-discussion:#${ISSUE_NUMBER} -->
+        <!-- gpa:run-status:design:completed:$RUN_KEY -->
 
         $table_rows
 

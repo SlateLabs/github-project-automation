@@ -1,23 +1,30 @@
-name: Capture Follow-ups
+name: Retry Stage
 
 on:
   workflow_dispatch:
     inputs:
       issue_number:
-        description: 'Issue number to scan for FOLLOW-UP markers and create backlog issues'
+        description: 'Issue number to retry a stage for'
         required: true
         type: number
-      run_key:
-        description: 'Optional existing run key to preserve correlation across wrapper workflows'
-        required: false
-        type: string
+      target_stage:
+        description: 'Stage to retry'
+        required: true
+        type: choice
+        options:
+          - design
+          - plan
+          - execution
+          - follow-up-capture
+          - closeout
 
 permissions:
+  actions: write
   contents: read
   issues: write
 
 jobs:
-  capture:
+  retry:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -29,14 +36,10 @@ jobs:
         env:
           REPO_NAME: ${{ github.repository }}
           ISSUE_NUM: ${{ inputs.issue_number }}
-          PROVIDED_RUN_KEY: ${{ inputs.run_key }}
+          TARGET_STAGE: ${{ inputs.target_stage }}
         run: |
-          if [ -n "${PROVIDED_RUN_KEY:-}" ]; then
-            run_key="$PROVIDED_RUN_KEY"
-          else
-            timestamp=$(date +%s%3N)
-            run_key="${REPO_NAME}/${ISSUE_NUM}/follow-up-capture/${timestamp}"
-          fi
+          timestamp=$(date +%s%3N)
+          run_key="${REPO_NAME}/${ISSUE_NUM}/${TARGET_STAGE}/${timestamp}"
           echo "run_key=$run_key" >> "$GITHUB_OUTPUT"
           echo "::notice::Run key: $run_key"
 
@@ -45,7 +48,7 @@ jobs:
         uses: ./.github/actions/validate-eligibility
         with:
           issue_number: ${{ inputs.issue_number }}
-          requested_stage: follow-up-capture
+          requested_stage: ${{ inputs.target_stage }}
           actor: ${{ github.actor }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -57,19 +60,21 @@ jobs:
           RUN_KEY: ${{ steps.run-key.outputs.run_key }}
           REASON: ${{ steps.eligibility.outputs.reason }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TARGET_STAGE: ${{ inputs.target_stage }}
           ACTOR: ${{ github.actor }}
           RUN_ID: ${{ github.run_id }}
         shell: bash
         run: |
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-          ### Follow-up capture — ineligible
-          <!-- gpa:run-status:follow-up-capture:failed:$RUN_KEY -->
+          ### Retry stage — ineligible
+          <!-- gpa:run-status:$TARGET_STAGE:failed:$RUN_KEY -->
 
           | Field | Value |
           |-------|-------|
           | **Run key** | \`$RUN_KEY\` |
+          | **Target stage** | \`$TARGET_STAGE\` |
           | **Actor** | @$ACTOR |
-          | **Result** | :x: Ineligible |
+          | **Result** | :x: Ineligible for retry |
           | **Reason** | $REASON |
           | **Actions run** | [$RUN_ID]($RUN_URL) |
           COMMENT_EOF
@@ -81,67 +86,92 @@ jobs:
           REASON: ${{ steps.eligibility.outputs.reason }}
         shell: bash
         run: |
-          echo "::error::Issue is not eligible: $REASON"
+          echo "::error::Issue is not eligible for retry: $REASON"
           exit 1
 
-      - name: Check gate conditions
-        id: gate
+      - name: Map stage to workflow and dispatch
         if: steps.eligibility.outputs.eligible == 'true'
-        uses: ./.github/actions/check-gate
-        with:
-          issue_number: ${{ inputs.issue_number }}
-          requested_stage: follow-up-capture
-          issue_body: ${{ steps.eligibility.outputs.issue_body }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          trust_policy_path: config/trust-policy.yml
-
-      - name: Post gate failure comment
-        if: steps.gate.outputs.gate_passed != 'true' && steps.eligibility.outputs.eligible == 'true'
+        id: dispatch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
+          TARGET_STAGE: ${{ inputs.target_stage }}
           RUN_KEY: ${{ steps.run-key.outputs.run_key }}
-          UNMET: ${{ steps.gate.outputs.unmet_conditions }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           ACTOR: ${{ github.actor }}
           RUN_ID: ${{ github.run_id }}
         shell: bash
         run: |
-          unmet_list=$(echo "$UNMET" | jq -r '.[] | "- " + .' 2>/dev/null || echo "- (none)")
-          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-          ### Follow-up capture — gate not satisfied
-          <!-- gpa:run-status:follow-up-capture:failed:$RUN_KEY -->
+          set -euo pipefail
+
+          # Map target_stage to the corresponding standalone workflow filename
+          case "$TARGET_STAGE" in
+            design)
+              workflow_file="scaffold-design-discussion.yml"
+              ;;
+            plan)
+              workflow_file="scaffold-impl-plan.yml"
+              ;;
+            execution)
+              workflow_file="scaffold-execution.yml"
+              ;;
+            follow-up-capture)
+              workflow_file="capture-follow-ups.yml"
+              ;;
+            closeout)
+              workflow_file="scaffold-closeout.yml"
+              ;;
+            *)
+              echo "::error::Unknown target stage: $TARGET_STAGE"
+              exit 1
+              ;;
+          esac
+
+          echo "::notice::Dispatching $workflow_file for issue #$ISSUE_NUMBER (stage: $TARGET_STAGE)"
+
+          # Dispatch the target workflow
+          gh workflow run "$workflow_file" \
+            -f "issue_number=$ISSUE_NUMBER" \
+            -f "run_key=$RUN_KEY" 2>&1 || {
+            echo "::error::Failed to dispatch $workflow_file"
+
+            gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+          ### Retry stage — dispatch failed
+          <!-- gpa:run-status:$TARGET_STAGE:failed:$RUN_KEY -->
 
           | Field | Value |
           |-------|-------|
           | **Run key** | \`$RUN_KEY\` |
+          | **Target stage** | \`$TARGET_STAGE\` |
+          | **Workflow** | \`$workflow_file\` |
           | **Actor** | @$ACTOR |
-          | **Result** | :warning: Gate conditions not met |
+          | **Result** | :x: Failed to dispatch workflow |
+          | **Actions run** | [$RUN_ID]($RUN_URL) |
+          COMMENT_EOF
+            )"
+            exit 1
+          }
+
+          echo "workflow_file=$workflow_file" >> "$GITHUB_OUTPUT"
+
+          # Post retry dispatched comment
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+          ### Retry stage — dispatched
+          <!-- gpa:run-status:$TARGET_STAGE:started:$RUN_KEY -->
+
+          | Field | Value |
+          |-------|-------|
+          | **Run key** | \`$RUN_KEY\` |
+          | **Target stage** | \`$TARGET_STAGE\` |
+          | **Workflow** | \`$workflow_file\` |
+          | **Actor** | @$ACTOR |
+          | **Result** | :arrows_counterclockwise: Retry dispatched |
           | **Actions run** | [$RUN_ID]($RUN_URL) |
 
-          **Unmet conditions:**
-          $unmet_list
-
-          To override, post a comment: \`GATE-WAIVER: <condition> — <reason>\` and re-trigger.
+          The \`$TARGET_STAGE\` stage workflow has been dispatched for issue #$ISSUE_NUMBER.
+          Check the Actions tab for the dispatched run status.
           COMMENT_EOF
           )"
-
-      - name: Fail on gate not passed
-        if: steps.gate.outputs.gate_passed != 'true' && steps.eligibility.outputs.eligible == 'true'
-        shell: bash
-        run: |
-          echo "::error::Gate conditions not met for follow-up-capture"
-          exit 1
-
-      - name: Capture follow-ups
-        if: steps.gate.outputs.gate_passed == 'true'
-        id: capture
-        uses: ./.github/actions/capture-follow-ups
-        with:
-          issue_number: ${{ inputs.issue_number }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          run_key: ${{ steps.run-key.outputs.run_key }}
-          actor: ${{ github.actor }}
 
       - name: Query run history
         if: always()
@@ -156,12 +186,12 @@ jobs:
         env:
           RUN_KEY: ${{ steps.run-key.outputs.run_key }}
           ELIGIBLE: ${{ steps.eligibility.outputs.eligible }}
-          ISSUES_CREATED: ${{ steps.capture.outputs.issues_created }}
-          SKIPPED: ${{ steps.capture.outputs.skipped }}
-          TOTAL_MARKERS: ${{ steps.capture.outputs.total_markers }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
+          TARGET_STAGE: ${{ inputs.target_stage }}
+          WORKFLOW_FILE: ${{ steps.dispatch.outputs.workflow_file }}
           ACTOR: ${{ github.actor }}
           REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RUN_HISTORY: ${{ steps.run-history.outputs.run_history }}
         shell: bash
         run: |
@@ -174,21 +204,20 @@ jobs:
           fi
 
           {
-            echo "## Follow-up Capture Summary"
+            echo "## Retry Stage Summary"
             echo ""
             echo "| Field | Value |"
             echo "|-------|-------|"
             echo "| Run key | \`$RUN_KEY\` |"
             echo "| Issue | [#$ISSUE_NUMBER](https://github.com/$REPO/issues/$ISSUE_NUMBER) |"
             echo "| Previous run | $previous_run_value |"
+            echo "| Target stage | \`$TARGET_STAGE\` |"
             echo "| Actor | $ACTOR |"
             echo "| Eligible | $ELIGIBLE |"
-            echo "| Markers found | ${TOTAL_MARKERS:-n/a} |"
-            echo "| Issues created | ${ISSUES_CREATED:-n/a} |"
-            echo "| Skipped | ${SKIPPED:-n/a} |"
+            echo "| Dispatched workflow | ${WORKFLOW_FILE:-n/a} |"
             echo ""
             echo "### Next steps"
             echo ""
-            echo "- Review the created follow-up issues for accuracy"
-            echo "- Proceed to closeout: \`orchestration-dispatch\` with \`requested_stage: closeout\`"
+            echo "- Check the [Actions tab](https://github.com/$REPO/actions) for the dispatched workflow run"
+            echo "- The dispatched workflow will post its own status comment on issue [#$ISSUE_NUMBER](https://github.com/$REPO/issues/$ISSUE_NUMBER)"
           } >> "$GITHUB_STEP_SUMMARY"

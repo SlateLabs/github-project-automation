@@ -7,6 +7,10 @@ on:
         description: 'Issue number to create execution bootstrap (branch + draft PR) for'
         required: true
         type: number
+      run_key:
+        description: 'Optional existing run key to preserve correlation across wrapper workflows'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -26,9 +30,14 @@ jobs:
         env:
           REPO_NAME: ${{ github.repository }}
           ISSUE_NUM: ${{ inputs.issue_number }}
+          PROVIDED_RUN_KEY: ${{ inputs.run_key }}
         run: |
-          timestamp=$(date +%s%3N)
-          run_key="${REPO_NAME}/${ISSUE_NUM}/execution-scaffold/${timestamp}"
+          if [ -n "${PROVIDED_RUN_KEY:-}" ]; then
+            run_key="$PROVIDED_RUN_KEY"
+          else
+            timestamp=$(date +%s%3N)
+            run_key="${REPO_NAME}/${ISSUE_NUM}/execution-scaffold/${timestamp}"
+          fi
           echo "run_key=$run_key" >> "$GITHUB_OUTPUT"
           echo "::notice::Run key: $run_key"
 
@@ -55,6 +64,7 @@ jobs:
         run: |
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Execution bootstrap scaffold — ineligible
+          <!-- gpa:run-status:execution:failed:$RUN_KEY -->
 
           | Field | Value |
           |-------|-------|
@@ -85,6 +95,14 @@ jobs:
           run_key: ${{ steps.run-key.outputs.run_key }}
           actor: ${{ github.actor }}
 
+      - name: Query run history
+        if: always()
+        id: run-history
+        uses: ./.github/actions/query-run-history
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Job summary
         if: always()
         env:
@@ -96,19 +114,36 @@ jobs:
           CREATED: ${{ steps.scaffold.outputs.created }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+          RUN_HISTORY: ${{ steps.run-history.outputs.run_history }}
         shell: bash
         run: |
+          previous_run_key=$(echo "${RUN_HISTORY:-[]}" | jq -r --arg current_run_key "$RUN_KEY" 'map(select(.run_key != $current_run_key)) | .[0].run_key // ""')
+          previous_run_url=$(echo "${RUN_HISTORY:-[]}" | jq -r --arg current_run_key "$RUN_KEY" 'map(select(.run_key != $current_run_key)) | .[0].comment_url // ""')
+          if [ -n "$previous_run_key" ] && [ -n "$previous_run_url" ]; then
+            previous_run_value="[$previous_run_key]($previous_run_url)"
+          else
+            previous_run_value="n/a"
+          fi
+
           {
             echo "## Execution Bootstrap Scaffold Summary"
             echo ""
             echo "| Field | Value |"
             echo "|-------|-------|"
             echo "| Run key | \`$RUN_KEY\` |"
-            echo "| Issue | #$ISSUE_NUMBER |"
+            echo "| Issue | [#$ISSUE_NUMBER](https://github.com/$REPO/issues/$ISSUE_NUMBER) |"
+            echo "| Previous run | $previous_run_value |"
             echo "| Actor | $ACTOR |"
             echo "| Eligible | $ELIGIBLE |"
             echo "| PR | ${PR_URL:-n/a} |"
             echo "| PR number | ${PR_NUMBER:-n/a} |"
             echo "| Branch | ${BRANCH_NAME:-n/a} |"
             echo "| Created | ${CREATED:-n/a} |"
+            echo ""
+            echo "### Next steps"
+            echo ""
+            echo "- Implement the feature on the \`${BRANCH_NAME:-feature}\` branch"
+            echo "- Fill in PR body sections and mark ready for review"
+            echo "- Re-trigger \`orchestration-dispatch\` with \`requested_stage: execution\` to pass the gate"
           } >> "$GITHUB_STEP_SUMMARY"

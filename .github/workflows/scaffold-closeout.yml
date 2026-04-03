@@ -7,6 +7,10 @@ on:
         description: 'Issue number to post a closeout retrospective comment on'
         required: true
         type: number
+      run_key:
+        description: 'Optional existing run key to preserve correlation across wrapper workflows'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -26,9 +30,14 @@ jobs:
         env:
           REPO_NAME: ${{ github.repository }}
           ISSUE_NUM: ${{ inputs.issue_number }}
+          PROVIDED_RUN_KEY: ${{ inputs.run_key }}
         run: |
-          timestamp=$(date +%s%3N)
-          run_key="${REPO_NAME}/${ISSUE_NUM}/closeout/${timestamp}"
+          if [ -n "${PROVIDED_RUN_KEY:-}" ]; then
+            run_key="$PROVIDED_RUN_KEY"
+          else
+            timestamp=$(date +%s%3N)
+            run_key="${REPO_NAME}/${ISSUE_NUM}/closeout/${timestamp}"
+          fi
           echo "run_key=$run_key" >> "$GITHUB_OUTPUT"
           echo "::notice::Run key: $run_key"
 
@@ -55,6 +64,7 @@ jobs:
         run: |
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Closeout scaffold — ineligible
+          <!-- gpa:run-status:closeout:failed:$RUN_KEY -->
 
           | Field | Value |
           |-------|-------|
@@ -104,6 +114,7 @@ jobs:
 
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Closeout pre-scaffold gate — failed
+          <!-- gpa:run-status:closeout:failed:$RUN_KEY -->
 
           | Field | Value |
           |-------|-------|
@@ -170,6 +181,7 @@ jobs:
 
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Closeout gate — failed
+          <!-- gpa:run-status:closeout:failed:$RUN_KEY -->
 
           | Field | Value |
           |-------|-------|
@@ -198,6 +210,14 @@ jobs:
           echo "::error::Closeout gate failed. Unmet conditions: $UNMET"
           exit 1
 
+      - name: Query run history
+        if: always()
+        id: run-history
+        uses: ./.github/actions/query-run-history
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Job summary
         if: always()
         env:
@@ -208,18 +228,35 @@ jobs:
           GATE_PASSED: ${{ steps.gate.outputs.gate_passed }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+          RUN_HISTORY: ${{ steps.run-history.outputs.run_history }}
         shell: bash
         run: |
+          previous_run_key=$(echo "${RUN_HISTORY:-[]}" | jq -r --arg current_run_key "$RUN_KEY" 'map(select(.run_key != $current_run_key)) | .[0].run_key // ""')
+          previous_run_url=$(echo "${RUN_HISTORY:-[]}" | jq -r --arg current_run_key "$RUN_KEY" 'map(select(.run_key != $current_run_key)) | .[0].comment_url // ""')
+          if [ -n "$previous_run_key" ] && [ -n "$previous_run_url" ]; then
+            previous_run_value="[$previous_run_key]($previous_run_url)"
+          else
+            previous_run_value="n/a"
+          fi
+
           {
             echo "## Closeout Scaffold Summary"
             echo ""
             echo "| Field | Value |"
             echo "|-------|-------|"
             echo "| Run key | \`$RUN_KEY\` |"
-            echo "| Issue | #$ISSUE_NUMBER |"
+            echo "| Issue | [#$ISSUE_NUMBER](https://github.com/$REPO/issues/$ISSUE_NUMBER) |"
+            echo "| Previous run | $previous_run_value |"
             echo "| Actor | $ACTOR |"
             echo "| Eligible | $ELIGIBLE |"
             echo "| Pre-scaffold gate | ${PRE_GATE_PASSED:-n/a} |"
             echo "| Created | ${CREATED:-n/a} |"
             echo "| Gate passed | ${GATE_PASSED:-n/a} |"
+            echo ""
+            echo "### Next steps"
+            echo ""
+            echo "- Review the closeout retrospective sections"
+            echo "- Complete the exit checklist and process improvement dispositions"
+            echo "- Close the issue when the retrospective is finalized"
           } >> "$GITHUB_STEP_SUMMARY"
