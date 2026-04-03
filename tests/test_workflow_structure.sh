@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# Structural verification for orchestration-dispatch.yml after Slice 9 changes.
+# Validates that:
+# 1. repository_dispatch trigger is present with correct event type
+# 2. workflow_dispatch trigger is still present (regression check)
+# 3. No remaining inputs.* references outside the normalize step
+# 4. No remaining github.actor references outside the normalize step
+# 5. Normalize step outputs are used by downstream steps
+set -euo pipefail
+
+WORKFLOW=".github/workflows/orchestration-dispatch.yml"
+cd "$(git rev-parse --show-toplevel)"
+
+PASS=0
+FAIL=0
+
+check() {
+  local label="$1" result="$2"
+  if [ "$result" = "pass" ]; then
+    PASS=$((PASS + 1))
+    echo "  ✓ $label"
+  else
+    FAIL=$((FAIL + 1))
+    echo "  ✗ $label"
+  fi
+}
+
+echo "=== Workflow Structure Tests ==="
+
+echo ""
+echo "1. Trigger configuration"
+
+if grep -q 'repository_dispatch:' "$WORKFLOW"; then
+  check "repository_dispatch trigger present" "pass"
+else
+  check "repository_dispatch trigger present" "fail"
+fi
+
+if grep -q 'types: \[orchestration-start\]' "$WORKFLOW"; then
+  check "orchestration-start event type configured" "pass"
+else
+  check "orchestration-start event type configured" "fail"
+fi
+
+if grep -q 'workflow_dispatch:' "$WORKFLOW"; then
+  check "workflow_dispatch trigger still present (regression)" "pass"
+else
+  check "workflow_dispatch trigger still present (regression)" "fail"
+fi
+
+echo ""
+echo "2. Normalize step present"
+
+if grep -q 'id: normalize' "$WORKFLOW"; then
+  check "normalize step exists with id" "pass"
+else
+  check "normalize step exists with id" "fail"
+fi
+
+if grep -q 'steps.normalize.outputs.issue_number' "$WORKFLOW"; then
+  check "downstream steps reference normalize.outputs.issue_number" "pass"
+else
+  check "downstream steps reference normalize.outputs.issue_number" "fail"
+fi
+
+if grep -q 'steps.normalize.outputs.requested_stage' "$WORKFLOW"; then
+  check "downstream steps reference normalize.outputs.requested_stage" "pass"
+else
+  check "downstream steps reference normalize.outputs.requested_stage" "fail"
+fi
+
+if grep -q 'steps.normalize.outputs.actor' "$WORKFLOW"; then
+  check "downstream steps reference normalize.outputs.actor" "pass"
+else
+  check "downstream steps reference normalize.outputs.actor" "fail"
+fi
+
+echo ""
+echo "3. No stale inputs.* references outside normalize step"
+
+# Count inputs.* references — should only be inside the normalize step (lines with WD_ prefix env vars)
+stale_input_refs=$(grep -n 'inputs\.' "$WORKFLOW" | grep -v 'WD_ISSUE_NUMBER.*inputs\.' | grep -v 'WD_REQUESTED_STAGE.*inputs\.' | grep -v 'description:' | grep -v 'type:' | grep -v 'required:' | grep -v 'options:' || true)
+if [ -z "$stale_input_refs" ]; then
+  check "no stale inputs.* references in downstream steps" "pass"
+else
+  check "no stale inputs.* references in downstream steps" "fail"
+  echo "    Found stale references:"
+  echo "$stale_input_refs" | sed 's/^/      /'
+fi
+
+echo ""
+echo "4. No stale github.actor references outside normalize step"
+
+stale_actor_refs=$(grep -n 'github\.actor' "$WORKFLOW" | grep -v 'WD_ACTOR.*github\.actor' || true)
+if [ -z "$stale_actor_refs" ]; then
+  check "no stale github.actor references in downstream steps" "pass"
+else
+  check "no stale github.actor references in downstream steps" "fail"
+  echo "    Found stale references:"
+  echo "$stale_actor_refs" | sed 's/^/      /'
+fi
+
+echo ""
+echo "5. Run key generation handles both trigger paths"
+
+if grep -q 'TRIGGER.*steps.normalize.outputs.trigger' "$WORKFLOW"; then
+  check "run-key step receives trigger from normalize" "pass"
+else
+  check "run-key step receives trigger from normalize" "fail"
+fi
+
+if grep -q 'client_payload.run_key' "$WORKFLOW"; then
+  check "run-key step can access gateway-provided run_key" "pass"
+else
+  check "run-key step can access gateway-provided run_key" "fail"
+fi
+
+echo ""
+echo "6. Payload validation in normalize step"
+
+if grep -q 'repository_dispatch payload validation failed' "$WORKFLOW"; then
+  check "validation error message present" "pass"
+else
+  check "validation error message present" "fail"
+fi
+
+if grep -q 'issue_number must be a positive integer' "$WORKFLOW"; then
+  check "issue_number type validation present" "pass"
+else
+  check "issue_number type validation present" "fail"
+fi
+
+if grep -q 'unknown requested_stage' "$WORKFLOW"; then
+  check "stage validation present" "pass"
+else
+  check "stage validation present" "fail"
+fi
+
+if grep -q 'run_key does not match canonical format' "$WORKFLOW"; then
+  check "run_key format validation present" "pass"
+else
+  check "run_key format validation present" "fail"
+fi
+
+echo ""
+echo "7. Job summary includes trigger source"
+
+if grep -q 'TRIGGER.*steps.normalize.outputs.trigger' "$WORKFLOW" && grep -q 'Trigger' "$WORKFLOW"; then
+  check "job summary includes trigger field" "pass"
+else
+  check "job summary includes trigger field" "fail"
+fi
+
+echo ""
+echo "=== Results ==="
+echo "Passed: $PASS"
+echo "Failed: $FAIL"
+echo "Total:  $((PASS + FAIL))"
+
+if [ $FAIL -gt 0 ]; then
+  exit 1
+fi
+
+echo ""
+echo "All structure checks passed."
