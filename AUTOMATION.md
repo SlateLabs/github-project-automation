@@ -169,11 +169,11 @@ gh workflow run capture-follow-ups.yml -f issue_number=<N>
 ```
 gh workflow run orchestration-dispatch.yml -f issue_number=<N> -f requested_stage=follow-up-capture
 ```
-When triggered via orchestration, the capture runs **after** the gate check passes (unlike design/plan/execution scaffolds which run before their gate). The gate validates that FOLLOW-UP markers exist and that execution is complete (a merged PR references the issue). Once the gate passes, the capture action creates backlog issues from the markers.
+Both the standalone workflow and the orchestration path run the gate check **before** the capture action. The gate validates that valid FOLLOW-UP markers exist (all 5 fields present), that execution is complete (a merged PR references the issue), and that no open PRs remain (current work is finished). Once the gate passes, the capture action creates backlog issues from the markers.
 
 **Marker format:**
 ```
-<!-- FOLLOW-UP: <title> | <category> | <reason> | <blocking: yes|no> -->
+<!-- FOLLOW-UP: <title> | <category> | <reason> | <impact> | <blocking: yes|no> -->
 ```
 
 | Field | Description | Allowed values |
@@ -181,11 +181,12 @@ When triggered via orchestration, the capture runs **after** the gate check pass
 | `title` | Short title for the new backlog issue | Free text |
 | `category` | Follow-up category per discussion #3 §10 | `technical-debt`, `accessibility`, `usability`, `documentation`, `automation`, `defect` |
 | `reason` | Why this was deferred | Free text |
+| `impact` | Impact if this follow-up is ignored | Free text |
 | `blocking` | Whether this blocks further slices | `yes` or `no` |
 
 Example:
 ```
-<!-- FOLLOW-UP: Pre-mutation guards for design/plan scaffolds | technical-debt | Lower blast radius (comments vs PRs), not needed for Slice 4 | no -->
+<!-- FOLLOW-UP: Pre-mutation guards for design/plan scaffolds | technical-debt | Lower blast radius (comments vs PRs), not needed for Slice 4 | Scaffold actions could mutate artifacts on closed issues | no -->
 ```
 
 Markers use HTML comments so they are invisible in rendered markdown but machine-parseable.
@@ -208,9 +209,10 @@ If a label does not exist, the action attempts to create the issue without it an
 **Check-before-act guard:** Before creating each follow-up issue, the action re-verifies that the source issue is still open and does not have the `do-not-automate` label. If the issue state changed during processing, the action aborts without creating further issues.
 
 **Gate check (follow-up-capture):**
-- At least one `<!-- FOLLOW-UP: ... -->` marker must exist in the issue comments
-- A merged PR referencing the source issue must exist (execution is complete)
-- Both conditions support `GATE-WAIVER` override by trusted actors
+- At least one valid `<!-- FOLLOW-UP: title | category | reason | impact | blocking -->` marker must exist in the issue comments (all 5 fields required)
+- A merged PR referencing the source issue (or matching the branch convention `<issue-number>-*`) must exist (execution is complete)
+- No open PRs referencing the source issue may remain (ensures current execution work is finished, not just historical PRs)
+- All conditions support `GATE-WAIVER` override by trusted actors
 
 **Permissions required:** `contents: read`, `issues: write`
 

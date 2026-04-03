@@ -3,6 +3,7 @@
 > **Source:** {{repo}}#{{source_issue}}
 > **Category:** {{category}}
 > **Deferred because:** {{reason}}
+> **Impact if ignored:** {{impact}}
 > **Blocking:** {{blocking}}
 > **Captured by:** orchestration automation (run key: `{{run_key}}`)
 

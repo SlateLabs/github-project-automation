@@ -74,8 +74,56 @@ jobs:
           echo "::error::Issue is not eligible: $REASON"
           exit 1
 
-      - name: Capture follow-ups
+      - name: Check gate conditions
+        id: gate
         if: steps.eligibility.outputs.eligible == 'true'
+        uses: ./.github/actions/check-gate
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          requested_stage: follow-up-capture
+          issue_body: ${{ steps.eligibility.outputs.issue_body }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          trust_policy_path: config/trust-policy.yml
+
+      - name: Post gate failure comment
+        if: steps.gate.outputs.gate_passed != 'true' && steps.eligibility.outputs.eligible == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
+          UNMET: ${{ steps.gate.outputs.unmet_conditions }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ACTOR: ${{ github.actor }}
+          RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          unmet_list=$(echo "$UNMET" | jq -r '.[] | "- " + .' 2>/dev/null || echo "- (none)")
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+          ### Follow-up capture — gate not satisfied
+
+          | Field | Value |
+          |-------|-------|
+          | **Run key** | \`$RUN_KEY\` |
+          | **Actor** | @$ACTOR |
+          | **Result** | :warning: Gate conditions not met |
+          | **Actions run** | [$RUN_ID]($RUN_URL) |
+
+          **Unmet conditions:**
+          $unmet_list
+
+          To override, post a comment: \`GATE-WAIVER: <condition> — <reason>\` and re-trigger.
+          COMMENT_EOF
+          )"
+
+      - name: Fail on gate not passed
+        if: steps.gate.outputs.gate_passed != 'true' && steps.eligibility.outputs.eligible == 'true'
+        shell: bash
+        run: |
+          echo "::error::Gate conditions not met for follow-up-capture"
+          exit 1
+
+      - name: Capture follow-ups
+        if: steps.gate.outputs.gate_passed == 'true'
         id: capture
         uses: ./.github/actions/capture-follow-ups
         with:

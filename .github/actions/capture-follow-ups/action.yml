@@ -81,7 +81,7 @@ runs:
         }
 
         # Parse all markers across all comments.
-        # Format: <!-- FOLLOW-UP: <title> | <category> | <reason> | <blocking> -->
+        # Format: <!-- FOLLOW-UP: <title> | <category> | <reason> | <impact> | <blocking> -->
         # Sequence number is 1-indexed across all comments in order.
         markers_file=$(mktemp)
         trap 'rm -f "$markers_file"' EXIT
@@ -99,18 +99,19 @@ runs:
             global_seq=$((global_seq + 1))
 
             # Strip the HTML comment wrapper
-            # Input: <!-- FOLLOW-UP: title | category | reason | blocking -->
+            # Input: <!-- FOLLOW-UP: title | category | reason | impact | blocking -->
             inner=$(echo "$marker_line" | sed -E 's/<!--[[:space:]]*FOLLOW-UP:[[:space:]]*//;s/[[:space:]]*-->//')
 
             # Split on pipe delimiter (trim whitespace around each field)
             title=$(echo "$inner" | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$1); print $1}')
             category=$(echo "$inner" | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); print $2}')
             reason=$(echo "$inner" | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$3); print $3}')
-            blocking=$(echo "$inner" | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$4); print $4}')
+            impact=$(echo "$inner" | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$4); print $4}')
+            blocking=$(echo "$inner" | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$5); print $5}')
 
             # Validate required fields — skip malformed markers
-            if [ -z "$title" ]; then
-              echo "::warning::Skipping malformed FOLLOW-UP marker at sequence $global_seq: missing title"
+            if [ -z "$title" ] || [ -z "$category" ] || [ -z "$reason" ] || [ -z "$impact" ] || [ -z "$blocking" ]; then
+              echo "::warning::Skipping malformed FOLLOW-UP marker at sequence $global_seq: does not match 5-field contract (title | category | reason | impact | blocking)"
               continue
             fi
 
@@ -134,8 +135,8 @@ runs:
             esac
 
             # Write parsed marker to temp file (tab-separated)
-            printf '%s\t%s\t%s\t%s\t%s\n' "$global_seq" "$title" "$category" "$reason" "$blocking" >> "$markers_file"
-          done < <(echo "$comment_body" | grep -oE '<!--\s*FOLLOW-UP:\s*[^>]+-->' || true)
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$global_seq" "$title" "$category" "$reason" "$impact" "$blocking" >> "$markers_file"
+          done < <(echo "$comment_body" | perl -0777 -ne 'print "$_\n" for m{<!--\s*FOLLOW-UP:.*?-->}gs' || true)
         done
 
         total_markers=$(wc -l < "$markers_file" | tr -d ' ')
@@ -180,7 +181,7 @@ runs:
         # Fetch existing open issues to check for owned-artifact markers (idempotency)
         existing_issues=$(gh issue list --state all --limit 200 --json number,body,title 2>/dev/null || echo '[]')
 
-        while IFS=$'\t' read -r seq title category reason blocking; do
+        while IFS=$'\t' read -r seq title category reason impact blocking; do
           owned_marker="gpa:owned-artifact:follow-up:${repo_full}#${ISSUE_NUMBER}:${seq}"
 
           # Check if an issue with this owned-artifact marker already exists
@@ -218,6 +219,7 @@ runs:
             | sed "s|{{sequence}}|$seq|g" \
             | sed "s|{{category}}|$category|g" \
             | sed "s|{{reason}}|$reason|g" \
+            | sed "s|{{impact}}|$impact|g" \
             | sed "s|{{blocking}}|$blocking|g" \
             | sed "s|{{run_key}}|$RUN_KEY|g")
 
