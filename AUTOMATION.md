@@ -519,6 +519,12 @@ Defined in `config/trust-policy.yml`. See [discussion #3 §8](https://github.com
 
 The default workflow stages are: Backlog → Clarification → Design → Plan → Execution → Review → Merge → Closeout. Each transition has machine-testable gate conditions defined in discussion #3 §4.
 
+Canonical contract primitives for the next operator-in-the-loop evolution now live in [gateway/orchestration_contract.py](gateway/orchestration_contract.py):
+- Coarse statuses: `Backlog`, `Ready`, `In Progress`, `In Review`, `Approved`, `Done`, `Blocked`
+- Internal stages for build lane, review-loop lane, and finalize lane
+- Stage event schema fields (`run_key`, `idempotency_key`, `attempt/max_attempts`, retry metadata)
+- Structured operator command tokens: `gpa:feedback <instructions>` and `gpa:approve`
+
 ### Stage contract
 
 The orchestration is intended to run with minimal operator intervention once an issue moves to `Ready`. Each stage therefore has an explicit contract:
