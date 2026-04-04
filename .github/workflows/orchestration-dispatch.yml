@@ -656,6 +656,7 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: ${{ steps.design-review-prompt.outputs.prompt }}
+          show_full_output: ${{ vars.ORCHESTRATION_CLAUDE_SHOW_FULL_OUTPUT == 'true' }}
           claude_args: >-
             --max-turns 5
             --json-schema .github/schemas/design-review.json

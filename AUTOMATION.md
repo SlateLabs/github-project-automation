@@ -573,6 +573,9 @@ Optional tuning variables:
 
 - `ORCHESTRATION_CODEX_MODEL`
 - `ORCHESTRATION_CODEX_EFFORT`
+- `ORCHESTRATION_CLAUDE_SHOW_FULL_OUTPUT`
+  - Set to `true` to include full Claude Code output in Actions logs while debugging.
+  - Leave unset or set to any other value to keep full Claude output hidden.
 
 The design stage fails fast if any required agent secret is unavailable.
 
