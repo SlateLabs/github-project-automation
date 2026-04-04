@@ -454,6 +454,27 @@ Defined in `config/trust-policy.yml`. See [discussion #3 §8](https://github.com
 
 The default workflow stages are: Backlog → Clarification → Design → Plan → Execution → Review → Merge → Closeout. Each transition has machine-testable gate conditions defined in discussion #3 §4.
 
+### Stage contract
+
+The orchestration is intended to run with minimal operator intervention once an issue moves to `Ready`. Each stage therefore has an explicit contract:
+
+| Stage | Preconditions | Automation action | Required output artifact | Success postcondition | Next stage | Blocked condition |
+|-------|---------------|-------------------|--------------------------|-----------------------|------------|-------------------|
+| `kickoff` | Issue exists, is eligible, and contains `## Summary` | Normalize payload, dedup, trust/eligibility checks, accept kickoff | Accepted run with canonical `run_key` and audit comment | Issue is admitted into orchestration | `clarification` | Issue inaccessible, ineligible, or explicitly opted out |
+| `clarification` | Issue has `## Summary`; no `blocked` label | Seed `## Scope` if missing; auto-defer unresolved issue-level open questions to design | Issue body with clarification headings and no unresolved issue-level open questions | Issue is sufficiently specified to start design without operator edits | `design` | Missing detail cannot be reasonably deferred or issue is truly blocked |
+| `design` | Clarification passed | Create or recover design discussion before gate evaluation | Discussion with required headings, open questions resolved or `DEFERRED-TO-PLAN`, and at least one non-author review comment | Design discussion is reviewable and plan-ready | `plan` | Design questions cannot be resolved autonomously and need operator input |
+| `plan` | Design gate passed | Create or recover implementation plan comment before gate evaluation | Single plan comment with required headings, checklists, review dispositions, and slices | Plan is execution-ready | `execution` | Plan cannot be made concrete enough for execution |
+| `execution` | Plan gate passed | Create or recover execution branch and draft PR before gate evaluation | Branch exists and PR is review-ready with required headings | Reviewable code change exists | `review` | Implementation cannot proceed without external/operator decision |
+| `review` | Reviewable PR exists | Evaluate approvals and change-request state | PR with at least one approval and no unresolved changes requested | PR is merge-ready | `merge` | Review cannot be satisfied without operator intervention |
+| `merge` | Merge-ready PR exists | Verify merged PR and approval history | Merged PR referencing the issue | Change is merged and ready for follow-up capture | `follow-up-capture` | Merge cannot complete because repo state or policy prevents it |
+| `follow-up-capture` | Merged PR exists and execution is complete | Capture structured follow-up artifacts from issue comments | Follow-up issues or explicit follow-up evidence | Deferred work is recorded before closeout | `closeout` | Follow-up state is ambiguous and cannot be derived automatically |
+| `closeout` | Merged PR exists, source branch deleted, follow-up evidence available | Create or recover closeout retrospective and validate its structure | Closeout comment with required sections and dispositions | Issue is fully closed out | _(terminal)_ | Final retrospective or cleanup cannot be completed automatically |
+
+Two operating rules follow from this contract:
+
+- Stages should auto-create or auto-update their own prerequisite artifact whenever that can be done safely.
+- A stage should move the issue to `Blocked` only when the missing information or repo state cannot be resolved autonomously or reasonably deferred to the next stage.
+
 ## Stage actions
 
 Stage actions run automatically after eligibility validation passes. Some actions (like the design scaffold) run **before** their gate check to create the artifacts the gate will then evaluate; others run after gate checks pass. Each action's trigger timing is documented below.
@@ -478,6 +499,7 @@ The current handoff sequence is:
 
 This is intentionally "fail forward" for scaffold-driven stages:
 
+- `clarification` auto-seeds `## Scope` and defers unresolved issue-level open questions into design by marking them `DEFERRED-TO-DESIGN`.
 - `design`, `plan`, and `execution` typically auto-queue, scaffold their required artifact, and then fail their gate until a human or agent fills in the discussion/comment/PR.
 - `review`, `merge`, and `closeout` remain machine-checked stages; they only auto-advance when the required repo artifacts already satisfy the gate.
 - Each auto-handoff posts a `gpa:run-status:<stage>:started:<run_key>` marker comment on the issue so the run history remains queryable across stages.
