@@ -241,6 +241,49 @@ projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/pro
 
 This follows GitHub’s OIDC guidance and Google’s `google-github-actions/auth` / `deploy-cloudrun` action model.
 
+#### Proven IAM matrix for `gcloud run deploy --source`
+
+The first live GitHub Actions deploy for this repo exposed the full IAM chain required for Cloud Run source deploys. The deployer service account is not only talking to Cloud Run; it also has to drive Cloud Build, Artifact Registry, and the Cloud Storage staging bucket, and it must be allowed to act as both the runtime service account and the build service account.
+
+The following grants are the **working** set for `github-gateway-deployer@github-gateway.iam.gserviceaccount.com` in project `github-gateway`.
+
+Project-level on `github-gateway` for `github-gateway-deployer@github-gateway.iam.gserviceaccount.com`:
+
+- `roles/run.admin`
+- `roles/cloudbuild.builds.editor`
+- `roles/artifactregistry.reader`
+- `roles/storage.viewer`
+- `roles/serviceusage.serviceUsageConsumer`
+
+Bucket-level on `gs://run-sources-github-gateway-us-central1` for `github-gateway-deployer@github-gateway.iam.gserviceaccount.com`:
+
+- `roles/storage.objectViewer`
+- `roles/storage.objectCreator`
+- `roles/storage.legacyBucketReader`
+
+Service-account-level:
+
+- On `github-automation-runner@github-gateway.iam.gserviceaccount.com`:
+  - grant `roles/iam.serviceAccountUser` to `github-gateway-deployer@github-gateway.iam.gserviceaccount.com`
+- On `395454765628-compute@developer.gserviceaccount.com`:
+  - grant `roles/iam.serviceAccountUser` to `github-gateway-deployer@github-gateway.iam.gserviceaccount.com`
+
+Build service account:
+
+- On project `github-gateway`, grant `roles/run.builder` to:
+  - `395454765628-compute@developer.gserviceaccount.com`
+
+Workload Identity:
+
+- On `github-gateway-deployer@github-gateway.iam.gserviceaccount.com`, grant `roles/iam.workloadIdentityUser` to:
+  - `principalSet://iam.googleapis.com/projects/395454765628/locations/global/workloadIdentityPools/github/attribute.repository/SlateLabs/github-project-automation`
+
+These grants were validated by a successful run of:
+
+- [Deploy Gateway workflow](https://github.com/SlateLabs/github-project-automation/actions/workflows/deploy-gateway.yml)
+
+If the deploy workflow is cloned into another repo/project, do not assume the narrower initial role set is sufficient. Reuse this full matrix unless you are intentionally redesigning the Cloud Run build/deploy path.
+
 ### Kickoff payload contract
 
 The listener is deliberately strict because `projects_v2_item` webhooks are still preview. The accepted kickoff shape is:
