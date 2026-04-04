@@ -405,37 +405,7 @@ jobs:
           fi
 
           if printf '%s\n' "$body" | grep -qE '^#{1,2}\s+Open Questions'; then
-            rewritten_body="$(
-              BODY="$body" python3 -c '
-import os
-import re
-
-body = os.environ["BODY"]
-lines = body.splitlines()
-out = []
-in_open_questions = False
-heading_re = re.compile(r'^#{1,2}\s+')
-question_re = re.compile(r'^(\s*[-*]\s+)(.*)$')
-
-for line in lines:
-    if re.match(r'^#{1,2}\s+Open Questions\b', line):
-        in_open_questions = True
-        out.append(line)
-        continue
-    if in_open_questions and heading_re.match(line):
-        in_open_questions = False
-    if in_open_questions:
-        match = question_re.match(line)
-            if match:
-                prefix, content = match.groups()
-                text = content.strip()
-                if text and "DEFERRED-TO-DESIGN" not in text and "~~" not in text:
-                    line = f"{prefix}{text} (DEFERRED-TO-DESIGN)"
-    out.append(line)
-
-print("\n".join(out), end="")
-'
-            )"
+            rewritten_body="$(printf '%s' "$body" | python3 scripts/defer_open_questions.py)"
             if [ "$rewritten_body" != "$body" ]; then
               body="$rewritten_body"
               changed="true"
