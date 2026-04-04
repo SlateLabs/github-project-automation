@@ -1312,7 +1312,7 @@ jobs:
           pr_number=$(echo "$pr_json" | jq -r '.number // empty')
           pr_url=$(echo "$pr_json" | jq -r '.url // empty')
           branch_name=$(echo "$pr_json" | jq -r '.headRefName // empty')
-          deployment_url=$(printf '%s' "$(echo "$pr_json" | jq -r '.body // ""')" | grep -oE 'https://[^[:space:])]+')
+          deployment_url=$(printf '%s' "$(echo "$pr_json" | jq -r '.body // ""')" | grep -oE 'https://[^[:space:])]+' || true)
           deployment_url=${deployment_url:-"(deployment URL not yet wired)"}
 
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
