@@ -1,4 +1,8 @@
 name: Orchestration Dispatch
+run-name: >-
+  ${{ github.event_name == 'repository_dispatch'
+      && format('{0} · #{1} · orchestration', github.event.client_payload.requested_stage, github.event.client_payload.issue_number)
+      || format('{0} · #{1} · orchestration', inputs.requested_stage, inputs.issue_number) }}
 
 on:
   repository_dispatch:
