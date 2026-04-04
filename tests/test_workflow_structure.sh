@@ -28,7 +28,20 @@ check() {
 echo "=== Workflow Structure Tests ==="
 
 echo ""
-echo "1. Trigger configuration"
+echo "1. Workflow parses as YAML"
+
+if python3 - <<'PY' >/dev/null 2>&1
+import pathlib, yaml
+yaml.safe_load(pathlib.Path(".github/workflows/orchestration-dispatch.yml").read_text())
+PY
+then
+  check "workflow YAML parses successfully" "pass"
+else
+  check "workflow YAML parses successfully" "fail"
+fi
+
+echo ""
+echo "2. Trigger configuration"
 
 if grep -q 'repository_dispatch:' "$WORKFLOW"; then
   check "repository_dispatch trigger present" "pass"
@@ -49,7 +62,7 @@ else
 fi
 
 echo ""
-echo "2. Normalize step present"
+echo "3. Normalize step present"
 
 if grep -q 'id: normalize' "$WORKFLOW"; then
   check "normalize step exists with id" "pass"
@@ -82,7 +95,7 @@ else
 fi
 
 echo ""
-echo "3. No stale inputs.* references outside normalize step and run-name"
+echo "4. No stale inputs.* references outside normalize step and run-name"
 
 # Count inputs.* references — should only be inside the normalize step
 # (lines with WD_ prefix env vars) or the top-level workflow_dispatch run-name.
@@ -96,7 +109,7 @@ else
 fi
 
 echo ""
-echo "4. No stale github.actor references outside normalize step"
+echo "5. No stale github.actor references outside normalize step"
 
 stale_actor_refs=$(grep -n 'github\.actor' "$WORKFLOW" | grep -v 'WD_ACTOR.*github\.actor' || true)
 if [ -z "$stale_actor_refs" ]; then
@@ -108,7 +121,7 @@ else
 fi
 
 echo ""
-echo "5. Run key generation handles both trigger paths"
+echo "6. Run key generation handles both trigger paths"
 
 if grep -q 'TRIGGER.*steps.normalize.outputs.trigger' "$WORKFLOW"; then
   check "run-key step receives trigger from normalize" "pass"
@@ -123,7 +136,7 @@ else
 fi
 
 echo ""
-echo "6. Payload validation in normalize step"
+echo "7. Payload validation in normalize step"
 
 if grep -q 'repository_dispatch payload validation failed' "$WORKFLOW"; then
   check "validation error message present" "pass"
@@ -156,7 +169,7 @@ else
 fi
 
 echo ""
-echo "7. Automatic handoff configuration"
+echo "8. Automatic handoff configuration"
 
 if grep -q 'Resolve next stage' "$WORKFLOW"; then
   check "next-stage resolution step present" "pass"
@@ -185,7 +198,7 @@ else
 fi
 
 echo ""
-echo "8. Project status synchronization"
+echo "9. Project status synchronization"
 
 if grep -q 'updateProjectV2ItemFieldValue' "$WORKFLOW"; then
   check "project status mutation present" "pass"
@@ -200,7 +213,7 @@ else
 fi
 
 echo ""
-echo "9. Design automation steps"
+echo "10. Design automation steps"
 
 if grep -q 'Codex author design proposal' "$WORKFLOW" && grep -q 'openai/codex-action@v1' "$WORKFLOW"; then
   check "codex design author step present" "pass"
@@ -221,7 +234,7 @@ else
 fi
 
 echo ""
-echo "10. Job summary includes trigger source"
+echo "11. Job summary includes trigger source"
 
 if grep -q 'TRIGGER.*steps.normalize.outputs.trigger' "$WORKFLOW" && grep -q 'Trigger' "$WORKFLOW"; then
   check "job summary includes trigger field" "pass"

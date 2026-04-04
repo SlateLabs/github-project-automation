@@ -518,48 +518,48 @@ jobs:
 
           prompt_file="$RUNNER_TEMP/design-author-prompt.md"
           cat > "$prompt_file" <<EOF
-You are Codex acting as the design author for a GitHub workflow orchestration system.
+          You are Codex acting as the design author for a GitHub workflow orchestration system.
 
-Task:
-- Produce a complete replacement body for the GitHub discussion associated with issue #$ISSUE_NUMBER.
-- The output must be valid Markdown only. Do not wrap it in code fences.
-- Keep the owned-artifact marker and source-issue lines.
-- Replace placeholder text with substantive content derived from the issue.
-- Resolve every open question by either answering it directly in the proposal or marking it \`DEFERRED-TO-PLAN\`.
-- Make the design specific enough that the next \`plan\` stage can proceed without operator clarification.
-- Do not invent unrelated scope or infrastructure not implied by the issue.
+          Task:
+          - Produce a complete replacement body for the GitHub discussion associated with issue #$ISSUE_NUMBER.
+          - The output must be valid Markdown only. Do not wrap it in code fences.
+          - Keep the owned-artifact marker and source-issue lines.
+          - Replace placeholder text with substantive content derived from the issue.
+          - Resolve every open question by either answering it directly in the proposal or marking it \`DEFERRED-TO-PLAN\`.
+          - Make the design specific enough that the next \`plan\` stage can proceed without operator clarification.
+          - Do not invent unrelated scope or infrastructure not implied by the issue.
 
-Required structure:
-- # Design Discussion: <issue title>
-- owned-artifact marker comment
-- source issue lines
-- ## Summary
-- ## Problem
-- ## Goals
-- ## Non-goals
-- ## Proposed Approach
-- ## Open Questions
-- ## Exit Criteria
+          Required structure:
+          - # Design Discussion: <issue title>
+          - owned-artifact marker comment
+          - source issue lines
+          - ## Summary
+          - ## Problem
+          - ## Goals
+          - ## Non-goals
+          - ## Proposed Approach
+          - ## Open Questions
+          - ## Exit Criteria
 
-Guidance:
-- The proposal should preserve the issue's intent and acceptance criteria.
-- Prefer concrete workflow/state-machine changes over abstract architecture prose.
-- For open questions that are better answered later, mark them \`DEFERRED-TO-PLAN\`.
-- The exit criteria checklist should be marked complete if the generated body itself satisfies the design gate.
+          Guidance:
+          - The proposal should preserve the issue's intent and acceptance criteria.
+          - Prefer concrete workflow/state-machine changes over abstract architecture prose.
+          - For open questions that are better answered later, mark them \`DEFERRED-TO-PLAN\`.
+          - The exit criteria checklist should be marked complete if the generated body itself satisfies the design gate.
 
-Source issue title:
-$ISSUE_TITLE
+          Source issue title:
+          $ISSUE_TITLE
 
-Source issue body:
----
-$ISSUE_BODY
----
+          Source issue body:
+          ---
+          $ISSUE_BODY
+          ---
 
-Existing discussion body:
----
-$DISCUSSION_BODY
----
-EOF
+          Existing discussion body:
+          ---
+          $DISCUSSION_BODY
+          ---
+          EOF
           echo "prompt_file=$prompt_file" >> "$GITHUB_OUTPUT"
 
       - name: Codex author design proposal
@@ -617,28 +617,28 @@ EOF
           {
             echo 'prompt<<EOF'
             cat <<EOF
-Review the following design discussion for issue #$ISSUE_NUMBER and produce structured JSON only.
+            Review the following design discussion for issue #$ISSUE_NUMBER and produce structured JSON only.
 
-Review goals:
-- Check whether the design is coherent, specific, and aligned to the source issue.
-- Prefer actionable critique over generic praise.
-- If the design is good enough for planning, set \`ready_for_plan\` to true.
-- The review comment markdown should read like a concise review from a second agent, not an approval checkbox dump.
-- Do not ask the operator to do work unless absolutely necessary.
+            Review goals:
+            - Check whether the design is coherent, specific, and aligned to the source issue.
+            - Prefer actionable critique over generic praise.
+            - If the design is good enough for planning, set \`ready_for_plan\` to true.
+            - The review comment markdown should read like a concise review from a second agent, not an approval checkbox dump.
+            - Do not ask the operator to do work unless absolutely necessary.
 
-Source issue title:
-$ISSUE_TITLE
+            Source issue title:
+            $ISSUE_TITLE
 
-Source issue body:
----
-$ISSUE_BODY
----
+            Source issue body:
+            ---
+            $ISSUE_BODY
+            ---
 
-Proposed design discussion:
----
-$discussion_body
----
-EOF
+            Proposed design discussion:
+            ---
+            $discussion_body
+            ---
+            EOF
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
