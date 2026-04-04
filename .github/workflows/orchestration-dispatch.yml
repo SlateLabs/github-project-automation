@@ -413,8 +413,6 @@ jobs:
           private-key: ${{ secrets.ORCHESTRATION_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
-          permission-discussions: write
-          permission-issues: write
 
       - name: Scaffold clarification issue body (pre-gate)
         if: needs.intake.outputs.requested_stage == 'clarification'
