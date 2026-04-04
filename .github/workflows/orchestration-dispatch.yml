@@ -1159,12 +1159,20 @@ jobs:
         if: needs.intake.outputs.requested_stage == 'execution'
         env:
           BRANCH_NAME: ${{ steps.scaffold-execution.outputs.branch_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
 
-          git fetch origin "$BRANCH_NAME"
-          git checkout -B "$BRANCH_NAME" "origin/$BRANCH_NAME"
+          default_branch=$(gh repo view "${GITHUB_REPOSITORY}" --json defaultBranchRef --jq '.defaultBranchRef.name')
+          if git ls-remote --exit-code --heads origin "$BRANCH_NAME" >/dev/null 2>&1; then
+            git fetch origin "$BRANCH_NAME"
+            git checkout -B "$BRANCH_NAME" "origin/$BRANCH_NAME"
+          else
+            echo "::notice::Remote branch '$BRANCH_NAME' does not exist yet; creating local branch from '$default_branch'"
+            git fetch origin "$default_branch"
+            git checkout -B "$BRANCH_NAME" "origin/$default_branch"
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
