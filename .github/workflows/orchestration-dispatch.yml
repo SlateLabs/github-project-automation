@@ -716,9 +716,10 @@ jobs:
           app-id: ${{ vars.ORCHESTRATION_APP_ID }}
           private-key: ${{ secrets.ORCHESTRATION_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
           permission-contents: write
           permission-issues: write
-          permission-projects: write
+          permission-organization-projects: write
 
       - name: Resolve next stage
         id: resolve
