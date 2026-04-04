@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ClaudeHealthcheck",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "message"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["ok"]
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}
