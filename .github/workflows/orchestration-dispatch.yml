@@ -600,6 +600,18 @@ jobs:
           gh api graphql -f query="$mutation" -F discussionId="$DISCUSSION_ID" -f body="$new_body" >/dev/null
           echo "::notice::Codex authored design discussion draft"
 
+      - name: Normalize design open questions
+        if: needs.intake.outputs.requested_stage == 'design'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          draft_file="$RUNNER_TEMP/design-discussion.md"
+          [ -s "$draft_file" ] || { echo "::error::Codex did not produce a design discussion draft"; exit 1; }
+
+          python3 scripts/normalize_design_open_questions.py < "$draft_file" > "$draft_file.normalized"
+          mv "$draft_file.normalized" "$draft_file"
+
       - name: Prepare Claude design review prompt
         if: needs.intake.outputs.requested_stage == 'design'
         id: design-review-prompt
