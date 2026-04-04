@@ -2,7 +2,7 @@ name: Orchestration Dispatch
 run-name: >-
   ${{ github.event_name == 'repository_dispatch'
       && format('{0} · #{1} · orchestration', github.event.client_payload.requested_stage, github.event.client_payload.issue_number)
-      || format('{0} · #{1} · orchestration', inputs.requested_stage, inputs.issue_number) }}
+      || format('{0} · #{1} · orchestration', github.event.inputs.requested_stage, github.event.inputs.issue_number) }}
 
 on:
   repository_dispatch:
@@ -38,18 +38,12 @@ permissions:
 # Job graph:
 #
 #   intake
-#     ├── qualify-dedup    ──┐
-#     └── qualify-eligible ──┤
-#                            ▼
-#                         prepare
-#                            │
-#                          gate
-#                            │
-#                         advance
-#                            │
-#                         handoff
-#                            │
-#                         summary  (always runs)
+#     │
+#   gate
+#     │
+#   handoff
+#     │
+#   summary  (always runs)
 # ──────────────────────────────────────────────────────────────────────
 
 jobs:
@@ -65,6 +59,11 @@ jobs:
       project_item_id: ${{ steps.normalize.outputs.project_item_id }}
       run_key: ${{ steps.run-key.outputs.run_key }}
       timestamp: ${{ steps.run-key.outputs.timestamp }}
+      duplicate: ${{ steps.dedup.outputs.duplicate }}
+      eligible: ${{ steps.eligibility.outputs.eligible }}
+      reason: ${{ steps.eligibility.outputs.reason }}
+      issue_title: ${{ steps.eligibility.outputs.issue_title }}
+      issue_body: ${{ steps.eligibility.outputs.issue_body }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -218,28 +217,17 @@ jobs:
           echo "timestamp=$timestamp" >> "$GITHUB_OUTPUT"
           echo "::notice::Run key: $run_key (source: $TRIGGER)"
 
-  # ── qualify-dedup ───────────────────────────────────────────────────
-  # Has this exact request already been processed recently?
-  qualify-dedup:
-    needs: intake
-    runs-on: ubuntu-latest
-    outputs:
-      duplicate: ${{ steps.dedup.outputs.duplicate }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Check for recent duplicate run
         id: dedup
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+          ISSUE_NUMBER: ${{ steps.normalize.outputs.issue_number }}
           REPO_NAME: ${{ github.repository }}
-          REQUESTED_STAGE: ${{ needs.intake.outputs.requested_stage }}
-          RUN_KEY: ${{ needs.intake.outputs.run_key }}
+          REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
+          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          ACTOR: ${{ needs.intake.outputs.actor }}
+          ACTOR: ${{ steps.normalize.outputs.actor }}
           RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -336,39 +324,26 @@ jobs:
             )"
           fi
 
-  # ── qualify-eligible ────────────────────────────────────────────────
-  # Is this issue eligible for automation?
-  qualify-eligible:
-    needs: intake
-    runs-on: ubuntu-latest
-    outputs:
-      eligible: ${{ steps.eligibility.outputs.eligible }}
-      reason: ${{ steps.eligibility.outputs.reason }}
-      issue_title: ${{ steps.eligibility.outputs.issue_title }}
-      issue_body: ${{ steps.eligibility.outputs.issue_body }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Validate eligibility
+        if: steps.dedup.outputs.duplicate != 'true'
         id: eligibility
         uses: ./.github/actions/validate-eligibility
         with:
-          issue_number: ${{ needs.intake.outputs.issue_number }}
-          requested_stage: ${{ needs.intake.outputs.requested_stage }}
-          actor: ${{ needs.intake.outputs.actor }}
+          issue_number: ${{ steps.normalize.outputs.issue_number }}
+          requested_stage: ${{ steps.normalize.outputs.requested_stage }}
+          actor: ${{ steps.normalize.outputs.actor }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Post ineligible comment
-        if: steps.eligibility.outputs.eligible != 'true'
+        if: steps.dedup.outputs.duplicate != 'true' && steps.eligibility.outputs.eligible != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
-          RUN_KEY: ${{ needs.intake.outputs.run_key }}
+          ISSUE_NUMBER: ${{ steps.normalize.outputs.issue_number }}
+          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
           REASON: ${{ steps.eligibility.outputs.reason }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          REQUESTED_STAGE: ${{ needs.intake.outputs.requested_stage }}
-          ACTOR: ${{ needs.intake.outputs.actor }}
+          REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
+          ACTOR: ${{ steps.normalize.outputs.actor }}
           RUN_ID: ${{ github.run_id }}
         shell: bash
         run: |
@@ -388,7 +363,7 @@ jobs:
           )"
 
       - name: Fail on ineligible
-        if: steps.eligibility.outputs.eligible != 'true'
+        if: steps.dedup.outputs.duplicate != 'true' && steps.eligibility.outputs.eligible != 'true'
         env:
           REASON: ${{ steps.eligibility.outputs.reason }}
         shell: bash
@@ -396,12 +371,17 @@ jobs:
           echo "::error::Issue is not eligible: $REASON"
           exit 1
 
-  # ── prepare ─────────────────────────────────────────────────────────
-  # Create the artifacts needed for this stage (scaffolds).
-  prepare:
-    needs: [intake, qualify-dedup, qualify-eligible]
-    if: needs.qualify-dedup.outputs.duplicate != 'true'
+  # ── gate ────────────────────────────────────────────────────────────
+  # Create artifacts, evaluate gates, and record stage advancement.
+  gate:
+    needs: intake
+    if: needs.intake.outputs.duplicate != 'true'
     runs-on: ubuntu-latest
+    outputs:
+      gate_passed: ${{ steps.gate.outputs.gate_passed }}
+      unmet_conditions: ${{ steps.gate.outputs.unmet_conditions }}
+      waived_conditions: ${{ steps.gate.outputs.waived_conditions }}
+      state_valid: ${{ steps.state-check.outputs.state_valid }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -411,7 +391,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
-          ISSUE_BODY: ${{ needs.qualify-eligible.outputs.issue_body }}
+          ISSUE_BODY: ${{ needs.intake.outputs.issue_body }}
         shell: bash
         run: |
           set -euo pipefail
@@ -484,7 +464,7 @@ jobs:
         with:
           issue_number: ${{ needs.intake.outputs.issue_number }}
           requested_stage: closeout
-          issue_body: ${{ needs.qualify-eligible.outputs.issue_body }}
+          issue_body: ${{ needs.intake.outputs.issue_body }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           check_mode: pre-scaffold
 
@@ -545,21 +525,6 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           run_key: ${{ needs.intake.outputs.run_key }}
           actor: ${{ needs.intake.outputs.actor }}
-
-  # ── gate ────────────────────────────────────────────────────────────
-  # Do the artifacts meet the quality bar for this stage?
-  gate:
-    needs: [intake, qualify-dedup, qualify-eligible, prepare]
-    if: needs.qualify-dedup.outputs.duplicate != 'true'
-    runs-on: ubuntu-latest
-    outputs:
-      gate_passed: ${{ steps.gate.outputs.gate_passed }}
-      unmet_conditions: ${{ steps.gate.outputs.unmet_conditions }}
-      waived_conditions: ${{ steps.gate.outputs.waived_conditions }}
-      state_valid: ${{ steps.state-check.outputs.state_valid }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
 
       - name: Refresh issue body
         id: issue-body
@@ -682,17 +647,8 @@ jobs:
 
           echo "state_valid=true" >> "$GITHUB_OUTPUT"
 
-  # ── advance ─────────────────────────────────────────────────────────
-  # Record the transition and handle post-gate actions.
-  advance:
-    needs: [intake, qualify-dedup, gate]
-    if: needs.qualify-dedup.outputs.duplicate != 'true' && needs.gate.outputs.gate_passed == 'true' && needs.gate.outputs.state_valid == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Post success comment
+        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
@@ -731,7 +687,7 @@ jobs:
       # and execution is complete. Unlike pre-gate scaffolds, this runs AFTER
       # the gate passes because it creates external artifacts (new issues).
       - name: Capture follow-ups (post-gate)
-        if: needs.intake.outputs.requested_stage == 'follow-up-capture'
+        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'follow-up-capture'
         id: capture-follow-ups
         uses: ./.github/actions/capture-follow-ups
         with:
@@ -743,8 +699,8 @@ jobs:
   # ── handoff ─────────────────────────────────────────────────────────
   # Queue the next stage when the current one completes successfully.
   handoff:
-    needs: [intake, qualify-dedup, gate, advance]
-    if: needs.qualify-dedup.outputs.duplicate != 'true' && needs.gate.outputs.gate_passed == 'true' && needs.gate.outputs.state_valid == 'true'
+    needs: [intake, gate]
+    if: needs.intake.outputs.duplicate != 'true' && needs.gate.outputs.gate_passed == 'true' && needs.gate.outputs.state_valid == 'true'
     runs-on: ubuntu-latest
     outputs:
       next_stage: ${{ steps.resolve.outputs.next_stage }}
@@ -1021,7 +977,7 @@ jobs:
   # ── summary ─────────────────────────────────────────────────────────
   # Always-runs job that produces the Actions job summary.
   summary:
-    needs: [intake, qualify-dedup, qualify-eligible, prepare, gate, advance, handoff]
+    needs: [intake, gate, handoff]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -1038,8 +994,8 @@ jobs:
       - name: Job summary
         env:
           RUN_KEY: ${{ needs.intake.outputs.run_key }}
-          ELIGIBLE: ${{ needs.qualify-eligible.outputs.eligible }}
-          DUPLICATE: ${{ needs.qualify-dedup.outputs.duplicate }}
+          ELIGIBLE: ${{ needs.intake.outputs.eligible }}
+          DUPLICATE: ${{ needs.intake.outputs.duplicate }}
           GATE_PASSED: ${{ needs.gate.outputs.gate_passed }}
           ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
           REQUESTED_STAGE: ${{ needs.intake.outputs.requested_stage }}

@@ -82,10 +82,11 @@ else
 fi
 
 echo ""
-echo "3. No stale inputs.* references outside normalize step"
+echo "3. No stale inputs.* references outside normalize step and run-name"
 
-# Count inputs.* references — should only be inside the normalize step (lines with WD_ prefix env vars)
-stale_input_refs=$(grep -n 'inputs\.' "$WORKFLOW" | grep -v 'WD_ISSUE_NUMBER.*inputs\.' | grep -v 'WD_REQUESTED_STAGE.*inputs\.' | grep -v 'description:' | grep -v 'type:' | grep -v 'required:' | grep -v 'options:' || true)
+# Count inputs.* references — should only be inside the normalize step
+# (lines with WD_ prefix env vars) or the top-level workflow_dispatch run-name.
+stale_input_refs=$(grep -n 'inputs\.' "$WORKFLOW" | grep -v 'WD_ISSUE_NUMBER.*inputs\.' | grep -v 'WD_REQUESTED_STAGE.*inputs\.' | grep -v 'github\.event\.inputs\.' | grep -v 'description:' | grep -v 'type:' | grep -v 'required:' | grep -v 'options:' || true)
 if [ -z "$stale_input_refs" ]; then
   check "no stale inputs.* references in downstream steps" "pass"
 else
