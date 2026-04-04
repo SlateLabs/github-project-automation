@@ -576,7 +576,7 @@ jobs:
       - name: Apply Codex design draft
         if: needs.intake.outputs.requested_stage == 'design'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.design-app-token.outputs.token }}
           DISCUSSION_ID: ${{ steps.design-context.outputs.discussion_id }}
         shell: bash
         run: |
