@@ -234,6 +234,7 @@ class GatewayServiceTests(unittest.TestCase):
                 "run_key": body["run_key"],
                 "actor": "trusted-user",
                 "timestamp": "1710000000000",
+                "project_item_id": "PVTI_123",
             },
         )
 

@@ -58,6 +58,7 @@ jobs:
       requested_stage: ${{ steps.normalize.outputs.requested_stage }}
       actor: ${{ steps.normalize.outputs.actor }}
       trigger: ${{ steps.normalize.outputs.trigger }}
+      project_item_id: ${{ steps.normalize.outputs.project_item_id }}
       run_key: ${{ steps.run-key.outputs.run_key }}
       timestamp: ${{ steps.run-key.outputs.timestamp }}
     steps:
@@ -77,6 +78,7 @@ jobs:
           RD_RUN_KEY: ${{ github.event.client_payload.run_key }}
           RD_ACTOR: ${{ github.event.client_payload.actor }}
           RD_TIMESTAMP: ${{ github.event.client_payload.timestamp }}
+          RD_PROJECT_ITEM_ID: ${{ github.event.client_payload.project_item_id }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CURRENT_REPO: ${{ github.repository }}
         run: |
@@ -164,6 +166,7 @@ jobs:
                   diagnostic+="- ${e}\n"
                 done
                 diagnostic+="\nExpected payload: \`{ issue_number, requested_stage, run_key, actor, timestamp }\`"
+                diagnostic+="\nOptional closed-loop field: \`project_item_id\`"
                 echo -e "$diagnostic" | gh issue comment "${RD_ISSUE_NUMBER}" --body-file -
               fi
 
@@ -175,6 +178,7 @@ jobs:
             echo "requested_stage=${RD_REQUESTED_STAGE}" >> "$GITHUB_OUTPUT"
             echo "actor=${RD_ACTOR}" >> "$GITHUB_OUTPUT"
             echo "trigger=repository_dispatch" >> "$GITHUB_OUTPUT"
+            echo "project_item_id=${RD_PROJECT_ITEM_ID}" >> "$GITHUB_OUTPUT"
             echo "::notice::Normalized inputs from repository_dispatch (actor: ${RD_ACTOR}, issue: ${RD_ISSUE_NUMBER}, stage: ${RD_REQUESTED_STAGE})"
           else
             # --- workflow_dispatch: pass through existing inputs ---
@@ -182,6 +186,7 @@ jobs:
             echo "requested_stage=${WD_REQUESTED_STAGE}" >> "$GITHUB_OUTPUT"
             echo "actor=${WD_ACTOR}" >> "$GITHUB_OUTPUT"
             echo "trigger=workflow_dispatch" >> "$GITHUB_OUTPUT"
+            echo "project_item_id=" >> "$GITHUB_OUTPUT"
             echo "::notice::Normalized inputs from workflow_dispatch (actor: ${WD_ACTOR}, issue: ${WD_ISSUE_NUMBER}, stage: ${WD_REQUESTED_STAGE})"
           fi
 
@@ -698,7 +703,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       next_stage: ${{ steps.resolve.outputs.next_stage }}
+      target_status: ${{ steps.resolve.outputs.target_status }}
       next_run_key: ${{ steps.next-run-key.outputs.run_key }}
+      status_updated: ${{ steps.sync-status.outputs.updated }}
       dispatched: ${{ steps.dispatch.outputs.dispatched }}
     steps:
       - name: Resolve next stage
@@ -710,30 +717,39 @@ jobs:
           case "$REQUESTED_STAGE" in
             kickoff)
               next_stage="clarification"
+              target_status="In Progress"
               ;;
             clarification)
               next_stage="design"
+              target_status="In Progress"
               ;;
             design)
               next_stage="plan"
+              target_status="In Progress"
               ;;
             plan)
               next_stage="execution"
+              target_status="In Progress"
               ;;
             execution)
               next_stage="review"
+              target_status="In Review"
               ;;
             review)
               next_stage="merge"
+              target_status="In Review"
               ;;
             merge)
               next_stage="follow-up-capture"
+              target_status="In Progress"
               ;;
             follow-up-capture)
               next_stage="closeout"
+              target_status="In Progress"
               ;;
             closeout)
               next_stage=""
+              target_status="Done"
               ;;
             *)
               echo "::error::Unknown requested_stage '$REQUESTED_STAGE'"
@@ -742,6 +758,110 @@ jobs:
           esac
 
           echo "next_stage=$next_stage" >> "$GITHUB_OUTPUT"
+          echo "target_status=$target_status" >> "$GITHUB_OUTPUT"
+
+      - name: Sync project Status
+        if: needs.intake.outputs.project_item_id != ''
+        id: sync-status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PROJECT_ITEM_ID: ${{ needs.intake.outputs.project_item_id }}
+          TARGET_STATUS: ${{ steps.resolve.outputs.target_status }}
+        run: |
+          set -euo pipefail
+
+          metadata_query=$(cat <<'GRAPHQL'
+          query($itemId: ID!) {
+            node(id: $itemId) {
+              ... on ProjectV2Item {
+                id
+                fieldValues(first: 20) {
+                  nodes {
+                    ... on ProjectV2ItemFieldSingleSelectValue {
+                      name
+                      field {
+                        ... on ProjectV2FieldCommon {
+                          name
+                        }
+                      }
+                    }
+                  }
+                }
+                project {
+                  ... on ProjectV2 {
+                    id
+                    fields(first: 20) {
+                      nodes {
+                        ... on ProjectV2SingleSelectField {
+                          id
+                          name
+                          options {
+                            id
+                            name
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+          GRAPHQL
+          )
+
+          metadata=$(gh api graphql -f query="$metadata_query" -F itemId="$PROJECT_ITEM_ID")
+
+          project_id=$(echo "$metadata" | jq -r '.data.node.project.id // empty')
+          status_field_id=$(echo "$metadata" | jq -r '.data.node.project.fields.nodes[] | select(.name == "Status") | .id' | head -1)
+          status_option_id=$(echo "$metadata" | jq -r --arg target "$TARGET_STATUS" '.data.node.project.fields.nodes[] | select(.name == "Status") | .options[] | select(.name == $target) | .id' | head -1)
+          current_status=$(echo "$metadata" | jq -r '.data.node.fieldValues.nodes[] | select(.field.name == "Status") | .name // empty' | head -1)
+
+          if [ -z "$project_id" ] || [ -z "$status_field_id" ] || [ -z "$status_option_id" ]; then
+            echo "::error::Could not resolve project metadata for Status synchronization"
+            exit 1
+          fi
+
+          if [ "$current_status" = "$TARGET_STATUS" ]; then
+            echo "::notice::Project Status already '$TARGET_STATUS'"
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          mutation=$(cat <<'GRAPHQL'
+          mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+            updateProjectV2ItemFieldValue(
+              input: {
+                projectId: $projectId
+                itemId: $itemId
+                fieldId: $fieldId
+                value: { singleSelectOptionId: $optionId }
+              }
+            ) {
+              projectV2Item {
+                id
+              }
+            }
+          }
+          GRAPHQL
+          )
+
+          gh api graphql \
+            -f query="$mutation" \
+            -F projectId="$project_id" \
+            -F itemId="$PROJECT_ITEM_ID" \
+            -F fieldId="$status_field_id" \
+            -F optionId="$status_option_id" >/dev/null
+
+          echo "::notice::Updated project Status to '$TARGET_STATUS'"
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+
+      - name: Skip project Status sync
+        if: needs.intake.outputs.project_item_id == ''
+        shell: bash
+        run: |
+          echo "::notice::No project_item_id provided; skipping project Status sync"
 
       - name: Generate next run key
         if: steps.resolve.outputs.next_stage != ''
@@ -758,7 +878,7 @@ jobs:
           echo "timestamp=$timestamp" >> "$GITHUB_OUTPUT"
 
       - name: Dispatch next stage
-        if: steps.resolve.outputs.next_stage != ''
+        if: steps.resolve.outputs.next_stage != '' && needs.intake.outputs.project_item_id != ''
         id: dispatch
         shell: bash
         env:
@@ -770,6 +890,7 @@ jobs:
           NEXT_TIMESTAMP: ${{ steps.next-run-key.outputs.timestamp }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RUN_ID: ${{ github.run_id }}
+          PROJECT_ITEM_ID: ${{ needs.intake.outputs.project_item_id }}
         run: |
           set -euo pipefail
 
@@ -779,7 +900,8 @@ jobs:
             -f "client_payload[requested_stage]=$NEXT_STAGE" \
             -f "client_payload[run_key]=$NEXT_RUN_KEY" \
             -f "client_payload[actor]=$ACTOR" \
-            -f "client_payload[timestamp]=$NEXT_TIMESTAMP"
+            -f "client_payload[timestamp]=$NEXT_TIMESTAMP" \
+            -f "client_payload[project_item_id]=$PROJECT_ITEM_ID"
 
           echo "dispatched=true" >> "$GITHUB_OUTPUT"
 
@@ -798,6 +920,12 @@ jobs:
           The next stage was dispatched automatically after the current stage passed.
           COMMENT_EOF
           )"
+
+      - name: Skip next-stage dispatch without project item context
+        if: steps.resolve.outputs.next_stage != '' && needs.intake.outputs.project_item_id == ''
+        shell: bash
+        run: |
+          echo "::notice::No project_item_id provided; skipping automatic next-stage dispatch"
 
       - name: Record terminal stage
         if: steps.resolve.outputs.next_stage == ''
@@ -835,6 +963,8 @@ jobs:
           TRIGGER: ${{ needs.intake.outputs.trigger }}
           RUN_HISTORY: ${{ steps.run-history.outputs.run_history }}
           NEXT_STAGE: ${{ needs.handoff.outputs.next_stage }}
+          TARGET_STATUS: ${{ needs.handoff.outputs.target_status }}
+          STATUS_UPDATED: ${{ needs.handoff.outputs.status_updated }}
           HANDOFF_DISPATCHED: ${{ needs.handoff.outputs.dispatched }}
           NEXT_RUN_KEY: ${{ needs.handoff.outputs.next_run_key }}
         shell: bash
@@ -884,6 +1014,8 @@ jobs:
             echo "| Duplicate | ${DUPLICATE:-false} |"
             echo "| Eligible | ${ELIGIBLE:-n/a} |"
             echo "| Gate passed | ${GATE_PASSED:-n/a} |"
+            echo "| Project Status target | ${TARGET_STATUS:-n/a} |"
+            echo "| Project Status updated | ${STATUS_UPDATED:-false} |"
             echo "| Next stage | ${NEXT_STAGE:-n/a} |"
             echo "| Next stage queued | ${HANDOFF_DISPATCHED:-false} |"
             echo ""

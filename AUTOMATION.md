@@ -25,6 +25,95 @@ tests/                — automated coverage for gateway and contract logic
   actions/            — composite actions (validate-eligibility, check-gate, query-run-history, scaffolds)
 ```
 
+## Repo-template propagation checklist
+
+Anything in this section should be treated as part of the bootstrap contract for `SlateLabs/repo-template` so new repos can participate in the workflow automation without bespoke setup.
+
+### Required repository settings
+
+- GitHub Actions enabled
+- GitHub Discussions enabled
+- A discussion category available for design scaffolding
+  - current default expected by the scaffold: `Ideas`
+
+### Required labels
+
+- `do-not-automate`
+  - blocks orchestration entry and all scaffold mutations
+- `blocked`
+  - used by the clarification gate
+- `follow-up`
+  - applied to all captured follow-up issues
+- `blocking`
+  - applied to follow-up issues when the marker says `blocking: yes`
+- category labels for follow-up capture:
+  - `technical-debt`
+  - `accessibility`
+  - `usability`
+  - `documentation`
+  - `automation`
+  - `defect`
+
+### Required workflow entrypoints
+
+The repo should expose repo-local workflow entrypoints that call the shared workflows in this repo at a pinned SHA or release tag:
+
+- `orchestration-dispatch.yml`
+- `retry-stage.yml`
+- `scaffold-design-discussion.yml`
+- `scaffold-impl-plan.yml`
+- `scaffold-execution.yml`
+- `capture-follow-ups.yml`
+- `scaffold-closeout.yml`
+
+These should be pinned to an immutable ref from `SlateLabs/github-project-automation`, never a mutable branch.
+
+### Required docs/bootstrap guidance
+
+The template should include bootstrap guidance explaining:
+
+- required labels
+- required discussion support and category expectations
+- branch naming convention used by execution scaffolding:
+  - `<issue-number>-<slug>`
+- PR/body artifact expectations used by the gates
+- how to manually retry a failed stage
+- that org project routing is driven by the canonical `Status` field
+
+### Required artifact conventions
+
+New repos need to preserve the artifact conventions expected by the shared actions:
+
+- issue bodies should support `## Summary`
+- execution PRs should support:
+  - `## Summary`
+  - `## Test plan`
+  - `## Review Checklist`
+- follow-up capture uses structured issue-comment markers:
+  - `<!-- FOLLOW-UP: title | category | reason | impact | blocking -->`
+- automation-owned artifacts use `gpa:owned-artifact:*` markers and must not be stripped from templates/comments/PR bodies
+
+### Required token/permission model
+
+Repo-local workflows rely on `GITHUB_TOKEN` permissions matching the shared workflow requirements:
+
+- `contents: write`
+- `issues: write`
+- `pull-requests: write`
+- `discussions: write` for design scaffolding
+- `actions: write` for retry dispatch
+
+### Validation we should add to `repo-template`
+
+Issue [#19](https://github.com/SlateLabs/github-project-automation/issues/19) should implement validation or documented checks for:
+
+- required labels exist
+- Discussions are enabled
+- the design discussion category exists
+- shared workflow refs are pinned
+- bootstrap docs are present
+- PR/issue templates match the expected gate headings
+
 ## How participating repos integrate
 
 1. Create a repo from `repo-template` (or manually add the orchestration workflow)
@@ -58,7 +147,8 @@ The orchestration workflow accepts `repository_dispatch` events with `event_type
     "requested_stage": "kickoff",
     "run_key": "SlateLabs/github-project-automation/42/kickoff/1711234567890",
     "actor": "jflamb",
-    "timestamp": "1711234567890"
+    "timestamp": "1711234567890",
+    "project_item_id": "PVTI_lADOABUjKM4BTjIKzgABC"
   }
 }
 ```
@@ -72,6 +162,7 @@ The orchestration workflow accepts `repository_dispatch` events with `event_type
 | `run_key` | string | Canonical format `<owner>/<repo>/<number>/<stage>/<timestamp>` — must be payload-consistent (see below) |
 | `actor` | string | Non-empty |
 | `timestamp` | string | Non-empty |
+| `project_item_id` | string | Optional but recommended; enables closed-loop GitHub Project `Status` sync and auto-handoff preservation |
 
 **Run key consistency (enforced at workflow start):** Beyond regex format, the `run_key` must be *payload-consistent* — its parsed components must agree with the other payload fields and the receiving repository:
 
@@ -86,6 +177,8 @@ On validation failure, the workflow posts a diagnostic comment on the issue (if 
 
 **Run key preservation:** When triggered via `repository_dispatch`, the workflow uses the gateway-provided `run_key` directly instead of generating a new one. This preserves end-to-end correlation: gateway structured log → dispatch → orchestration issue comments all share the same run key.
 
+**Closed-loop project sync:** When `project_item_id` is present, the workflow uses it to update the GitHub Project `Status` after a successful stage and preserves the same project item identity when it auto-dispatches the next stage. If `project_item_id` is absent, the stage still runs for manual/retry compatibility, but project-state mutation and automatic next-stage dispatch are skipped.
+
 **Manual simulation:**
 
 ```bash
@@ -95,7 +188,8 @@ gh api repos/SlateLabs/github-project-automation/dispatches \
   -f 'client_payload[requested_stage]=kickoff' \
   -f 'client_payload[run_key]=SlateLabs/github-project-automation/42/kickoff/1711234567890' \
   -f 'client_payload[actor]=jflamb' \
-  -f 'client_payload[timestamp]=1711234567890'
+  -f 'client_payload[timestamp]=1711234567890' \
+  -f 'client_payload[project_item_id]=PVTI_lADOABUjKM4BTjIKzgABC'
 ```
 
 Eligibility validation is shared but not yet at full parity: the manual path validates issue state, actor trust, labels, and body content; the webhook gateway path additionally validates live project-field state (`Status` transition and `Repository` mapping).
@@ -110,7 +204,7 @@ The gateway is the org-level listener for `projects_v2_item` events. It stays in
 - Enforce kickoff eligibility (`Issue` item type, linked source issue, configured participating repo, `Status == Ready`, no `do-not-automate` label)
 - Enforce trusted-actor outcomes using `config/trust-policy.yml`
 - Deduplicate by delivery id, active run prefix, and 60-second recent-completion window
-- Dispatch `repository_dispatch` with event type `orchestration-start`
+- Dispatch `repository_dispatch` with event type `orchestration-start`, preserving the source `project_item_id`
 
 ### HTTP surface
 
@@ -380,6 +474,12 @@ This is intentionally "fail forward" for scaffold-driven stages:
 - `design`, `plan`, and `execution` typically auto-queue, scaffold their required artifact, and then fail their gate until a human or agent fills in the discussion/comment/PR.
 - `review`, `merge`, and `closeout` remain machine-checked stages; they only auto-advance when the required repo artifacts already satisfy the gate.
 - Each auto-handoff posts a `gpa:run-status:<stage>:started:<run_key>` marker comment on the issue so the run history remains queryable across stages.
+- When `project_item_id` is present, the orchestrator also updates the GitHub Project `Status` during handoff:
+  - `kickoff`, `clarification`, `design`, `plan` -> `In Progress`
+  - `execution`, `review` -> `In Review`
+  - `merge`, `follow-up-capture` -> `In Progress`
+  - `closeout` -> `Done`
+- Manual/retry runs without `project_item_id` still execute, but they do not mutate project state and do not auto-queue the next stage.
 
 The standalone `workflow_dispatch` wrappers remain as operator escape hatches, but they are no longer the intended happy-path glue between successful stages.
 

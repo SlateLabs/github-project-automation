@@ -75,6 +75,12 @@ else
   check "downstream steps reference normalize.outputs.actor" "fail"
 fi
 
+if grep -q 'steps.normalize.outputs.project_item_id' "$WORKFLOW"; then
+  check "downstream steps reference normalize.outputs.project_item_id" "pass"
+else
+  check "downstream steps reference normalize.outputs.project_item_id" "fail"
+fi
+
 echo ""
 echo "3. No stale inputs.* references outside normalize step"
 
@@ -142,6 +148,12 @@ else
   check "run_key format validation present" "fail"
 fi
 
+if grep -q 'project_item_id=' "$WORKFLOW"; then
+  check "project_item_id normalization present" "pass"
+else
+  check "project_item_id normalization present" "fail"
+fi
+
 echo ""
 echo "7. Automatic handoff configuration"
 
@@ -165,8 +177,29 @@ else
   check "stage handoff map includes key transitions" "fail"
 fi
 
+if grep -Fq 'client_payload[project_item_id]' "$WORKFLOW"; then
+  check "handoff preserves project_item_id in repository_dispatch" "pass"
+else
+  check "handoff preserves project_item_id in repository_dispatch" "fail"
+fi
+
 echo ""
-echo "8. Job summary includes trigger source"
+echo "8. Project status synchronization"
+
+if grep -q 'updateProjectV2ItemFieldValue' "$WORKFLOW"; then
+  check "project status mutation present" "pass"
+else
+  check "project status mutation present" "fail"
+fi
+
+if grep -q 'target_status=' "$WORKFLOW" && grep -q 'Project Status target' "$WORKFLOW"; then
+  check "project status target mapping and summary present" "pass"
+else
+  check "project status target mapping and summary present" "fail"
+fi
+
+echo ""
+echo "9. Job summary includes trigger source"
 
 if grep -q 'TRIGGER.*steps.normalize.outputs.trigger' "$WORKFLOW" && grep -q 'Trigger' "$WORKFLOW"; then
   check "job summary includes trigger field" "pass"

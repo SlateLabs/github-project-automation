@@ -201,6 +201,7 @@ class GatewayService:
             "run_key": run_key,
             "actor": actor,
             "timestamp": timestamp,
+            "project_item_id": context.project_item_id,
         }
 
         try:
