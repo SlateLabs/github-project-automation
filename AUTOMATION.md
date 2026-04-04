@@ -144,6 +144,7 @@ The orchestration workflow accepts `repository_dispatch` events with `event_type
   "event_type": "orchestration-start",
   "client_payload": {
     "issue_number": 42,
+    "issue_title": "Example issue title",
     "requested_stage": "kickoff",
     "run_key": "SlateLabs/github-project-automation/42/kickoff/1711234567890",
     "actor": "jflamb",
@@ -158,6 +159,7 @@ The orchestration workflow accepts `repository_dispatch` events with `event_type
 | Field | Type | Validation |
 |-------|------|------------|
 | `issue_number` | integer | Positive integer (`>= 1`) |
+| `issue_title` | string | Optional; used for workflow run naming when present |
 | `requested_stage` | string | One of: `kickoff`, `clarification`, `design`, `plan`, `execution`, `follow-up-capture`, `review`, `merge`, `closeout` |
 | `run_key` | string | Canonical format `<owner>/<repo>/<number>/<stage>/<timestamp>` — must be payload-consistent (see below) |
 | `actor` | string | Non-empty |
@@ -192,6 +194,7 @@ These should live at **organization Actions scope** if you want `repo-template`-
 gh api repos/SlateLabs/github-project-automation/dispatches \
   -f event_type=orchestration-start \
   -f 'client_payload[issue_number]=42' \
+  -f 'client_payload[issue_title]=Example issue title' \
   -f 'client_payload[requested_stage]=kickoff' \
   -f 'client_payload[run_key]=SlateLabs/github-project-automation/42/kickoff/1711234567890' \
   -f 'client_payload[actor]=jflamb' \

@@ -44,6 +44,7 @@ class GitHubAppCredentials:
 class ProjectItemContext:
     project_item_id: str
     item_type: str
+    issue_title: str | None
     issue_number: int | None
     issue_repo: str | None
     issue_state: str | None
@@ -288,6 +289,7 @@ class GitHubApiClient:
         return ProjectItemContext(
             project_item_id=node["id"],
             item_type=item_type,
+            issue_title=content.get("title"),
             issue_number=content.get("number"),
             issue_repo=(content.get("repository") or {}).get("nameWithOwner"),
             issue_state=content.get("state"),

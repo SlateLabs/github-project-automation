@@ -16,6 +16,7 @@ class FakeGitHubClient:
         self.context = ProjectItemContext(
             project_item_id="PVTI_123",
             item_type="Issue",
+            issue_title="[TEST] Gateway dispatch",
             issue_number=1,
             issue_repo="SlateLabs/github-project-automation",
             issue_state="OPEN",
@@ -230,6 +231,7 @@ class GatewayServiceTests(unittest.TestCase):
             client_payload,
             {
                 "issue_number": 1,
+                "issue_title": "[TEST] Gateway dispatch",
                 "requested_stage": "kickoff",
                 "run_key": body["run_key"],
                 "actor": "trusted-user",

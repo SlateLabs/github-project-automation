@@ -197,6 +197,7 @@ class GatewayService:
         timestamp = str(now_ms)
         client_payload = {
             "issue_number": issue_number,
+            "issue_title": context.issue_title,
             "requested_stage": REQUESTED_STAGE,
             "run_key": run_key,
             "actor": actor,

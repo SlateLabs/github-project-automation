@@ -1,8 +1,11 @@
 name: Orchestration Dispatch
 run-name: >-
   ${{ github.event_name == 'repository_dispatch'
-      && format('{0} · #{1} · orchestration', github.event.client_payload.requested_stage, github.event.client_payload.issue_number)
-      || format('{0} · #{1} · orchestration', github.event.inputs.requested_stage, github.event.inputs.issue_number) }}
+      && format('{0} (#{1}) - {2}',
+                github.event.client_payload.issue_title || 'Issue',
+                github.event.client_payload.issue_number,
+                github.event.client_payload.requested_stage)
+      || format('#{0} - {1}', github.event.inputs.issue_number, github.event.inputs.requested_stage) }}
 
 on:
   repository_dispatch:
@@ -926,12 +929,14 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RUN_ID: ${{ github.run_id }}
           PROJECT_ITEM_ID: ${{ needs.intake.outputs.project_item_id }}
+          ISSUE_TITLE: ${{ needs.intake.outputs.issue_title }}
         run: |
           set -euo pipefail
 
           gh api "repos/${GITHUB_REPOSITORY}/dispatches" \
             -f event_type=orchestration-start \
             -F "client_payload[issue_number]=$ISSUE_NUMBER" \
+            -f "client_payload[issue_title]=$ISSUE_TITLE" \
             -f "client_payload[requested_stage]=$NEXT_STAGE" \
             -f "client_payload[run_key]=$NEXT_RUN_KEY" \
             -f "client_payload[actor]=$ACTOR" \
