@@ -621,9 +621,11 @@ jobs:
           Review goals:
           - Check whether the design is coherent, specific, and aligned to the source issue.
           - Prefer actionable critique over generic praise.
-          - If the design is good enough for planning, set `ready_for_plan` to true.
-          - The review comment markdown should read like a concise review from a second agent, not an approval checkbox dump.
+          - If the design is good enough for planning, say so clearly.
+          - The review comment should read like a concise review from a second agent, not an approval checkbox dump.
           - Do not ask the operator to do work unless absolutely necessary.
+          - Reply with markdown only. Do not wrap the response in JSON, YAML, or code fences.
+          - Start the comment with `gpa:design-review:auto`.
 
           Source issue title:
           {os.environ["ISSUE_TITLE"]}
@@ -658,8 +660,7 @@ jobs:
           prompt: ${{ steps.design-review-prompt.outputs.prompt }}
           show_full_output: ${{ vars.ORCHESTRATION_CLAUDE_SHOW_FULL_OUTPUT == 'true' }}
           claude_args: >-
-            --max-turns 5
-            --json-schema .github/schemas/design-review.json
+            --max-turns 1
           allowed_bots: "*"
 
       - name: Publish Claude design review comment (pre-gate)
@@ -667,7 +668,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.design-app-token.outputs.token }}
           DISCUSSION_NUMBER: ${{ steps.scaffold-discussion.outputs.discussion_number }}
-          REVIEW_OUTPUT: ${{ steps.claude-design-review.outputs.structured_output }}
+          REVIEW_EXECUTION_FILE: ${{ steps.claude-design-review.outputs.execution_file }}
         shell: bash
         run: |
           set -euo pipefail
@@ -699,9 +700,19 @@ jobs:
             exit 0
           fi
 
-          review_body=$(printf '%s' "$REVIEW_OUTPUT" | jq -r '.review_comment_markdown')
-          if [ -z "$review_body" ] || [ "$review_body" = "null" ]; then
-            echo "::error::Claude design review did not produce review_comment_markdown"
+          if [ -z "${REVIEW_EXECUTION_FILE:-}" ] || [ ! -f "$REVIEW_EXECUTION_FILE" ]; then
+            echo "::error::Claude design review did not produce an execution file"
+            exit 1
+          fi
+
+          review_body=$(
+            jq -rs '
+              map(select(.type == "result" and .subtype == "success"))[-1].result // ""
+            ' "$REVIEW_EXECUTION_FILE" | jq -r .
+          )
+          review_body=$(printf '%s' "$review_body" | perl -0pe 's/\A```[a-zA-Z0-9_-]*\n//; s/\n```\s*\z/\n/s')
+          if [ -z "$review_body" ]; then
+            echo "::error::Claude design review did not produce a comment body"
             exit 1
           fi
 
