@@ -22,8 +22,7 @@ class FakeGitHubClient:
             issue_labels=(),
             repository_field_repo="SlateLabs/github-project-automation",
             repository_field_archived=False,
-            status="Ready",
-            workflow_stage="Backlog",
+            workflow_status="Ready",
         )
         self.actor_context = {
             "trusted-user": {
@@ -120,23 +119,6 @@ class GatewayServiceTests(unittest.TestCase):
             },
             "changes": {
                 "field_value": {
-                    "field_name": "Status",
-                    "from": {"name": "Backlog"},
-                    "to": {"name": transition_to},
-                }
-            },
-            "sender": {"login": actor, "type": "User"},
-        }
-
-    def _workflow_status_payload(self, *, actor: str = "trusted-user", transition_to: str = "Ready") -> dict[str, object]:
-        return {
-            "action": "edited",
-            "projects_v2_item": {
-                "node_id": "PVTI_123",
-                "field_value": {"name": transition_to},
-            },
-            "changes": {
-                "field_value": {
                     "field_name": "Workflow Status",
                     "from": {"name": "Backlog"},
                     "to": {"name": transition_to},
@@ -176,13 +158,25 @@ class GatewayServiceTests(unittest.TestCase):
         self.assertEqual(body["outcome"], "skipped")
         self.assertEqual(self.github.dispatches, [])
 
-    def test_accepts_workflow_status_transition(self) -> None:
-        self.github.context = ProjectItemContext(
-            **{**self.github.context.__dict__, "status": "Ready", "workflow_stage": None}
-        )
-        status, body = self._request(self._workflow_status_payload())
-        self.assertEqual(status, 200)
-        self.assertEqual(body["outcome"], "dispatched")
+    def test_skips_legacy_status_field_transition(self) -> None:
+        payload = {
+            "action": "edited",
+            "projects_v2_item": {
+                "node_id": "PVTI_123",
+                "field_value": {"name": "Ready"},
+            },
+            "changes": {
+                "field_value": {
+                    "field_name": "Status",
+                    "from": {"name": "Backlog"},
+                    "to": {"name": "Ready"},
+                }
+            },
+            "sender": {"login": "trusted-user", "type": "User"},
+        }
+        status, body = self._request(payload)
+        self.assertEqual(status, 202)
+        self.assertEqual(body["outcome"], "skipped")
 
     def test_skips_unsupported_event_type(self) -> None:
         payload = self._payload()

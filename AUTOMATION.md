@@ -40,7 +40,7 @@ tests/                — automated coverage for gateway and contract logic
 | Path | Trigger | Description |
 |------|---------|-------------|
 | Manual kickoff | `workflow_dispatch` in participating repo | Operator provides `issue_number` and `requested_stage`; workflow validates eligibility and gates |
-| Webhook gateway | `projects_v2_item` org event → Cloud Run → `repository_dispatch` | Automated trigger when project item status changes (issue #2) |
+| Webhook gateway | `projects_v2_item` org event → Cloud Run → `repository_dispatch` | Automated trigger when project item `Workflow Status` changes (issue #2) |
 
 Both paths converge on the same orchestration workflow (`orchestration-dispatch.yml`). An input normalization step at the top of the workflow resolves inputs from either `workflow_dispatch` inputs or `repository_dispatch` client_payload, so all downstream steps (dedup, eligibility, gate checks, scaffolds, comments) execute identically regardless of trigger source.
 
@@ -98,16 +98,16 @@ gh api repos/SlateLabs/github-project-automation/dispatches \
   -f 'client_payload[timestamp]=1711234567890'
 ```
 
-Eligibility validation is shared but not yet at full parity: the manual path validates issue state, actor trust, labels, and body content; the webhook gateway path will additionally validate live project-field state (Status transition, Repository mapping, project linkage) once implemented (see [issue #9](https://github.com/SlateLabs/github-project-automation/issues/9)).
+Eligibility validation is shared but not yet at full parity: the manual path validates issue state, actor trust, labels, and body content; the webhook gateway path additionally validates live project-field state (`Workflow Status` transition and `Repository` mapping).
 
 ## Webhook gateway contract
 
 The gateway is the org-level listener for `projects_v2_item` events. It stays intentionally thin:
 
 - Validate `X-GitHub-Delivery`, `X-GitHub-Event`, and `X-Hub-Signature-256`
-- Accept only `projects_v2_item` deliveries that prove a `Status` or `Workflow Status` transition of `Backlog -> Ready`
-- Resolve the project item via GraphQL to read the linked issue, `Repository`, `Status`, and `Workflow Status`/`Workflow Stage` fields
-- Enforce kickoff eligibility (`Issue` item type, linked source issue, configured participating repo, `Ready` status, `Backlog` workflow stage, no `do-not-automate` label)
+- Accept only `projects_v2_item` deliveries that prove a `Workflow Status` transition of `Backlog -> Ready`
+- Resolve the project item via GraphQL to read the linked issue, `Repository`, and `Workflow Status` field
+- Enforce kickoff eligibility (`Issue` item type, linked source issue, configured participating repo, `Workflow Status == Ready`, no `do-not-automate` label)
 - Enforce trusted-actor outcomes using `config/trust-policy.yml`
 - Deduplicate by delivery id, active run prefix, and 60-second recent-completion window
 - Dispatch `repository_dispatch` with event type `orchestration-start`
@@ -290,11 +290,11 @@ The listener is deliberately strict because `projects_v2_item` webhooks are stil
 
 - `X-GitHub-Event: projects_v2_item`
 - `projects_v2_item.node_id` or `projects_v2_item.id`
-- `changes.field_value.field_name == "Status"` or `"Workflow Status"`
+- `changes.field_value.field_name == "Workflow Status"`
 - `changes.field_value.from == "Backlog"`
 - `changes.field_value.to == "Ready"`
 
-If the listener cannot prove that the event is a kickoff transition, it fails closed with a `202 skipped` response rather than guessing from partial payload state. In the current SlateLabs org project, the automation lifecycle is represented by `Workflow Status`, so that field is accepted alongside the default `Status` field.
+If the listener cannot prove that the event is a kickoff transition on the canonical `Workflow Status` field, it fails closed with a `202 skipped` response rather than guessing from partial payload state. The default GitHub `Status` field is intentionally ignored by the gateway so there is only one source of truth for automation lifecycle state.
 
 ### Trusted-actor outcomes
 

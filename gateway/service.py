@@ -118,7 +118,10 @@ class GatewayService:
                     "transition": transition,
                 }
             )
-            return GatewayResult(202, {"outcome": "skipped", "reason": "Only Status: Backlog -> Ready triggers kickoff automation"})
+            return GatewayResult(
+                202,
+                {"outcome": "skipped", "reason": "Only Workflow Status: Backlog -> Ready triggers kickoff automation"},
+            )
 
         item_node_id = self._extract_project_item_node_id(payload)
         if not item_node_id:
@@ -330,14 +333,13 @@ class GatewayService:
             or (field_value.get("field") or {}).get("name")
             or (field_value.get("project_field") or {}).get("name")
         )
-        if field_name not in {"Status", "Workflow Status", "Workflow Stage"}:
+        if field_name != "Workflow Status":
             return (None, None)
 
         before = self._extract_single_select_name(field_value.get("from"))
         after = (
             self._extract_single_select_name(field_value.get("to"))
             or self._extract_single_select_name((payload.get("projects_v2_item") or {}).get("field_value"))
-            or self._extract_single_select_name((payload.get("projects_v2_item") or {}).get("status"))
         )
         return (before, after)
 
@@ -372,12 +374,10 @@ class GatewayService:
             return f"Repository '{context.repository_field_repo}' is not configured in config/repos.yml"
         if REQUESTED_STAGE not in configured_repo.enabled_stages:
             return f"Repository '{context.repository_field_repo}' does not enable stage '{REQUESTED_STAGE}'"
-        if context.status != "Ready":
-            return f"Project Status must be 'Ready' for kickoff automation, found '{context.status or 'unset'}'"
-        if context.workflow_stage not in (None, "", "Backlog"):
+        if context.workflow_status != "Ready":
             return (
-                "Workflow stage must be unset or 'Backlog' before kickoff automation, "
-                f"found '{context.workflow_stage}'"
+                "Workflow Status must be 'Ready' for kickoff automation, "
+                f"found '{context.workflow_status or 'unset'}'"
             )
         return None
 

@@ -50,8 +50,7 @@ class ProjectItemContext:
     issue_labels: tuple[str, ...]
     repository_field_repo: str | None
     repository_field_archived: bool
-    status: str | None
-    workflow_stage: str | None
+    workflow_status: str | None
 
 
 @dataclass(frozen=True)
@@ -274,8 +273,7 @@ class GitHubApiClient:
 
         repository_field_repo = None
         repository_field_archived = False
-        status = None
-        workflow_stage = None
+        workflow_status = None
 
         for field_value in node.get("fieldValues", {}).get("nodes", []):
             typename = field_value.get("__typename")
@@ -284,13 +282,8 @@ class GitHubApiClient:
                 repo = field_value.get("repository") or {}
                 repository_field_repo = repo.get("nameWithOwner")
                 repository_field_archived = bool(repo.get("isArchived"))
-            elif typename == "ProjectV2ItemFieldSingleSelectValue":
-                if field_name == "Status":
-                    status = field_value.get("name")
-                elif field_name == "Workflow Status":
-                    status = field_value.get("name")
-                elif field_name == "Workflow Stage":
-                    workflow_stage = field_value.get("name")
+            elif typename == "ProjectV2ItemFieldSingleSelectValue" and field_name == "Workflow Status":
+                workflow_status = field_value.get("name")
 
         return ProjectItemContext(
             project_item_id=node["id"],
@@ -301,8 +294,7 @@ class GitHubApiClient:
             issue_labels=issue_labels,
             repository_field_repo=repository_field_repo,
             repository_field_archived=repository_field_archived,
-            status=status,
-            workflow_stage=workflow_stage,
+            workflow_status=workflow_status,
         )
 
     def get_actor_context(self, organization: str, repo_full_name: str, actor_login: str) -> ActorContext:
