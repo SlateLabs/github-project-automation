@@ -611,34 +611,42 @@ jobs:
         run: |
           set -euo pipefail
 
-          discussion_body="$(cat "$RUNNER_TEMP/design-discussion.md")"
-          {
-            echo 'prompt<<EOF'
-            cat <<EOF
-            Review the following design discussion for issue #$ISSUE_NUMBER and produce structured JSON only.
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
 
-            Review goals:
-            - Check whether the design is coherent, specific, and aligned to the source issue.
-            - Prefer actionable critique over generic praise.
-            - If the design is good enough for planning, set \`ready_for_plan\` to true.
-            - The review comment markdown should read like a concise review from a second agent, not an approval checkbox dump.
-            - Do not ask the operator to do work unless absolutely necessary.
+          discussion_body = Path(os.environ["RUNNER_TEMP"], "design-discussion.md").read_text()
+          prompt = f"""Review the following design discussion for issue #{os.environ["ISSUE_NUMBER"]} and produce structured JSON only.
 
-            Source issue title:
-            $ISSUE_TITLE
+          Review goals:
+          - Check whether the design is coherent, specific, and aligned to the source issue.
+          - Prefer actionable critique over generic praise.
+          - If the design is good enough for planning, set `ready_for_plan` to true.
+          - The review comment markdown should read like a concise review from a second agent, not an approval checkbox dump.
+          - Do not ask the operator to do work unless absolutely necessary.
 
-            Source issue body:
-            ---
-            $ISSUE_BODY
-            ---
+          Source issue title:
+          {os.environ["ISSUE_TITLE"]}
 
-            Proposed design discussion:
-            ---
-            $discussion_body
-            ---
-            EOF
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
+          Source issue body:
+          ---
+          {os.environ["ISSUE_BODY"]}
+          ---
+
+          Proposed design discussion:
+          ---
+          {discussion_body}
+          ---
+          """
+
+          github_output = Path(os.environ["GITHUB_OUTPUT"])
+          with github_output.open("a") as fh:
+              fh.write("prompt<<EOF\n")
+              fh.write(prompt)
+              if not prompt.endswith("\n"):
+                  fh.write("\n")
+              fh.write("EOF\n")
+          PY
 
       - name: Post automated design review comment (pre-gate)
         if: needs.intake.outputs.requested_stage == 'design' && steps.design-app-token.outcome == 'success'
