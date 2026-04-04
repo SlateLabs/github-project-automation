@@ -931,7 +931,7 @@ jobs:
 
           echo "dispatched=true" >> "$GITHUB_OUTPUT"
 
-          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+          gh issue comment "$ISSUE_NUMBER" -R "$GITHUB_REPOSITORY" --body "$(cat <<COMMENT_EOF
           ### Orchestration run — next stage queued
           <!-- gpa:run-status:$NEXT_STAGE:started:$NEXT_RUN_KEY -->
 
