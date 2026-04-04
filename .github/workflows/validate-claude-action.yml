@@ -1,0 +1,50 @@
+name: Validate Claude Action
+run-name: Validate Claude Action
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify Anthropic key is present
+        shell: bash
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$ANTHROPIC_API_KEY" ] || { echo "::error::ANTHROPIC_API_KEY is not configured"; exit 1; }
+
+      - name: Invoke Claude Code with trivial prompt
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            Reply with exactly the word Hi.
+          show_full_output: ${{ vars.ORCHESTRATION_CLAUDE_SHOW_FULL_OUTPUT == 'true' }}
+          claude_args: >-
+            --max-turns 1
+
+      - name: Summarize outputs
+        shell: bash
+        env:
+          STRUCTURED_OUTPUT: ${{ steps.claude.outputs.structured_output }}
+          SESSION_ID: ${{ steps.claude.outputs.session_id }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Claude Action Smoke Test"
+            echo ""
+            echo "- Session ID: \`${SESSION_ID:-<none>}\`"
+            echo "- Structured output present: \`${STRUCTURED_OUTPUT:+yes}${STRUCTURED_OUTPUT:-no}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
