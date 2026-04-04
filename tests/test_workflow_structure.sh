@@ -200,7 +200,22 @@ else
 fi
 
 echo ""
-echo "9. Job summary includes trigger source"
+echo "9. Design automation steps"
+
+if grep -q 'Draft design proposal (pre-gate)' "$WORKFLOW" && grep -q 'generate_design_discussion.py' "$WORKFLOW"; then
+  check "design proposal hydration step present" "pass"
+else
+  check "design proposal hydration step present" "fail"
+fi
+
+if grep -q 'Post automated design review comment (pre-gate)' "$WORKFLOW" && grep -q 'gpa:design-review:auto' "$WORKFLOW"; then
+  check "automated design review step present" "pass"
+else
+  check "automated design review step present" "fail"
+fi
+
+echo ""
+echo "10. Job summary includes trigger source"
 
 if grep -q 'TRIGGER.*steps.normalize.outputs.trigger' "$WORKFLOW" && grep -q 'Trigger' "$WORKFLOW"; then
   check "job summary includes trigger field" "pass"

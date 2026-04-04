@@ -503,7 +503,7 @@ The current handoff sequence is:
 This is intentionally "fail forward" for scaffold-driven stages:
 
 - `clarification` auto-seeds `## Scope` and defers unresolved issue-level open questions into design by marking them `DEFERRED-TO-DESIGN`.
-- `design`, `plan`, and `execution` typically auto-queue, scaffold their required artifact, and then fail their gate until a human or agent fills in the discussion/comment/PR.
+- `design`, `plan`, and `execution` typically auto-queue and scaffold their required artifact. The design stage now also drafts a first-pass proposal from the issue body and posts an automated review comment before the gate runs; later stages may still fail until a human or agent fills in the remaining artifact detail.
 - `review`, `merge`, and `closeout` remain machine-checked stages; they only auto-advance when the required repo artifacts already satisfy the gate.
 - Each auto-handoff posts a `gpa:run-status:<stage>:started:<run_key>` marker comment on the issue so the run history remains queryable across stages.
 - When `project_item_id` is present, the orchestrator also updates the GitHub Project `Status` during handoff:
@@ -536,7 +536,7 @@ gh workflow run scaffold-design-discussion.yml -f issue_number=<N>
 ```
 gh workflow run orchestration-dispatch.yml -f issue_number=<N> -f requested_stage=design
 ```
-When triggered via orchestration, the scaffold runs **before** the design gate check. This means `requested_stage: design` on an issue with no discussion will create the discussion first, then the gate validates its quality (headings filled in, open questions resolved, review comment present). The first run typically scaffolds the discussion and then fails the gate — the operator fills in the discussion and re-triggers to pass.
+When triggered via orchestration, the scaffold runs **before** the design gate check. This means `requested_stage: design` on an issue with no discussion will create the discussion first, hydrate it from the issue body, and post an automated design-review comment before the gate validates its quality (headings filled in, open questions resolved, review comment present). The run should only fail when the issue itself does not provide enough material for a credible first-pass design.
 
 **Discussion template:** `templates/design-discussion.md` contains all headings required by the design gate (Summary, Problem, Goals, Non-goals, Proposed Approach, Open Questions) plus exit criteria.
 
