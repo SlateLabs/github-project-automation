@@ -59,7 +59,7 @@ jobs:
       requested_stage: ${{ steps.normalize.outputs.requested_stage }}
       actor: ${{ steps.normalize.outputs.actor }}
       trigger: ${{ steps.normalize.outputs.trigger }}
-      project_item_id: ${{ steps.normalize.outputs.project_item_id }}
+      project_item_id: ${{ steps.project-context.outputs.project_item_id }}
       run_key: ${{ steps.run-key.outputs.run_key }}
       timestamp: ${{ steps.run-key.outputs.timestamp }}
       duplicate: ${{ steps.dedup.outputs.duplicate }}
@@ -219,6 +219,79 @@ jobs:
           echo "run_key=$run_key" >> "$GITHUB_OUTPUT"
           echo "timestamp=$timestamp" >> "$GITHUB_OUTPUT"
           echo "::notice::Run key: $run_key (source: $TRIGGER)"
+
+      - name: Create orchestration app token (project item recovery)
+        if: steps.normalize.outputs.project_item_id == '' && vars.ORCHESTRATION_APP_ID != ''
+        id: intake-app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.ORCHESTRATION_APP_ID }}
+          private-key: ${{ secrets.ORCHESTRATION_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-organization-projects: write
+
+      - name: Recover project item context
+        id: project-context
+        shell: bash
+        env:
+          PROVIDED_PROJECT_ITEM_ID: ${{ steps.normalize.outputs.project_item_id }}
+          ISSUE_NUMBER: ${{ steps.normalize.outputs.issue_number }}
+          GH_TOKEN: ${{ steps.intake-app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$PROVIDED_PROJECT_ITEM_ID" ]; then
+            echo "project_item_id=$PROVIDED_PROJECT_ITEM_ID" >> "$GITHUB_OUTPUT"
+            echo "::notice::Using provided project_item_id from event payload"
+            exit 0
+          fi
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "project_item_id=" >> "$GITHUB_OUTPUT"
+            echo "::notice::No GitHub App token available for project item recovery"
+            exit 0
+          fi
+
+          owner="${GITHUB_REPOSITORY_OWNER}"
+          repo="${GITHUB_REPOSITORY#*/}"
+          query=$(cat <<'GRAPHQL'
+          query($owner: String!, $repo: String!, $number: Int!) {
+            repository(owner: $owner, name: $repo) {
+              issue(number: $number) {
+                projectItems(first: 20) {
+                  nodes {
+                    id
+                    project {
+                      ... on ProjectV2 {
+                        id
+                        title
+                        closed
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+          GRAPHQL
+          )
+
+          payload=$(gh api graphql -f query="$query" -f owner="$owner" -f repo="$repo" -F number="$ISSUE_NUMBER")
+          recovered_id=$(echo "$payload" | jq -r '
+            .data.repository.issue.projectItems.nodes
+            | map(select(.project.closed == false))
+            | (map(select(.project.title == "Workflow Orchestration")) + .)
+            | map(.id)
+            | .[0] // ""
+          ')
+
+          echo "project_item_id=$recovered_id" >> "$GITHUB_OUTPUT"
+          if [ -n "$recovered_id" ]; then
+            echo "::notice::Recovered project_item_id from project membership: $recovered_id"
+          else
+            echo "::notice::Issue is not linked to an open project item; closed-loop sync remains disabled"
+          fi
 
       - name: Check for recent duplicate run
         id: dedup
