@@ -22,7 +22,7 @@ class FakeGitHubClient:
             issue_labels=(),
             repository_field_repo="SlateLabs/github-project-automation",
             repository_field_archived=False,
-            workflow_status="Ready",
+            status="Ready",
         )
         self.actor_context = {
             "trusted-user": {
@@ -119,7 +119,7 @@ class GatewayServiceTests(unittest.TestCase):
             },
             "changes": {
                 "field_value": {
-                    "field_name": "Workflow Status",
+                    "field_name": "Status",
                     "from": {"name": "Backlog"},
                     "to": {"name": transition_to},
                 }
@@ -158,7 +158,7 @@ class GatewayServiceTests(unittest.TestCase):
         self.assertEqual(body["outcome"], "skipped")
         self.assertEqual(self.github.dispatches, [])
 
-    def test_skips_legacy_status_field_transition(self) -> None:
+    def test_skips_workflow_status_field_transition(self) -> None:
         payload = {
             "action": "edited",
             "projects_v2_item": {
@@ -167,7 +167,7 @@ class GatewayServiceTests(unittest.TestCase):
             },
             "changes": {
                 "field_value": {
-                    "field_name": "Status",
+                    "field_name": "Workflow Status",
                     "from": {"name": "Backlog"},
                     "to": {"name": "Ready"},
                 }
