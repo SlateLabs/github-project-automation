@@ -706,10 +706,10 @@ jobs:
           fi
 
           review_body=$(
-            jq -rs '
+            jq -rs -r '
               map(if type == "array" then .[] else . end)
               | map(select(.type == "result" and .subtype == "success"))[-1].result // ""
-            ' "$REVIEW_EXECUTION_FILE" | jq -r .
+            ' "$REVIEW_EXECUTION_FILE"
           )
           review_body=$(printf '%s' "$review_body" | perl -0pe 's/\A```[a-zA-Z0-9_-]*\n//; s/\n```\s*\z/\n/s')
           if [ -z "$review_body" ]; then
