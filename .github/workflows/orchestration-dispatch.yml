@@ -972,6 +972,20 @@ jobs:
 
           echo "dispatched=true" >> "$GITHUB_OUTPUT"
 
+      - name: Post next-stage queued comment
+        if: steps.dispatch.outputs.dispatched == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+          ACTOR: ${{ needs.intake.outputs.actor }}
+          NEXT_STAGE: ${{ steps.resolve.outputs.next_stage }}
+          NEXT_RUN_KEY: ${{ steps.next-run-key.outputs.run_key }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
           gh issue comment "$ISSUE_NUMBER" -R "$GITHUB_REPOSITORY" --body "$(cat <<COMMENT_EOF
           ### Orchestration run — next stage queued
           <!-- gpa:run-status:$NEXT_STAGE:started:$NEXT_RUN_KEY -->
