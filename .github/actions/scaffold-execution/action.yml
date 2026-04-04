@@ -24,6 +24,10 @@ inputs:
     description: 'Path to the PR body template'
     required: false
     default: 'templates/execution-bootstrap.md'
+  create_pr:
+    description: '"true" to create/recover the PR, "false" to stop after branch preparation'
+    required: false
+    default: 'true'
 
 outputs:
   pr_url:
@@ -51,6 +55,7 @@ runs:
         RUN_KEY: ${{ inputs.run_key }}
         ACTOR: ${{ inputs.actor }}
         TEMPLATE_PATH: ${{ inputs.template_path }}
+        CREATE_PR: ${{ inputs.create_pr }}
       run: |
         set -euo pipefail
 
@@ -283,6 +288,40 @@ runs:
           echo "::notice::Branch created: $branch_name"
         else
           echo "::notice::Branch already exists: $branch_name"
+        fi
+
+        if [ "${CREATE_PR}" != "true" ]; then
+          echo "pr_url=" >> "$GITHUB_OUTPUT"
+          echo "pr_number=" >> "$GITHUB_OUTPUT"
+          echo "branch_name=$branch_name" >> "$GITHUB_OUTPUT"
+          echo "created=false" >> "$GITHUB_OUTPUT"
+
+          table_rows="| Field | Value |
+        |-------|-------|"
+          if [ -n "$RUN_KEY" ]; then
+            table_rows="${table_rows}
+        | **Run key** | \`$RUN_KEY\` |"
+          fi
+          if [ -n "$ACTOR" ]; then
+            table_rows="${table_rows}
+        | **Actor** | @$ACTOR |"
+          fi
+          table_rows="${table_rows}
+        | **Branch** | \`$branch_name\` |
+        | **Result** | :white_check_mark: Execution branch prepared |"
+
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+        ### Execution bootstrap scaffold — branch prepared
+        <!-- $status_marker -->
+        <!-- gpa:run-status:execution:prepared:$RUN_KEY -->
+
+        $table_rows
+
+        A feature branch has been prepared for agent implementation. PR creation will occur after code changes are pushed.
+        COMMENT_EOF
+          )"
+
+          exit 0
         fi
 
         # --- 4. Render template ---

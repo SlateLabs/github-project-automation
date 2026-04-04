@@ -1110,10 +1110,16 @@ jobs:
           gh issue comment "$ISSUE_NUMBER" --body "$review_body" >/dev/null
           echo "::notice::Posted automated plan review comment to issue #$ISSUE_NUMBER"
 
-      # For the execution stage, scaffold branch + draft PR BEFORE the gate check.
-      # The gate validates execution artifacts (branch exists, PR exists, required headings)
-      # against the existing or just-created PR.
-      - name: Scaffold execution bootstrap (pre-gate)
+      - name: Validate execution agent credentials
+        if: needs.intake.outputs.requested_stage == 'execution'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "$OPENAI_API_KEY" ] || { echo "::error::Execution authoring requires secrets.OPENAI_API_KEY"; exit 1; }
+
+      - name: Prepare execution branch (pre-agent)
         if: needs.intake.outputs.requested_stage == 'execution'
         id: scaffold-execution
         uses: ./.github/actions/scaffold-execution
@@ -1122,6 +1128,152 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           run_key: ${{ needs.intake.outputs.run_key }}
           actor: ${{ needs.intake.outputs.actor }}
+          create_pr: 'false'
+
+      - name: Load implementation plan source for execution
+        if: needs.intake.outputs.requested_stage == 'execution'
+        id: execution-plan-source
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          comments_json=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments?per_page=100")
+          repo_full="${GITHUB_REPOSITORY}"
+          owned_artifact_marker="gpa:owned-artifact:impl-plan:${repo_full}#${ISSUE_NUMBER}"
+
+          comment_body=$(echo "$comments_json" | jq -r --arg marker "$owned_artifact_marker" '
+            (map(select(.body | contains($marker))) + map(select(.body | test("(^|\\n)#{1,2}\\s+Implementation Plan"))))
+            | .[0].body // ""
+          ')
+
+          {
+            echo 'plan_body<<EOF'
+            printf '%s\n' "$comment_body"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out execution branch
+        if: needs.intake.outputs.requested_stage == 'execution'
+        env:
+          BRANCH_NAME: ${{ steps.scaffold-execution.outputs.branch_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch origin "$BRANCH_NAME"
+          git checkout -B "$BRANCH_NAME" "origin/$BRANCH_NAME"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Prepare Codex execution prompt
+        if: needs.intake.outputs.requested_stage == 'execution'
+        id: execution-author-prompt
+        env:
+          ISSUE_TITLE: ${{ needs.intake.outputs.issue_title }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+          ISSUE_BODY: ${{ needs.intake.outputs.issue_body }}
+          PLAN_BODY: ${{ steps.execution-plan-source.outputs.plan_body }}
+          BRANCH_NAME: ${{ steps.scaffold-execution.outputs.branch_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          prompt_file="$RUNNER_TEMP/execution-author-prompt.md"
+          cat > "$prompt_file" <<EOF
+          You are Codex acting as the execution agent for issue #$ISSUE_NUMBER on branch $BRANCH_NAME.
+
+          Task:
+          - Implement the smallest coherent slice of the approved implementation plan directly in this repository.
+          - Make real code and/or workflow changes; do not stop at comments or placeholder files.
+          - Keep the change bounded to the issue and implementation plan.
+          - Update any repository files necessary for the change to be reviewable.
+          - Do not merge or open the PR yourself; the workflow will handle that.
+
+          Required outcomes:
+          - Leave the workspace with concrete file changes suitable for a review-ready PR.
+          - Prefer a thin but functional vertical slice over a broad partial rewrite.
+          - If the plan implies a new contract or docs that must change with code, update them now.
+
+          Source issue title:
+          $ISSUE_TITLE
+
+          Source issue body:
+          ---
+          $ISSUE_BODY
+          ---
+
+          Implementation plan:
+          ---
+          $PLAN_BODY
+          ---
+          EOF
+          echo "prompt_file=$prompt_file" >> "$GITHUB_OUTPUT"
+
+      - name: Codex implement execution slice
+        if: needs.intake.outputs.requested_stage == 'execution'
+        id: codex-execution
+        uses: openai/codex-action@v1
+        with:
+          prompt-file: ${{ steps.execution-author-prompt.outputs.prompt_file }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          sandbox: workspace-write
+          model: ${{ vars.ORCHESTRATION_CODEX_MODEL }}
+          effort: ${{ vars.ORCHESTRATION_CODEX_EFFORT }}
+          allow-bots: true
+
+      - name: Commit and push execution changes
+        if: needs.intake.outputs.requested_stage == 'execution'
+        id: execution-commit
+        env:
+          BRANCH_NAME: ${{ steps.scaffold-execution.outputs.branch_name }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "::error::Execution agent did not produce any file changes"
+            exit 1
+          fi
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "::error::Execution agent changes could not be staged"
+            exit 1
+          fi
+
+          git commit -m "feat: implement issue #${ISSUE_NUMBER} execution slice"
+          git push origin "HEAD:${BRANCH_NAME}"
+
+      - name: Create or recover execution PR (post-agent)
+        if: needs.intake.outputs.requested_stage == 'execution'
+        id: execution-pr
+        uses: ./.github/actions/scaffold-execution
+        with:
+          issue_number: ${{ needs.intake.outputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          run_key: ${{ needs.intake.outputs.run_key }}
+          actor: ${{ needs.intake.outputs.actor }}
+          create_pr: 'true'
+
+      - name: Mark PR ready for review
+        if: needs.intake.outputs.requested_stage == 'execution' && steps.execution-pr.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.execution-pr.outputs.pr_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          is_draft=$(gh pr view "$PR_NUMBER" --json isDraft --jq '.isDraft')
+          if [ "$is_draft" = "true" ]; then
+            gh pr ready "$PR_NUMBER"
+            echo "::notice::Marked PR #$PR_NUMBER ready for review"
+          else
+            echo "::notice::PR #$PR_NUMBER already ready for review"
+          fi
 
       # For the closeout stage, enforce pre-scaffold prerequisites BEFORE
       # scaffolding. This matches the standalone scaffold-closeout.yml sequence:
