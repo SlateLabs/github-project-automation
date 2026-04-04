@@ -503,7 +503,7 @@ The current handoff sequence is:
 This is intentionally "fail forward" for scaffold-driven stages:
 
 - `clarification` auto-seeds `## Scope` and defers unresolved issue-level open questions into design by marking them `DEFERRED-TO-DESIGN`.
-- `design`, `plan`, and `execution` typically auto-queue and scaffold their required artifact. The design stage now also drafts a first-pass proposal from the issue body and posts an automated review comment before the gate runs; later stages may still fail until a human or agent fills in the remaining artifact detail.
+- `design`, `plan`, and `execution` are intended to be agent-executed stages. The design stage now uses Codex to author the first-pass proposal and Claude to post a machine-generated review comment before the gate runs; later stages still need the same agent-backed treatment.
 - `review`, `merge`, and `closeout` remain machine-checked stages; they only auto-advance when the required repo artifacts already satisfy the gate.
 - Each auto-handoff posts a `gpa:run-status:<stage>:started:<run_key>` marker comment on the issue so the run history remains queryable across stages.
 - When `project_item_id` is present, the orchestrator also updates the GitHub Project `Status` during handoff:
@@ -536,7 +536,45 @@ gh workflow run scaffold-design-discussion.yml -f issue_number=<N>
 ```
 gh workflow run orchestration-dispatch.yml -f issue_number=<N> -f requested_stage=design
 ```
-When triggered via orchestration, the scaffold runs **before** the design gate check. This means `requested_stage: design` on an issue with no discussion will create the discussion first, hydrate it from the issue body, and post an automated design-review comment before the gate validates its quality (headings filled in, open questions resolved, review comment present). The run should only fail when the issue itself does not provide enough material for a credible first-pass design.
+When triggered via orchestration, the scaffold runs **before** the design gate check. This means `requested_stage: design` on an issue with no discussion will create the discussion first, then:
+
+1. `openai/codex-action@v1` authors a complete replacement discussion body from the issue.
+2. `anthropics/claude-code-action@v1` reviews that proposal and emits a structured review.
+3. The workflow posts Claude's review comment to the discussion using the orchestration GitHub App token.
+
+Only after those agent steps does the gate validate the artifact quality (headings filled in, open questions resolved, review comment present). The run should now fail only when the issue itself does not provide enough material for a credible first-pass design.
+
+### Agent-backed stage model
+
+Current intended mapping:
+
+- `clarification`: GitHub-native normalization and issue-body refinement
+- `design`: Codex authors the discussion, Claude reviews it
+- `plan`: Codex should author the implementation plan, Claude should review it
+- `execution`: Codex should implement code and prepare the PR
+- `review`: Claude should perform the default review pass
+- `feedback-response`: Codex should address operator feedback
+- `merge` / `closeout`: workflow automation plus targeted agent diagnosis when verification fails
+
+### Agent input requirements
+
+Required GitHub Actions secrets / variables for agent-backed stages:
+
+- `OPENAI_API_KEY`
+  - Required for `openai/codex-action`
+- `ANTHROPIC_API_KEY`
+  - Required for `anthropics/claude-code-action`
+- `ORCHESTRATION_APP_ID`
+  - Actions variable used to mint a GitHub App token for cross-artifact publishing
+- `ORCHESTRATION_APP_PRIVATE_KEY`
+  - Actions secret paired with `ORCHESTRATION_APP_ID`
+
+Optional tuning variables:
+
+- `ORCHESTRATION_CODEX_MODEL`
+- `ORCHESTRATION_CODEX_EFFORT`
+
+The design stage fails fast if any required agent secret is unavailable.
 
 **Discussion template:** `templates/design-discussion.md` contains all headings required by the design gate (Summary, Problem, Goals, Non-goals, Proposed Approach, Open Questions) plus exit criteria.
 

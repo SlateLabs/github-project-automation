@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DesignReview",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "ready_for_plan", "review_comment_markdown"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ready_for_plan": {
+      "type": "boolean"
+    },
+    "review_comment_markdown": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

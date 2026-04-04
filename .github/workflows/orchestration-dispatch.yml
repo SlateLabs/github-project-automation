@@ -389,6 +389,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate design agent credentials
+        if: needs.intake.outputs.requested_stage == 'design'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ORCHESTRATION_APP_ID: ${{ vars.ORCHESTRATION_APP_ID }}
+          ORCHESTRATION_APP_PRIVATE_KEY: ${{ secrets.ORCHESTRATION_APP_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "$OPENAI_API_KEY" ] || { echo "::error::Design authoring requires secrets.OPENAI_API_KEY"; exit 1; }
+          [ -n "$ANTHROPIC_API_KEY" ] || { echo "::error::Design review requires secrets.ANTHROPIC_API_KEY"; exit 1; }
+          [ -n "$ORCHESTRATION_APP_ID" ] || { echo "::error::Design review publishing requires vars.ORCHESTRATION_APP_ID"; exit 1; }
+          [ -n "$ORCHESTRATION_APP_PRIVATE_KEY" ] || { echo "::error::Design review publishing requires secrets.ORCHESTRATION_APP_PRIVATE_KEY"; exit 1; }
+
       - name: Create orchestration app token (design review)
         if: needs.intake.outputs.requested_stage == 'design' && vars.ORCHESTRATION_APP_ID != ''
         id: design-app-token
@@ -449,15 +464,12 @@ jobs:
           run_key: ${{ needs.intake.outputs.run_key }}
           actor: ${{ needs.intake.outputs.actor }}
 
-      - name: Draft design proposal (pre-gate)
+      - name: Load design discussion context
         if: needs.intake.outputs.requested_stage == 'design'
+        id: design-context
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
-          ISSUE_TITLE: ${{ needs.intake.outputs.issue_title }}
-          ISSUE_BODY: ${{ needs.intake.outputs.issue_body }}
           DISCUSSION_NUMBER: ${{ steps.scaffold-discussion.outputs.discussion_number }}
-          REPO_NAME: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
@@ -485,15 +497,97 @@ jobs:
             exit 1
           fi
 
-          if ! printf '%s\n' "$current_body" | grep -Eq '(Goal 1|Question 1|Summarize the feature or change being designed)'; then
-            echo "::notice::Design discussion already contains non-placeholder content; skipping auto-draft"
-            exit 0
-          fi
+          {
+            echo "discussion_id=$discussion_id"
+            echo 'discussion_body<<EOF'
+            printf '%s\n' "$current_body"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
-          new_body=$(printf '%s' "$ISSUE_BODY" | python3 scripts/generate_design_discussion.py \
-            --issue-title "$ISSUE_TITLE" \
-            --issue-number "$ISSUE_NUMBER" \
-            --repo "$REPO_NAME")
+      - name: Prepare Codex design prompt
+        if: needs.intake.outputs.requested_stage == 'design'
+        id: design-author-prompt
+        env:
+          ISSUE_TITLE: ${{ needs.intake.outputs.issue_title }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+          ISSUE_BODY: ${{ needs.intake.outputs.issue_body }}
+          DISCUSSION_BODY: ${{ steps.design-context.outputs.discussion_body }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          prompt_file="$RUNNER_TEMP/design-author-prompt.md"
+          cat > "$prompt_file" <<EOF
+You are Codex acting as the design author for a GitHub workflow orchestration system.
+
+Task:
+- Produce a complete replacement body for the GitHub discussion associated with issue #$ISSUE_NUMBER.
+- The output must be valid Markdown only. Do not wrap it in code fences.
+- Keep the owned-artifact marker and source-issue lines.
+- Replace placeholder text with substantive content derived from the issue.
+- Resolve every open question by either answering it directly in the proposal or marking it \`DEFERRED-TO-PLAN\`.
+- Make the design specific enough that the next \`plan\` stage can proceed without operator clarification.
+- Do not invent unrelated scope or infrastructure not implied by the issue.
+
+Required structure:
+- # Design Discussion: <issue title>
+- owned-artifact marker comment
+- source issue lines
+- ## Summary
+- ## Problem
+- ## Goals
+- ## Non-goals
+- ## Proposed Approach
+- ## Open Questions
+- ## Exit Criteria
+
+Guidance:
+- The proposal should preserve the issue's intent and acceptance criteria.
+- Prefer concrete workflow/state-machine changes over abstract architecture prose.
+- For open questions that are better answered later, mark them \`DEFERRED-TO-PLAN\`.
+- The exit criteria checklist should be marked complete if the generated body itself satisfies the design gate.
+
+Source issue title:
+$ISSUE_TITLE
+
+Source issue body:
+---
+$ISSUE_BODY
+---
+
+Existing discussion body:
+---
+$DISCUSSION_BODY
+---
+EOF
+          echo "prompt_file=$prompt_file" >> "$GITHUB_OUTPUT"
+
+      - name: Codex author design proposal
+        if: needs.intake.outputs.requested_stage == 'design'
+        id: codex-design
+        uses: openai/codex-action@v1
+        with:
+          prompt-file: ${{ steps.design-author-prompt.outputs.prompt_file }}
+          output-file: ${{ runner.temp }}/design-discussion.md
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          sandbox: workspace-write
+          model: ${{ vars.ORCHESTRATION_CODEX_MODEL }}
+          effort: ${{ vars.ORCHESTRATION_CODEX_EFFORT }}
+          codex-args: "--quiet"
+          allow-bots: true
+
+      - name: Apply Codex design draft
+        if: needs.intake.outputs.requested_stage == 'design'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISCUSSION_ID: ${{ steps.design-context.outputs.discussion_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          draft_file="$RUNNER_TEMP/design-discussion.md"
+          [ -s "$draft_file" ] || { echo "::error::Codex did not produce a design discussion draft"; exit 1; }
+          new_body="$(cat "$draft_file")"
 
           mutation=$(cat <<'GRAPHQL'
           mutation($discussionId: ID!, $body: String!) {
@@ -506,17 +600,68 @@ jobs:
           GRAPHQL
           )
 
-          gh api graphql -f query="$mutation" -F discussionId="$discussion_id" -f body="$new_body" >/dev/null
-          echo "::notice::Hydrated design discussion #$DISCUSSION_NUMBER from issue content"
+          gh api graphql -f query="$mutation" -F discussionId="$DISCUSSION_ID" -f body="$new_body" >/dev/null
+          echo "::notice::Codex authored design discussion draft"
+
+      - name: Prepare Claude design review prompt
+        if: needs.intake.outputs.requested_stage == 'design'
+        id: design-review-prompt
+        env:
+          ISSUE_TITLE: ${{ needs.intake.outputs.issue_title }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+          ISSUE_BODY: ${{ needs.intake.outputs.issue_body }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          discussion_body="$(cat "$RUNNER_TEMP/design-discussion.md")"
+          {
+            echo 'prompt<<EOF'
+            cat <<EOF
+Review the following design discussion for issue #$ISSUE_NUMBER and produce structured JSON only.
+
+Review goals:
+- Check whether the design is coherent, specific, and aligned to the source issue.
+- Prefer actionable critique over generic praise.
+- If the design is good enough for planning, set \`ready_for_plan\` to true.
+- The review comment markdown should read like a concise review from a second agent, not an approval checkbox dump.
+- Do not ask the operator to do work unless absolutely necessary.
+
+Source issue title:
+$ISSUE_TITLE
+
+Source issue body:
+---
+$ISSUE_BODY
+---
+
+Proposed design discussion:
+---
+$discussion_body
+---
+EOF
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Post automated design review comment (pre-gate)
+        if: needs.intake.outputs.requested_stage == 'design' && steps.design-app-token.outcome == 'success'
+        id: claude-design-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: ${{ steps.design-review-prompt.outputs.prompt }}
+          claude_args: >-
+            --max-turns 5
+            --json-schema .github/schemas/design-review.json
+          allowed_bots: "*"
+
+      - name: Publish Claude design review comment (pre-gate)
         if: needs.intake.outputs.requested_stage == 'design' && steps.design-app-token.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.design-app-token.outputs.token }}
           DISCUSSION_NUMBER: ${{ steps.scaffold-discussion.outputs.discussion_number }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
-          RUN_KEY: ${{ needs.intake.outputs.run_key }}
-          ISSUE_TITLE: ${{ needs.intake.outputs.issue_title }}
+          REVIEW_OUTPUT: ${{ steps.claude-design-review.outputs.structured_output }}
         shell: bash
         run: |
           set -euo pipefail
@@ -548,20 +693,11 @@ jobs:
             exit 0
           fi
 
-          review_body=$(cat <<COMMENT_EOF
-          ### Automated design review
-          <!-- gpa:design-review:auto -->
-
-          This first-pass design proposal was generated from issue #$ISSUE_NUMBER to keep the orchestration moving without operator intervention.
-
-          Review outcome:
-          - The discussion now has issue-derived content for summary, goals, and proposed approach.
-          - Open questions have been deferred to plan where the issue left them unresolved.
-          - The next stage should refine implementation detail rather than recreate the problem statement.
-
-          Focus follow-up in planning on scope control, verification strategy, and any design decisions that still need stronger implementation detail.
-          COMMENT_EOF
-          )
+          review_body=$(printf '%s' "$REVIEW_OUTPUT" | jq -r '.review_comment_markdown')
+          if [ -z "$review_body" ] || [ "$review_body" = "null" ]; then
+            echo "::error::Claude design review did not produce review_comment_markdown"
+            exit 1
+          fi
 
           mutation=$(cat <<'GRAPHQL'
           mutation($discussionId: ID!, $body: String!) {

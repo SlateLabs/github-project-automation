@@ -202,16 +202,22 @@ fi
 echo ""
 echo "9. Design automation steps"
 
-if grep -q 'Draft design proposal (pre-gate)' "$WORKFLOW" && grep -q 'generate_design_discussion.py' "$WORKFLOW"; then
-  check "design proposal hydration step present" "pass"
+if grep -q 'Codex author design proposal' "$WORKFLOW" && grep -q 'openai/codex-action@v1' "$WORKFLOW"; then
+  check "codex design author step present" "pass"
 else
-  check "design proposal hydration step present" "fail"
+  check "codex design author step present" "fail"
 fi
 
-if grep -q 'Post automated design review comment (pre-gate)' "$WORKFLOW" && grep -q 'gpa:design-review:auto' "$WORKFLOW"; then
-  check "automated design review step present" "pass"
+if grep -q 'Publish Claude design review comment (pre-gate)' "$WORKFLOW" && grep -q 'anthropics/claude-code-action@v1' "$WORKFLOW"; then
+  check "claude design review step present" "pass"
 else
-  check "automated design review step present" "fail"
+  check "claude design review step present" "fail"
+fi
+
+if grep -q 'OPENAI_API_KEY' "$WORKFLOW" && grep -q 'ANTHROPIC_API_KEY' "$WORKFLOW"; then
+  check "design agent credential validation present" "pass"
+else
+  check "design agent credential validation present" "fail"
 fi
 
 echo ""
