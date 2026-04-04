@@ -718,7 +718,6 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
-          permission-issues: write
           permission-organization-projects: write
 
       - name: Resolve next stage
