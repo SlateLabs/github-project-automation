@@ -181,10 +181,10 @@ On validation failure, the workflow posts a diagnostic comment on the issue (if 
 
 **Actions auth requirement for org project mutation:** GitHub Actions' built-in `GITHUB_TOKEN` can post issue comments and dispatch follow-on runs in this repo, but it is not sufficient for mutating the SlateLabs org project. Closed-loop handoff therefore requires the repo to expose the orchestration GitHub App credentials to Actions:
 
-- repository variable: `GITHUB_APP_ID`
-- repository secret: `GITHUB_APP_PRIVATE_KEY`
+- organization or repository variable: `ORCHESTRATION_APP_ID`
+- organization or repository secret: `ORCHESTRATION_APP_PRIVATE_KEY`
 
-The GitHub App must also have **Organization permissions -> Projects: Read and write**. Without that permission and those Actions settings, the stage itself can still pass, but `handoff` will fail when it tries to update the project `Status`.
+These should live at **organization Actions scope** if you want `repo-template`-based rollout across multiple repos. The GitHub App must also have **Organization permissions -> Projects: Read and write**. Without that permission and those Actions settings, the stage itself can still pass, but `handoff` will fail when it tries to update the project `Status`.
 
 **Manual simulation:**
 
