@@ -133,6 +133,68 @@ Issue [#19](https://github.com/SlateLabs/github-project-automation/issues/19) sh
 
 Both paths converge on the same orchestration workflow (`orchestration-dispatch.yml`). An input normalization step at the top of the workflow resolves inputs from either `workflow_dispatch` inputs or `repository_dispatch` client_payload, so all downstream steps (dedup, eligibility, gate checks, scaffolds, comments) execute identically regardless of trigger source.
 
+## Artifact-first contract
+
+The orchestration system uses a deliberately small machine contract:
+
+- **Structured stage metadata** is the source of truth for orchestration state.
+- **Durable GitHub artifacts** are the source of truth for substantive content.
+
+This is an explicit design constraint. Gates and handoff logic should not depend on ad hoc strings embedded in agent prose when the same decision can be made from:
+
+- checkpoint metadata
+- artifact identity
+- artifact structure
+- repo/project state
+
+### What stays structured
+
+Each stage should emit or update a small checkpoint envelope containing only the fields needed to drive orchestration:
+
+- `run_key`
+- `lane`
+- `stage`
+- `state`
+  - `started|succeeded|failed|blocked`
+- `attempt`
+- `artifact_ref`
+- `next_stage`
+
+This metadata is for orchestration control, correlation, retries, and resumability.
+
+### What stays in the artifact
+
+Substantive agent output belongs in the durable artifact itself:
+
+- design content in the design discussion
+- plan content in the plan issue comment
+- implementation in the branch / PR / deployment
+- review critique in discussion or PR comments
+
+The next stage should read the artifact directly for content, not require the previous stage to serialize all meaning into a separate JSON envelope.
+
+### Gate design rule
+
+When adding or tightening a gate:
+
+- Prefer checking artifact existence, ownership marker, headings, linked resources, status fields, approvals, comments, or deployment state.
+- Avoid matching on arbitrary natural-language phrases in agent-authored prose.
+- If a gate needs a machine-readable signal, add that signal to the structured checkpoint metadata or the artifact schema itself rather than relying on freeform wording.
+
+### Examples
+
+- Good:
+  - `artifact_ref=discussion:34`
+  - project `Status=In Review`
+  - PR exists and is not draft
+  - design discussion contains the required headings
+  - automated review comment exists as a discussion comment
+
+- Bad:
+  - searching for a specific sentence like `"ready for plan"` in a review paragraph
+  - requiring the agent to emit an exact phrase inside otherwise freeform markdown
+  - deriving orchestration state from commentary text when a checkpoint field could carry it explicitly
+
 ### `repository_dispatch` consumer
 
 The orchestration workflow accepts `repository_dispatch` events with `event_type: orchestration-start`. This is the automated entry point used by the webhook gateway (Slice 8).
