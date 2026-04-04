@@ -260,6 +260,7 @@ jobs:
             -f "client_payload[actor]=$ACTOR" \
             -f "client_payload[timestamp]=$TIMESTAMP" \
             -f "client_payload[project_item_id]=$PROJECT_ITEM_ID" \
+            -f "client_payload[feedback_source]=operator" \
             -f "client_payload[feedback_body]=$FEEDBACK_BODY"
 
       - name: Acknowledge operator command

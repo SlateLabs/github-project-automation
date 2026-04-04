@@ -183,10 +183,11 @@ else
   check "next-stage repository_dispatch present" "fail"
 fi
 
-if grep -A1 'kickoff)' "$WORKFLOW" | grep -q 'next_stage="clarification"' && \
-   grep -A1 'design)' "$WORKFLOW" | grep -q 'next_stage="plan"' && \
-   grep -A1 'execution)' "$WORKFLOW" | grep -q 'next_stage="deploy-review"' && \
-   grep -A1 'merge)' "$WORKFLOW" | grep -q 'next_stage="follow-up-capture"'; then
+if grep -A3 'kickoff)' "$WORKFLOW" | grep -q 'next_stage="clarification"' && \
+   grep -A3 'design)' "$WORKFLOW" | grep -q 'next_stage="plan"' && \
+   grep -A3 'execution)' "$WORKFLOW" | grep -q 'next_stage="agent-review"' && \
+   grep -A15 'agent-review)' "$WORKFLOW" | grep -q 'next_stage="merge"' && \
+   grep -A3 'merge)' "$WORKFLOW" | grep -q 'next_stage="follow-up-capture"'; then
   check "stage handoff map includes key transitions" "pass"
 else
   check "stage handoff map includes key transitions" "fail"
@@ -196,6 +197,12 @@ if grep -Fq 'client_payload[project_item_id]' "$WORKFLOW"; then
   check "handoff preserves project_item_id in repository_dispatch" "pass"
 else
   check "handoff preserves project_item_id in repository_dispatch" "fail"
+fi
+
+if grep -Fq 'client_payload[feedback_source]=agent' "$WORKFLOW" && grep -Fq 'client_payload[feedback_source]=operator' .github/workflows/operator-review-intake.yml; then
+  check "feedback source is preserved across agent and operator loops" "pass"
+else
+  check "feedback source is preserved across agent and operator loops" "fail"
 fi
 
 echo ""

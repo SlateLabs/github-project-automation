@@ -424,6 +424,26 @@ runs:
             fi
             ;;
 
+          agent-review)
+            # Agent review gate:
+            #   1. An open non-draft PR exists for the issue
+            agent_review_pr_json=$(gh pr list --state open --json number,isDraft,url,headRefName,updatedAt --limit 100 \
+              --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))] | sort_by(.updatedAt) | reverse | .[0]" 2>/dev/null || echo '')
+            agent_review_pr_number=$(echo "$agent_review_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
+            if [ -z "$agent_review_pr_number" ]; then
+              if ! check_waiver "agent-review-pr"; then
+                unmet+=("No open PR found referencing issue #${ISSUE_NUMBER} — an agent-reviewable PR is required")
+              fi
+            else
+              agent_review_is_draft=$(echo "$agent_review_pr_json" | jq -r '.isDraft // false' 2>/dev/null || echo "false")
+              if [ "$agent_review_is_draft" = "true" ]; then
+                if ! check_waiver "agent-review-draft"; then
+                  unmet+=("PR #$agent_review_pr_number is still draft — mark it ready for review before agent-review")
+                fi
+              fi
+            fi
+            ;;
+
           follow-up-capture)
             # Gate: Follow-up capture (discussion #3 §10, §14 Slice 5)
             # Conditions:
@@ -506,7 +526,9 @@ runs:
           merge)
             # Merge gate:
             #   1. An open PR exists for the issue
-            #   2. A trusted operator has posted gpa:approve on the issue
+            #   2. Either:
+            #      - a trusted operator has posted gpa:approve on the issue, or
+            #      - the latest agent-review disposition is auto-approve
             merge_pr_json=$(gh pr list --state open --json number,isDraft,url,headRefName,updatedAt --limit 100 \
               --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))] | sort_by(.updatedAt) | reverse | .[0]" 2>/dev/null || echo '')
             merge_pr_number=$(echo "$merge_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
@@ -538,9 +560,26 @@ runs:
               fi
             done < <(echo "$approval_comments_json" | jq -c '.' 2>/dev/null || true)
 
-            if [ "$approval_found" != "true" ]; then
+            agent_review_auto_approved="false"
+            agent_review_comment_body=$(gh issue view "$ISSUE_NUMBER" --comments --json comments \
+              --jq '.comments[].body // ""' 2>/dev/null | awk '
+                /gpa:run-status:agent-review:completed:/ { capture=1; block=$0 ORS; next }
+                capture && /^### / { last=block; capture=0; block="" }
+                capture { block=block $0 ORS }
+                END {
+                  if (capture) {
+                    last=block
+                  }
+                  printf "%s", last
+                }
+              ' || true)
+            if [ -n "$agent_review_comment_body" ] && echo "$agent_review_comment_body" | grep -Fq '| **Disposition** | `auto-approve` |'; then
+              agent_review_auto_approved="true"
+            fi
+
+            if [ "$approval_found" != "true" ] && [ "$agent_review_auto_approved" != "true" ]; then
               if ! check_waiver "merge-approval"; then
-                unmet+=("No trusted operator approval comment found — post gpa:approve on the issue before merge")
+                unmet+=("No trusted operator approval or auto-approved agent review found — post gpa:approve or rerun agent-review with auto-approve before merge")
               fi
             fi
             ;;

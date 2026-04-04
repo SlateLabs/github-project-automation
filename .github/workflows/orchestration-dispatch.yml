@@ -26,6 +26,7 @@ on:
           - design
           - plan
           - execution
+          - agent-review
           - deploy-review
           - feedback-implementation
           - follow-up-capture
@@ -63,6 +64,8 @@ jobs:
       project_item_id: ${{ steps.project-context.outputs.project_item_id }}
       run_key: ${{ steps.run-key.outputs.run_key }}
       timestamp: ${{ steps.run-key.outputs.timestamp }}
+      feedback_body: ${{ steps.normalize.outputs.feedback_body }}
+      feedback_source: ${{ steps.normalize.outputs.feedback_source }}
       duplicate: ${{ steps.dedup.outputs.duplicate }}
       eligible: ${{ steps.eligibility.outputs.eligible }}
       reason: ${{ steps.eligibility.outputs.reason }}
@@ -86,12 +89,14 @@ jobs:
           RD_ACTOR: ${{ github.event.client_payload.actor }}
           RD_TIMESTAMP: ${{ github.event.client_payload.timestamp }}
           RD_PROJECT_ITEM_ID: ${{ github.event.client_payload.project_item_id }}
+          RD_FEEDBACK_BODY: ${{ github.event.client_payload.feedback_body }}
+          RD_FEEDBACK_SOURCE: ${{ github.event.client_payload.feedback_source }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CURRENT_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
-          VALID_STAGES="kickoff clarification design plan execution deploy-review feedback-implementation follow-up-capture merge closeout"
+          VALID_STAGES="kickoff clarification design plan execution agent-review deploy-review feedback-implementation follow-up-capture merge closeout"
 
           if [ "$TRIGGER" = "repository_dispatch" ]; then
             # --- Validate repository_dispatch payload ---
@@ -186,6 +191,12 @@ jobs:
             echo "actor=${RD_ACTOR}" >> "$GITHUB_OUTPUT"
             echo "trigger=repository_dispatch" >> "$GITHUB_OUTPUT"
             echo "project_item_id=${RD_PROJECT_ITEM_ID}" >> "$GITHUB_OUTPUT"
+            {
+              echo 'feedback_body<<EOF'
+              printf '%s\n' "${RD_FEEDBACK_BODY:-}"
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
+            echo "feedback_source=${RD_FEEDBACK_SOURCE}" >> "$GITHUB_OUTPUT"
             echo "::notice::Normalized inputs from repository_dispatch (actor: ${RD_ACTOR}, issue: ${RD_ISSUE_NUMBER}, stage: ${RD_REQUESTED_STAGE})"
           else
             # --- workflow_dispatch: pass through existing inputs ---
@@ -194,6 +205,12 @@ jobs:
             echo "actor=${WD_ACTOR}" >> "$GITHUB_OUTPUT"
             echo "trigger=workflow_dispatch" >> "$GITHUB_OUTPUT"
             echo "project_item_id=" >> "$GITHUB_OUTPUT"
+            {
+              echo 'feedback_body<<EOF'
+              echo ''
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
+            echo "feedback_source=" >> "$GITHUB_OUTPUT"
             echo "::notice::Normalized inputs from workflow_dispatch (actor: ${WD_ACTOR}, issue: ${WD_ISSUE_NUMBER}, stage: ${WD_REQUESTED_STAGE})"
           fi
 
@@ -459,6 +476,8 @@ jobs:
       unmet_conditions: ${{ steps.gate.outputs.unmet_conditions }}
       waived_conditions: ${{ steps.gate.outputs.waived_conditions }}
       state_valid: ${{ steps.state-check.outputs.state_valid }}
+      review_disposition: ${{ steps.parse-agent-review.outputs.disposition }}
+      review_feedback_body: ${{ steps.parse-agent-review.outputs.feedback_body }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -1120,6 +1139,15 @@ jobs:
           set -euo pipefail
           [ -n "$OPENAI_API_KEY" ] || { echo "::error::Execution authoring requires secrets.OPENAI_API_KEY"; exit 1; }
 
+      - name: Validate agent review credentials
+        if: needs.intake.outputs.requested_stage == 'agent-review'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "$ANTHROPIC_API_KEY" ] || { echo "::error::Agent review requires secrets.ANTHROPIC_API_KEY"; exit 1; }
+
       - name: Prepare execution branch (pre-agent)
         if: needs.intake.outputs.requested_stage == 'execution' || needs.intake.outputs.requested_stage == 'feedback-implementation'
         id: scaffold-execution
@@ -1293,6 +1321,232 @@ jobs:
           else
             echo "::notice::PR #$PR_NUMBER already ready for review"
           fi
+
+      - name: Load agent review PR context
+        if: needs.intake.outputs.requested_stage == 'agent-review'
+        id: agent-review-context
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pr_json=$(gh pr list --state open --json number,title,url,body,headRefName,files,additions,deletions,changedFiles --limit 100 \
+            --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))][0]")
+          pr_number=$(echo "$pr_json" | jq -r '.number // empty')
+          if [ -z "$pr_number" ]; then
+            echo "::error::No open PR found for issue #$ISSUE_NUMBER to review"
+            exit 1
+          fi
+
+          pr_body=$(echo "$pr_json" | jq -r '.body // ""')
+          pr_url=$(echo "$pr_json" | jq -r '.url // ""')
+          pr_title=$(echo "$pr_json" | jq -r '.title // ""')
+          files_summary=$(echo "$pr_json" | jq -r '.files[]?.path // ""')
+          diff_file="$RUNNER_TEMP/agent-review.diff"
+          gh pr diff "$pr_number" --patch --color=never > "$diff_file"
+          python3 - "$diff_file" <<'PY' > "$RUNNER_TEMP/agent-review-truncated.diff"
+          from pathlib import Path
+          import sys
+          text = Path(sys.argv[1]).read_text()
+          limit = 30000
+          if len(text) > limit:
+              text = text[:limit] + "\n\n[diff truncated]\n"
+          print(text, end="")
+          PY
+
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+          {
+            echo 'pr_body<<EOF'
+            printf '%s\n' "$pr_body"
+            echo 'EOF'
+            echo 'pr_url<<EOF'
+            printf '%s\n' "$pr_url"
+            echo 'EOF'
+            echo 'pr_title<<EOF'
+            printf '%s\n' "$pr_title"
+            echo 'EOF'
+            echo 'files_summary<<EOF'
+            printf '%s\n' "$files_summary"
+            echo 'EOF'
+            echo 'diff_file<<EOF'
+            printf '%s\n' "$RUNNER_TEMP/agent-review-truncated.diff"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Claude agent review prompt
+        if: needs.intake.outputs.requested_stage == 'agent-review'
+        id: agent-review-prompt
+        env:
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+          ISSUE_TITLE: ${{ needs.intake.outputs.issue_title }}
+          ISSUE_BODY: ${{ needs.intake.outputs.issue_body }}
+          PR_NUMBER: ${{ steps.agent-review-context.outputs.pr_number }}
+          PR_TITLE: ${{ steps.agent-review-context.outputs.pr_title }}
+          PR_URL: ${{ steps.agent-review-context.outputs.pr_url }}
+          PR_BODY: ${{ steps.agent-review-context.outputs.pr_body }}
+          FILES_SUMMARY: ${{ steps.agent-review-context.outputs.files_summary }}
+          DIFF_FILE: ${{ steps.agent-review-context.outputs.diff_file }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          from pathlib import Path
+          import os
+
+          diff_text = Path(os.environ["DIFF_FILE"]).read_text()
+          prompt = f"""You are the autonomous agent reviewer for issue #{os.environ["ISSUE_NUMBER"]}.
+
+          Review the proposed implementation and return JSON only, with this exact shape:
+          {{
+            "disposition": "auto-approve" | "rework-required" | "operator-review-required",
+            "summary": "<one short paragraph>",
+            "feedback_markdown": "<markdown bullets or short paragraphs for the next actor>"
+          }}
+
+          Decision rules:
+          - Use "auto-approve" when the PR is coherent, bounded, and safe to merge without operator review.
+          - Use "rework-required" when the automation should make another implementation pass on its own.
+          - Use "operator-review-required" only for exceptional situations: unresolved product ambiguity, risky/destructive changes, security/permission concerns, missing deployability where user interaction is required, or changes that require a human judgment call.
+          - Default to "auto-approve" unless there is a concrete reason not to.
+          - Do not ask for operator review just because the change is incomplete; prefer "rework-required" in that case.
+
+          Issue title:
+          {os.environ["ISSUE_TITLE"]}
+
+          Issue body:
+          ---
+          {os.environ["ISSUE_BODY"]}
+          ---
+
+          PR title:
+          {os.environ["PR_TITLE"]}
+
+          PR URL:
+          {os.environ["PR_URL"]}
+
+          PR body:
+          ---
+          {os.environ["PR_BODY"]}
+          ---
+
+          Changed files:
+          ---
+          {os.environ["FILES_SUMMARY"]}
+          ---
+
+          Diff excerpt:
+          ---
+          {diff_text}
+          ---
+          """
+          print("prompt<<EOF")
+          print(prompt)
+          print("EOF")
+          PY
+
+      - name: Run Claude agent review
+        if: needs.intake.outputs.requested_stage == 'agent-review'
+        id: claude-agent-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: ${{ steps.agent-review-prompt.outputs.prompt }}
+          show_full_output: ${{ vars.ORCHESTRATION_CLAUDE_SHOW_FULL_OUTPUT == 'true' }}
+          claude_args: >-
+            --max-turns 1
+          allowed_bots: "*"
+
+      - name: Parse agent review result
+        if: needs.intake.outputs.requested_stage == 'agent-review'
+        id: parse-agent-review
+        env:
+          REVIEW_EXECUTION_FILE: ${{ steps.claude-agent-review.outputs.execution_file }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${REVIEW_EXECUTION_FILE:-}" ] || [ ! -f "$REVIEW_EXECUTION_FILE" ]; then
+            echo "::error::Agent review did not produce an execution file"
+            exit 1
+          fi
+
+          review_json=$(
+            jq -rs -r '
+              map(if type == "array" then .[] else . end)
+              | map(select(.type == "result" and .subtype == "success"))[-1].result // ""
+            ' "$REVIEW_EXECUTION_FILE"
+          )
+          review_json=$(printf '%s' "$review_json" | perl -0pe 's/\A```[a-zA-Z0-9_-]*\n//; s/\n```\s*\z/\n/s')
+
+          disposition=$(printf '%s' "$review_json" | jq -r '.disposition // empty')
+          summary=$(printf '%s' "$review_json" | jq -r '.summary // empty')
+          feedback_markdown=$(printf '%s' "$review_json" | jq -r '.feedback_markdown // empty')
+
+          case "$disposition" in
+            auto-approve|rework-required|operator-review-required) ;;
+            *)
+              echo "::error::Invalid agent review disposition: '$disposition'"
+              printf '%s\n' "$review_json"
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "disposition=$disposition"
+            echo 'summary<<EOF'
+            printf '%s\n' "$summary"
+            echo 'EOF'
+            echo 'feedback_body<<EOF'
+            printf '%s\n' "$feedback_markdown"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish agent review summary
+        if: needs.intake.outputs.requested_stage == 'agent-review'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+          RUN_KEY: ${{ needs.intake.outputs.run_key }}
+          PR_NUMBER: ${{ steps.agent-review-context.outputs.pr_number }}
+          PR_URL: ${{ steps.agent-review-context.outputs.pr_url }}
+          DISPOSITION: ${{ steps.parse-agent-review.outputs.disposition }}
+          SUMMARY: ${{ steps.parse-agent-review.outputs.summary }}
+          FEEDBACK_BODY: ${{ steps.parse-agent-review.outputs.feedback_body }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+          ### Agent review
+          <!-- gpa:run-status:agent-review:completed:$RUN_KEY -->
+
+          | Field | Value |
+          |-------|-------|
+          | **Run key** | \`$RUN_KEY\` |
+          | **PR** | $PR_URL |
+          | **Disposition** | \`$DISPOSITION\` |
+
+          $SUMMARY
+
+          $FEEDBACK_BODY
+          COMMENT_EOF
+          )"
+
+      - name: Auto-approve PR review
+        if: needs.intake.outputs.requested_stage == 'agent-review' && steps.parse-agent-review.outputs.disposition == 'auto-approve'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.agent-review-context.outputs.pr_number }}
+          SUMMARY: ${{ steps.parse-agent-review.outputs.summary }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh pr review "$PR_NUMBER" --approve -b "Automated agent review: $SUMMARY" || \
+            echo "::warning::Could not submit GitHub approval review for PR #$PR_NUMBER"
 
       - name: Publish review-ready summary
         if: needs.intake.outputs.requested_stage == 'deploy-review'
@@ -1633,6 +1887,8 @@ jobs:
         shell: bash
         env:
           REQUESTED_STAGE: ${{ needs.intake.outputs.requested_stage }}
+          REVIEW_DISPOSITION: ${{ needs.gate.outputs.review_disposition }}
+          FEEDBACK_SOURCE: ${{ needs.intake.outputs.feedback_source }}
         run: |
           case "$REQUESTED_STAGE" in
             kickoff)
@@ -1652,16 +1908,41 @@ jobs:
               target_status="In Progress"
               ;;
             execution)
-              next_stage="deploy-review"
-              target_status="In Review"
+              next_stage="agent-review"
+              target_status="In Progress"
+              ;;
+            agent-review)
+              case "$REVIEW_DISPOSITION" in
+                auto-approve)
+                  next_stage="merge"
+                  target_status="In Progress"
+                  ;;
+                rework-required)
+                  next_stage="feedback-implementation"
+                  target_status="In Progress"
+                  ;;
+                operator-review-required)
+                  next_stage="deploy-review"
+                  target_status="In Review"
+                  ;;
+                *)
+                  echo "::error::Unknown or missing review disposition '$REVIEW_DISPOSITION' for agent-review"
+                  exit 1
+                  ;;
+              esac
               ;;
             deploy-review)
               next_stage=""
               target_status="In Review"
               ;;
             feedback-implementation)
-              next_stage="deploy-review"
-              target_status="In Review"
+              if [ "$FEEDBACK_SOURCE" = "operator" ]; then
+                next_stage="deploy-review"
+                target_status="In Review"
+              else
+                next_stage="agent-review"
+                target_status="In Progress"
+              fi
               ;;
             merge)
               next_stage="follow-up-capture"
@@ -1830,18 +2111,41 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           PROJECT_ITEM_ID: ${{ needs.intake.outputs.project_item_id }}
           ISSUE_TITLE: ${{ needs.intake.outputs.issue_title }}
+          REVIEW_DISPOSITION: ${{ needs.gate.outputs.review_disposition }}
+          REVIEW_FEEDBACK_BODY: ${{ needs.gate.outputs.review_feedback_body }}
+          FEEDBACK_BODY: ${{ needs.intake.outputs.feedback_body }}
+          FEEDBACK_SOURCE: ${{ needs.intake.outputs.feedback_source }}
         run: |
           set -euo pipefail
 
-          gh api "repos/${GITHUB_REPOSITORY}/dispatches" \
-            -f event_type=orchestration-start \
-            -F "client_payload[issue_number]=$ISSUE_NUMBER" \
-            -f "client_payload[issue_title]=$ISSUE_TITLE" \
-            -f "client_payload[requested_stage]=$NEXT_STAGE" \
-            -f "client_payload[run_key]=$NEXT_RUN_KEY" \
-            -f "client_payload[actor]=$ACTOR" \
-            -f "client_payload[timestamp]=$NEXT_TIMESTAMP" \
+          args=(
+            "repos/${GITHUB_REPOSITORY}/dispatches"
+            -f event_type=orchestration-start
+            -F "client_payload[issue_number]=$ISSUE_NUMBER"
+            -f "client_payload[issue_title]=$ISSUE_TITLE"
+            -f "client_payload[requested_stage]=$NEXT_STAGE"
+            -f "client_payload[run_key]=$NEXT_RUN_KEY"
+            -f "client_payload[actor]=$ACTOR"
+            -f "client_payload[timestamp]=$NEXT_TIMESTAMP"
             -f "client_payload[project_item_id]=$PROJECT_ITEM_ID"
+          )
+
+          if [ "$NEXT_STAGE" = "feedback-implementation" ]; then
+            args+=(
+              -f "client_payload[feedback_source]=agent"
+            )
+            if [ -n "${REVIEW_FEEDBACK_BODY:-}" ]; then
+              args+=(-f "client_payload[feedback_body]=$REVIEW_FEEDBACK_BODY")
+            fi
+          elif [ -n "${FEEDBACK_SOURCE:-}" ]; then
+            args+=(-f "client_payload[feedback_source]=$FEEDBACK_SOURCE")
+            if [ -n "${FEEDBACK_BODY:-}" ]; then
+              args+=(-f "client_payload[feedback_body]=$FEEDBACK_BODY")
+            fi
+          fi
+
+          gh api "${args[@]}" \
+            >/dev/null
 
           echo "dispatched=true" >> "$GITHUB_OUTPUT"
 
@@ -1933,13 +2237,16 @@ jobs:
               next_step="Fill in the implementation plan with substantive content, then re-trigger with \`requested_stage: plan\`"
               ;;
             execution)
-              next_step="Execution should auto-queue \`deploy-review\` once the PR is ready"
+              next_step="Execution should auto-queue \`agent-review\` once the PR is ready"
+              ;;
+            agent-review)
+              next_step="Agent review should auto-route to \`merge\`, \`feedback-implementation\`, or \`deploy-review\` based on its disposition"
               ;;
             deploy-review)
               next_step="Wait for operator review. Use \`gpa:feedback ...\` to request changes or \`gpa:approve\` to continue"
               ;;
             feedback-implementation)
-              next_step="Address operator feedback on the branch, then auto-return to \`deploy-review\`"
+              next_step="Address feedback on the branch, then auto-return to \`agent-review\` or \`deploy-review\` depending on the feedback source"
               ;;
             follow-up-capture)
               next_step="Review created follow-up issues, then proceed to closeout with \`requested_stage: closeout\`"
