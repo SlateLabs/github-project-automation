@@ -773,11 +773,11 @@ jobs:
           echo "target_status=$target_status" >> "$GITHUB_OUTPUT"
 
       - name: Sync project Status
-        if: needs.intake.outputs.project_item_id != ''
+        if: needs.intake.outputs.project_item_id != '' && steps.app-token.outcome == 'success'
         id: sync-status
         shell: bash
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PROJECT_ITEM_ID: ${{ needs.intake.outputs.project_item_id }}
           TARGET_STATUS: ${{ steps.resolve.outputs.target_status }}
         run: |
@@ -875,15 +875,22 @@ jobs:
         run: |
           echo "::notice::No project_item_id provided; skipping project Status sync"
 
-      - name: Fail if app token is unavailable for closed-loop sync
-        if: needs.intake.outputs.project_item_id != '' && steps.app-token.outputs.token == ''
+      - name: Fail if app credentials are unavailable for closed-loop sync
+        if: needs.intake.outputs.project_item_id != '' && vars.ORCHESTRATION_APP_ID == ''
+        shell: bash
+        run: |
+          echo "::error::Closed-loop project synchronization requires vars.ORCHESTRATION_APP_ID to be available to this repository"
+          exit 1
+
+      - name: Fail if app token could not be created for closed-loop sync
+        if: needs.intake.outputs.project_item_id != '' && vars.ORCHESTRATION_APP_ID != '' && steps.app-token.outcome != 'success'
         shell: bash
         run: |
           echo "::error::Closed-loop project synchronization requires GitHub App credentials in Actions: vars.ORCHESTRATION_APP_ID and secrets.ORCHESTRATION_APP_PRIVATE_KEY"
           exit 1
 
       - name: Generate next run key
-        if: steps.resolve.outputs.next_stage != '' && steps.app-token.outputs.token != ''
+        if: steps.resolve.outputs.next_stage != '' && steps.app-token.outcome == 'success'
         id: next-run-key
         shell: bash
         env:
@@ -897,7 +904,7 @@ jobs:
           echo "timestamp=$timestamp" >> "$GITHUB_OUTPUT"
 
       - name: Dispatch next stage
-        if: steps.resolve.outputs.next_stage != '' && needs.intake.outputs.project_item_id != '' && steps.app-token.outputs.token != ''
+        if: steps.resolve.outputs.next_stage != '' && needs.intake.outputs.project_item_id != '' && steps.app-token.outcome == 'success'
         id: dispatch
         shell: bash
         env:
