@@ -213,7 +213,7 @@ else
 fi
 
 echo ""
-echo "10. Design automation steps"
+echo "10. Agent-backed authoring stages"
 
 if grep -q 'Codex author design proposal' "$WORKFLOW" && grep -q 'openai/codex-action@v1' "$WORKFLOW"; then
   check "codex design author step present" "pass"
@@ -227,10 +227,22 @@ else
   check "claude design review step present" "fail"
 fi
 
-if grep -q 'OPENAI_API_KEY' "$WORKFLOW" && grep -q 'ANTHROPIC_API_KEY' "$WORKFLOW"; then
-  check "design agent credential validation present" "pass"
+if grep -q 'Codex author implementation plan' "$WORKFLOW"; then
+  check "codex plan author step present" "pass"
 else
-  check "design agent credential validation present" "fail"
+  check "codex plan author step present" "fail"
+fi
+
+if grep -q 'Publish Claude plan review comment (pre-gate)' "$WORKFLOW"; then
+  check "claude plan review step present" "pass"
+else
+  check "claude plan review step present" "fail"
+fi
+
+if grep -q 'Validate stage agent credentials' "$WORKFLOW" && grep -q 'OPENAI_API_KEY' "$WORKFLOW" && grep -q 'ANTHROPIC_API_KEY' "$WORKFLOW"; then
+  check "stage agent credential validation present" "pass"
+else
+  check "stage agent credential validation present" "fail"
 fi
 
 echo ""

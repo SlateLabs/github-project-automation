@@ -565,7 +565,7 @@ The current handoff sequence is:
 This is intentionally "fail forward" for scaffold-driven stages:
 
 - `clarification` auto-seeds `## Scope` and defers unresolved issue-level open questions into design by marking them `DEFERRED-TO-DESIGN`.
-- `design`, `plan`, and `execution` are intended to be agent-executed stages. The design stage now uses Codex to author the first-pass proposal and Claude to post a machine-generated review comment before the gate runs; later stages still need the same agent-backed treatment.
+- `design` and `plan` are now agent-executed stages. Codex authors the first-pass artifact and Claude posts a machine-generated review comment before the gate runs. `execution` still needs the same treatment for code/PR work.
 - `review`, `merge`, and `closeout` remain machine-checked stages; they only auto-advance when the required repo artifacts already satisfy the gate.
 - Each auto-handoff posts a `gpa:run-status:<stage>:started:<run_key>` marker comment on the issue so the run history remains queryable across stages.
 - When `project_item_id` is present, the orchestrator also updates the GitHub Project `Status` during handoff:
@@ -612,7 +612,7 @@ Current intended mapping:
 
 - `clarification`: GitHub-native normalization and issue-body refinement
 - `design`: Codex authors the discussion, Claude reviews it
-- `plan`: Codex should author the implementation plan, Claude should review it
+- `plan`: Codex authors the implementation plan, Claude reviews it
 - `execution`: Codex should implement code and prepare the PR
 - `review`: Claude should perform the default review pass
 - `feedback-response`: Codex should address operator feedback
