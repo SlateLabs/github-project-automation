@@ -573,7 +573,6 @@ EOF
           sandbox: workspace-write
           model: ${{ vars.ORCHESTRATION_CODEX_MODEL }}
           effort: ${{ vars.ORCHESTRATION_CODEX_EFFORT }}
-          codex-args: "--quiet"
           allow-bots: true
 
       - name: Apply Codex design draft
