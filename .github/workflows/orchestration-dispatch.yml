@@ -708,6 +708,18 @@ jobs:
       status_updated: ${{ steps.sync-status.outputs.updated }}
       dispatched: ${{ steps.dispatch.outputs.dispatched }}
     steps:
+      - name: Create orchestration app token
+        if: needs.intake.outputs.project_item_id != '' && vars.GITHUB_APP_ID != '' && secrets.GITHUB_APP_PRIVATE_KEY != ''
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.GITHUB_APP_ID }}
+          private-key: ${{ secrets.GITHUB_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: write
+          permission-issues: write
+          permission-projects: write
+
       - name: Resolve next stage
         id: resolve
         shell: bash
@@ -765,7 +777,7 @@ jobs:
         id: sync-status
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
           PROJECT_ITEM_ID: ${{ needs.intake.outputs.project_item_id }}
           TARGET_STATUS: ${{ steps.resolve.outputs.target_status }}
         run: |
@@ -863,8 +875,15 @@ jobs:
         run: |
           echo "::notice::No project_item_id provided; skipping project Status sync"
 
+      - name: Fail if app token is unavailable for closed-loop sync
+        if: needs.intake.outputs.project_item_id != '' && steps.app-token.outputs.token == ''
+        shell: bash
+        run: |
+          echo "::error::Closed-loop project synchronization requires GitHub App credentials in Actions: vars.GITHUB_APP_ID and secrets.GITHUB_APP_PRIVATE_KEY"
+          exit 1
+
       - name: Generate next run key
-        if: steps.resolve.outputs.next_stage != ''
+        if: steps.resolve.outputs.next_stage != '' && steps.app-token.outputs.token != ''
         id: next-run-key
         shell: bash
         env:
@@ -878,11 +897,11 @@ jobs:
           echo "timestamp=$timestamp" >> "$GITHUB_OUTPUT"
 
       - name: Dispatch next stage
-        if: steps.resolve.outputs.next_stage != '' && needs.intake.outputs.project_item_id != ''
+        if: steps.resolve.outputs.next_stage != '' && needs.intake.outputs.project_item_id != '' && steps.app-token.outputs.token != ''
         id: dispatch
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
           ACTOR: ${{ needs.intake.outputs.actor }}
           NEXT_STAGE: ${{ steps.resolve.outputs.next_stage }}

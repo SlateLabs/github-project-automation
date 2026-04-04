@@ -179,6 +179,13 @@ On validation failure, the workflow posts a diagnostic comment on the issue (if 
 
 **Closed-loop project sync:** When `project_item_id` is present, the workflow uses it to update the GitHub Project `Status` after a successful stage and preserves the same project item identity when it auto-dispatches the next stage. If `project_item_id` is absent, the stage still runs for manual/retry compatibility, but project-state mutation and automatic next-stage dispatch are skipped.
 
+**Actions auth requirement for org project mutation:** GitHub Actions' built-in `GITHUB_TOKEN` can post issue comments and dispatch follow-on runs in this repo, but it is not sufficient for mutating the SlateLabs org project. Closed-loop handoff therefore requires the repo to expose the orchestration GitHub App credentials to Actions:
+
+- repository variable: `GITHUB_APP_ID`
+- repository secret: `GITHUB_APP_PRIVATE_KEY`
+
+The GitHub App must also have **Organization permissions -> Projects: Read and write**. Without that permission and those Actions settings, the stage itself can still pass, but `handoff` will fail when it tries to update the project `Status`.
+
 **Manual simulation:**
 
 ```bash
