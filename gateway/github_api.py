@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Callable
 from urllib import error, request
 
+import jwt
 import yaml
 
 
@@ -28,6 +31,13 @@ class TrustPolicy:
     trusted_apps: tuple[str, ...]
     record_only_roles: tuple[str, ...]
     deny_roles: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class GitHubAppCredentials:
+    app_id: str
+    installation_id: str
+    private_key_pem: str
 
 
 @dataclass(frozen=True)
@@ -84,9 +94,22 @@ def load_trust_policy(path: str) -> TrustPolicy:
 class GitHubApiClient:
     """Thin REST/GraphQL client for the gateway listener."""
 
-    def __init__(self, token: str, api_url: str = "https://api.github.com") -> None:
+    def __init__(
+        self,
+        token: str | None = None,
+        *,
+        app_credentials: GitHubAppCredentials | None = None,
+        api_url: str = "https://api.github.com",
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        if bool(token) == bool(app_credentials):
+            raise ValueError("Provide exactly one of token or app_credentials")
         self.token = token
+        self.app_credentials = app_credentials
         self.api_url = api_url.rstrip("/")
+        self.clock = clock or time.time
+        self._installation_token: str | None = None
+        self._installation_token_expires_at: float = 0.0
 
     def _request(
         self,
@@ -94,15 +117,19 @@ class GitHubApiClient:
         path: str,
         payload: dict[str, Any] | None = None,
         expected_statuses: tuple[int, ...] = (200,),
+        auth_mode: str = "installation",
     ) -> Any:
         url = path if path.startswith("http") else f"{self.api_url}{path}"
         data = None
         headers = {
             "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {self.token}",
             "User-Agent": "slatelabs-github-project-automation-gateway",
             "X-GitHub-Api-Version": "2022-11-28",
         }
+        if auth_mode == "app":
+            headers["Authorization"] = f"Bearer {self._build_app_jwt()}"
+        else:
+            headers["Authorization"] = f"Bearer {self._get_installation_token()}"
         if payload is not None:
             headers["Content-Type"] = "application/json"
             data = json.dumps(payload).encode("utf-8")
@@ -124,6 +151,50 @@ class GitHubApiClient:
         if not body:
             return {}
         return json.loads(body)
+
+    def _build_app_jwt(self) -> str:
+        if self.app_credentials is None:
+            raise ValueError("GitHub App JWT requested without app credentials")
+
+        now = int(self.clock())
+        return jwt.encode(
+            {
+                "iat": now - 60,
+                "exp": now + (9 * 60),
+                "iss": self.app_credentials.app_id,
+            },
+            self.app_credentials.private_key_pem,
+            algorithm="RS256",
+        )
+
+    def _get_installation_token(self) -> str:
+        if self.token:
+            return self.token
+        if self._installation_token and self.clock() < self._installation_token_expires_at - 60:
+            return self._installation_token
+
+        token, expires_at = self._mint_installation_token()
+        self._installation_token = token
+        self._installation_token_expires_at = expires_at
+        return token
+
+    def _mint_installation_token(self) -> tuple[str, float]:
+        if self.app_credentials is None:
+            raise ValueError("Installation token requested without app credentials")
+
+        payload = self._request(
+            "POST",
+            f"/app/installations/{self.app_credentials.installation_id}/access_tokens",
+            payload={},
+            expected_statuses=(201,),
+            auth_mode="app",
+        )
+        expires_at = payload.get("expires_at")
+        if not payload.get("token") or not expires_at:
+            raise GitHubApiError("GitHub App installation token response was missing token metadata")
+
+        expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00")).astimezone(timezone.utc).timestamp()
+        return payload["token"], expiry
 
     def graphql(self, query: str, variables: dict[str, Any]) -> Any:
         return self._request(
@@ -216,7 +287,9 @@ class GitHubApiClient:
             elif typename == "ProjectV2ItemFieldSingleSelectValue":
                 if field_name == "Status":
                     status = field_value.get("name")
-                elif field_name in {"Workflow Status", "Workflow Stage"}:
+                elif field_name == "Workflow Status":
+                    status = field_value.get("name")
+                elif field_name == "Workflow Stage":
                     workflow_stage = field_value.get("name")
 
         return ProjectItemContext(
@@ -318,4 +391,3 @@ class GitHubApiClient:
             payload={"event_type": event_type, "client_payload": client_payload},
             expected_statuses=(204,),
         )
-

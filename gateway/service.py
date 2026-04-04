@@ -61,9 +61,10 @@ class GatewayService:
         self.sleep = sleep or time.sleep
 
     def handle_delivery(self, headers: dict[str, str], raw_body: bytes) -> GatewayResult:
-        delivery_id = headers.get("X-GitHub-Delivery", "")
-        event_name = headers.get("X-GitHub-Event", "")
-        signature = headers.get("X-Hub-Signature-256", "")
+        normalized_headers = {key.lower(): value for key, value in headers.items()}
+        delivery_id = normalized_headers.get("x-github-delivery", "")
+        event_name = normalized_headers.get("x-github-event", "")
+        signature = normalized_headers.get("x-hub-signature-256", "")
         now_ms = self.clock()
 
         if not delivery_id or not event_name:
@@ -80,6 +81,18 @@ class GatewayService:
             return GatewayResult(400, {"outcome": "rejected", "reason": "Request body is not valid JSON"})
 
         actor = (payload.get("sender") or {}).get("login", "unknown")
+
+        if event_name == "ping":
+            self.logger(
+                {
+                    "delivery_id": delivery_id,
+                    "event": event_name,
+                    "actor": actor,
+                    "outcome": "accepted",
+                    "reason": "webhook ping",
+                }
+            )
+            return GatewayResult(200, {"outcome": "accepted", "event": "ping"})
 
         if event_name != "projects_v2_item":
             self.logger(
@@ -181,7 +194,7 @@ class GatewayService:
             return GatewayResult(202, {"outcome": "deduplicated", "reason": "A recent kickoff run already completed", "run_key": run_key})
 
         self.dedup_store.mark_active(prefix, run_key, now_ms)
-        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ms / 1000))
+        timestamp = str(now_ms)
         client_payload = {
             "issue_number": issue_number,
             "requested_stage": REQUESTED_STAGE,
@@ -317,7 +330,7 @@ class GatewayService:
             or (field_value.get("field") or {}).get("name")
             or (field_value.get("project_field") or {}).get("name")
         )
-        if field_name != "Status":
+        if field_name not in {"Status", "Workflow Status", "Workflow Stage"}:
             return (None, None)
 
         before = self._extract_single_select_name(field_value.get("from"))

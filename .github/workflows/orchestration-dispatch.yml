@@ -43,6 +43,8 @@ permissions:
 #                            │
 #                         advance
 #                            │
+#                         handoff
+#                            │
 #                         summary  (always runs)
 # ──────────────────────────────────────────────────────────────────────
 
@@ -688,10 +690,125 @@ jobs:
           run_key: ${{ needs.intake.outputs.run_key }}
           actor: ${{ needs.intake.outputs.actor }}
 
+  # ── handoff ─────────────────────────────────────────────────────────
+  # Queue the next stage when the current one completes successfully.
+  handoff:
+    needs: [intake, qualify-dedup, gate, advance]
+    if: needs.qualify-dedup.outputs.duplicate != 'true' && needs.gate.outputs.gate_passed == 'true' && needs.gate.outputs.state_valid == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      next_stage: ${{ steps.resolve.outputs.next_stage }}
+      next_run_key: ${{ steps.next-run-key.outputs.run_key }}
+      dispatched: ${{ steps.dispatch.outputs.dispatched }}
+    steps:
+      - name: Resolve next stage
+        id: resolve
+        shell: bash
+        env:
+          REQUESTED_STAGE: ${{ needs.intake.outputs.requested_stage }}
+        run: |
+          case "$REQUESTED_STAGE" in
+            kickoff)
+              next_stage="clarification"
+              ;;
+            clarification)
+              next_stage="design"
+              ;;
+            design)
+              next_stage="plan"
+              ;;
+            plan)
+              next_stage="execution"
+              ;;
+            execution)
+              next_stage="review"
+              ;;
+            review)
+              next_stage="merge"
+              ;;
+            merge)
+              next_stage="follow-up-capture"
+              ;;
+            follow-up-capture)
+              next_stage="closeout"
+              ;;
+            closeout)
+              next_stage=""
+              ;;
+            *)
+              echo "::error::Unknown requested_stage '$REQUESTED_STAGE'"
+              exit 1
+              ;;
+          esac
+
+          echo "next_stage=$next_stage" >> "$GITHUB_OUTPUT"
+
+      - name: Generate next run key
+        if: steps.resolve.outputs.next_stage != ''
+        id: next-run-key
+        shell: bash
+        env:
+          REPO_NAME: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+          NEXT_STAGE: ${{ steps.resolve.outputs.next_stage }}
+        run: |
+          timestamp=$(date +%s%3N)
+          run_key="${REPO_NAME}/${ISSUE_NUMBER}/${NEXT_STAGE}/${timestamp}"
+          echo "run_key=$run_key" >> "$GITHUB_OUTPUT"
+          echo "timestamp=$timestamp" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch next stage
+        if: steps.resolve.outputs.next_stage != ''
+        id: dispatch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+          ACTOR: ${{ needs.intake.outputs.actor }}
+          NEXT_STAGE: ${{ steps.resolve.outputs.next_stage }}
+          NEXT_RUN_KEY: ${{ steps.next-run-key.outputs.run_key }}
+          NEXT_TIMESTAMP: ${{ steps.next-run-key.outputs.timestamp }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          gh api "repos/${GITHUB_REPOSITORY}/dispatches" \
+            -f event_type=orchestration-start \
+            -F "client_payload[issue_number]=$ISSUE_NUMBER" \
+            -f "client_payload[requested_stage]=$NEXT_STAGE" \
+            -f "client_payload[run_key]=$NEXT_RUN_KEY" \
+            -f "client_payload[actor]=$ACTOR" \
+            -f "client_payload[timestamp]=$NEXT_TIMESTAMP"
+
+          echo "dispatched=true" >> "$GITHUB_OUTPUT"
+
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+          ### Orchestration run — next stage queued
+          <!-- gpa:run-status:$NEXT_STAGE:started:$NEXT_RUN_KEY -->
+
+          | Field | Value |
+          |-------|-------|
+          | **Run key** | \`$NEXT_RUN_KEY\` |
+          | **Requested stage** | \`$NEXT_STAGE\` |
+          | **Actor** | @$ACTOR |
+          | **Result** | :rocket: Next stage queued automatically |
+          | **Parent run** | [$RUN_ID]($RUN_URL) |
+
+          The next stage was dispatched automatically after the current stage passed.
+          COMMENT_EOF
+          )"
+
+      - name: Record terminal stage
+        if: steps.resolve.outputs.next_stage == ''
+        shell: bash
+        run: |
+          echo "::notice::Current stage is terminal; no next stage will be queued"
+
   # ── summary ─────────────────────────────────────────────────────────
   # Always-runs job that produces the Actions job summary.
   summary:
-    needs: [intake, qualify-dedup, qualify-eligible, prepare, gate, advance]
+    needs: [intake, qualify-dedup, qualify-eligible, prepare, gate, advance, handoff]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -717,6 +834,9 @@ jobs:
           REPO: ${{ github.repository }}
           TRIGGER: ${{ needs.intake.outputs.trigger }}
           RUN_HISTORY: ${{ steps.run-history.outputs.run_history }}
+          NEXT_STAGE: ${{ needs.handoff.outputs.next_stage }}
+          HANDOFF_DISPATCHED: ${{ needs.handoff.outputs.dispatched }}
+          NEXT_RUN_KEY: ${{ needs.handoff.outputs.next_run_key }}
         shell: bash
         run: |
           # Determine next-step hint based on the requested stage
@@ -764,8 +884,13 @@ jobs:
             echo "| Duplicate | ${DUPLICATE:-false} |"
             echo "| Eligible | ${ELIGIBLE:-n/a} |"
             echo "| Gate passed | ${GATE_PASSED:-n/a} |"
+            echo "| Next stage | ${NEXT_STAGE:-n/a} |"
+            echo "| Next stage queued | ${HANDOFF_DISPATCHED:-false} |"
             echo ""
             echo "### Next steps"
             echo ""
             echo "- $next_step"
+            if [ -n "${NEXT_STAGE:-}" ] && [ -n "${NEXT_RUN_KEY:-}" ]; then
+              echo "- Auto-handoff dispatched \`${NEXT_STAGE}\` with run key \`${NEXT_RUN_KEY}\`"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"

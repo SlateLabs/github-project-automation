@@ -1,0 +1,2 @@
+PyJWT[crypto]>=2.8,<3
+PyYAML>=6,<7

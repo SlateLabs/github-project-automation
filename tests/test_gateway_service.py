@@ -128,6 +128,23 @@ class GatewayServiceTests(unittest.TestCase):
             "sender": {"login": actor, "type": "User"},
         }
 
+    def _workflow_status_payload(self, *, actor: str = "trusted-user", transition_to: str = "Ready") -> dict[str, object]:
+        return {
+            "action": "edited",
+            "projects_v2_item": {
+                "node_id": "PVTI_123",
+                "field_value": {"name": transition_to},
+            },
+            "changes": {
+                "field_value": {
+                    "field_name": "Workflow Status",
+                    "from": {"name": "Backlog"},
+                    "to": {"name": transition_to},
+                }
+            },
+            "sender": {"login": actor, "type": "User"},
+        }
+
     def _request(self, payload: dict[str, object], delivery_id: str = "delivery-1") -> tuple[int, dict[str, object]]:
         raw_body = json.dumps(payload).encode("utf-8")
         headers = {
@@ -158,6 +175,14 @@ class GatewayServiceTests(unittest.TestCase):
         self.assertEqual(status, 202)
         self.assertEqual(body["outcome"], "skipped")
         self.assertEqual(self.github.dispatches, [])
+
+    def test_accepts_workflow_status_transition(self) -> None:
+        self.github.context = ProjectItemContext(
+            **{**self.github.context.__dict__, "status": "Ready", "workflow_stage": None}
+        )
+        status, body = self._request(self._workflow_status_payload())
+        self.assertEqual(status, 200)
+        self.assertEqual(body["outcome"], "dispatched")
 
     def test_skips_unsupported_event_type(self) -> None:
         payload = self._payload()
@@ -214,9 +239,41 @@ class GatewayServiceTests(unittest.TestCase):
                 "requested_stage": "kickoff",
                 "run_key": body["run_key"],
                 "actor": "trusted-user",
-                "timestamp": "2024-03-09T16:00:00Z",
+                "timestamp": "1710000000000",
             },
         )
+
+    def test_accepts_ping_event(self) -> None:
+        payload = {"zen": "Practicality beats purity.", "sender": {"login": "trusted-user", "type": "User"}}
+        raw_body = json.dumps(payload).encode("utf-8")
+        status, body = self.app.handle(
+            "POST",
+            "/github/webhook",
+            {
+                "X-Github-Delivery": "delivery-ping",
+                "X-Github-Event": "ping",
+                "X-Hub-Signature-256": signature(self.secret, raw_body),
+            },
+            raw_body,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {"outcome": "accepted", "event": "ping"})
+
+    def test_headers_are_case_insensitive(self) -> None:
+        payload = self._payload()
+        raw_body = json.dumps(payload).encode("utf-8")
+        status, body = self.app.handle(
+            "POST",
+            "/github/webhook",
+            {
+                "X-Github-Delivery": "delivery-mixed-case",
+                "X-Github-Event": "projects_v2_item",
+                "X-Hub-Signature-256": signature(self.secret, raw_body),
+            },
+            raw_body,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["outcome"], "dispatched")
 
     def test_record_only_actor_gets_pending_review(self) -> None:
         status, body = self._request(self._payload(actor="member-user"))
@@ -274,6 +331,11 @@ class GatewayServiceTests(unittest.TestCase):
 
     def test_health_endpoint(self) -> None:
         status, body = self.app.handle("GET", "/healthz", {}, b"")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {"ok": True})
+
+    def test_health_endpoint_allows_trailing_slash(self) -> None:
+        status, body = self.app.handle("GET", "/healthz/", {}, b"")
         self.assertEqual(status, 200)
         self.assertEqual(body, {"ok": True})
 

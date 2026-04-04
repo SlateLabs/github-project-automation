@@ -143,7 +143,30 @@ else
 fi
 
 echo ""
-echo "7. Job summary includes trigger source"
+echo "7. Automatic handoff configuration"
+
+if grep -q 'Resolve next stage' "$WORKFLOW"; then
+  check "next-stage resolution step present" "pass"
+else
+  check "next-stage resolution step present" "fail"
+fi
+
+if grep -q 'repos/${GITHUB_REPOSITORY}/dispatches' "$WORKFLOW"; then
+  check "next-stage repository_dispatch present" "pass"
+else
+  check "next-stage repository_dispatch present" "fail"
+fi
+
+if grep -A1 'kickoff)' "$WORKFLOW" | grep -q 'next_stage="clarification"' && \
+   grep -A1 'design)' "$WORKFLOW" | grep -q 'next_stage="plan"' && \
+   grep -A1 'merge)' "$WORKFLOW" | grep -q 'next_stage="follow-up-capture"'; then
+  check "stage handoff map includes key transitions" "pass"
+else
+  check "stage handoff map includes key transitions" "fail"
+fi
+
+echo ""
+echo "8. Job summary includes trigger source"
 
 if grep -q 'TRIGGER.*steps.normalize.outputs.trigger' "$WORKFLOW" && grep -q 'Trigger' "$WORKFLOW"; then
   check "job summary includes trigger field" "pass"

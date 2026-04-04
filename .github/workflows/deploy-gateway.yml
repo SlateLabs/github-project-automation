@@ -1,0 +1,88 @@
+name: Deploy Gateway
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'gateway/**'
+      - 'config/**'
+      - 'requirements.txt'
+      - 'Procfile'
+      - 'app.py'
+      - '.github/workflows/deploy-gateway.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-gateway-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run gateway tests
+        run: python -m unittest discover -s tests -p 'test_*.py'
+
+      - name: Validate workflow structure
+        run: bash tests/test_workflow_structure.sh
+
+      - name: Validate dispatch normalization
+        run: bash tests/test_dispatch_normalization.sh
+
+      - name: Validate config
+        run: python scripts/validate-config.py
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Deploy Cloud Run service
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          service: ${{ vars.CLOUD_RUN_SERVICE }}
+          region: ${{ vars.GCP_REGION }}
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          source: .
+          secrets: |-
+            GITHUB_WEBHOOK_SECRET=github-webhook-secret:latest
+            GITHUB_APP_ID=github-app-id:latest
+            GITHUB_APP_INSTALLATION_ID=github-app-installation-id:latest
+            GITHUB_APP_PRIVATE_KEY=github-app-private-key:latest
+          flags: >-
+            --service-account=${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
+
+      - name: Job summary
+        run: |
+          {
+            echo "## Gateway Deploy"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Service | \`${{ vars.CLOUD_RUN_SERVICE }}\` |"
+            echo "| Region | \`${{ vars.GCP_REGION }}\` |"
+            echo "| Project | \`${{ vars.GCP_PROJECT_ID }}\` |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| URL | ${{ steps.deploy.outputs.url }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

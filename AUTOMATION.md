@@ -105,7 +105,7 @@ Eligibility validation is shared but not yet at full parity: the manual path val
 The gateway is the org-level listener for `projects_v2_item` events. It stays intentionally thin:
 
 - Validate `X-GitHub-Delivery`, `X-GitHub-Event`, and `X-Hub-Signature-256`
-- Accept only `projects_v2_item` deliveries that prove a `Status: Backlog -> Ready` transition
+- Accept only `projects_v2_item` deliveries that prove a `Status` or `Workflow Status` transition of `Backlog -> Ready`
 - Resolve the project item via GraphQL to read the linked issue, `Repository`, `Status`, and `Workflow Status`/`Workflow Stage` fields
 - Enforce kickoff eligibility (`Issue` item type, linked source issue, configured participating repo, `Ready` status, `Backlog` workflow stage, no `do-not-automate` label)
 - Enforce trusted-actor outcomes using `config/trust-policy.yml`
@@ -124,12 +124,122 @@ The gateway is the org-level listener for `projects_v2_item` events. It stays in
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `GITHUB_WEBHOOK_SECRET` | Yes | HMAC secret for `X-Hub-Signature-256` validation |
-| `GITHUB_DISPATCH_TOKEN` | Yes | Token used for GraphQL lookups, issue labeling, and `repository_dispatch` |
+| `GITHUB_APP_ID` | Yes | GitHub App ID used to mint installation access tokens |
+| `GITHUB_APP_INSTALLATION_ID` | Yes | GitHub App installation ID for the participating repos |
+| `GITHUB_APP_PRIVATE_KEY` | Yes | PEM-encoded GitHub App private key |
+| `GITHUB_DISPATCH_TOKEN` | No | Legacy fallback token for local bootstrap; prefer GitHub App auth |
 | `GITHUB_API_URL` | No | Override GitHub API base URL; defaults to `https://api.github.com` |
 | `GPA_REPO_CONFIG_PATH` | No | Path to `config/repos.yml` |
 | `GPA_TRUST_POLICY_PATH` | No | Path to `config/trust-policy.yml` |
 | `GPA_DEDUP_WINDOW_MS` | No | Dedup window; defaults to `60000` |
 | `PORT` | No | HTTP port; defaults to `8080` |
+
+### Cloud Run source deployment
+
+The simplest production path is a Cloud Run source deploy with Secret Manager-backed env vars:
+
+```bash
+gcloud run deploy github-project-automation-gateway \
+  --source . \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --service-account github-automation-runner@PROJECT_ID.iam.gserviceaccount.com \
+  --set-secrets GITHUB_WEBHOOK_SECRET=github-webhook-secret:latest \
+  --set-secrets GITHUB_APP_ID=github-app-id:latest \
+  --set-secrets GITHUB_APP_INSTALLATION_ID=github-app-installation-id:latest \
+  --set-secrets GITHUB_APP_PRIVATE_KEY=github-app-private-key:latest
+```
+
+This repo does not require a `Dockerfile` for the initial rollout. Cloud Run can build from source using `requirements.txt`, and the root-level `app.py` provides the default Python entrypoint expected by Google buildpacks.
+
+### GitHub Actions auto-deploy
+
+This repo includes [deploy-gateway.yml](/Users/jlamb/Projects/slatelabs/github-project-automation/.github/workflows/deploy-gateway.yml), which redeploys the Cloud Run gateway on pushes to `main` when gateway/runtime files change.
+
+The workflow:
+
+- runs the gateway/unit tests
+- validates workflow structure and config
+- authenticates to Google Cloud with GitHub OIDC via Workload Identity Federation
+- deploys the existing Cloud Run service from source
+
+#### Required GitHub repository variables
+
+Set these in `Settings -> Secrets and variables -> Actions -> Variables`:
+
+| Variable | Example value | Purpose |
+|----------|---------------|---------|
+| `GCP_PROJECT_ID` | `github-gateway` | Google Cloud project id |
+| `GCP_REGION` | `us-central1` | Cloud Run region |
+| `CLOUD_RUN_SERVICE` | `github-project-automation-gateway` | Cloud Run service name |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | `projects/395454765628/locations/global/workloadIdentityPools/github/providers/github-actions` | Full Workload Identity Provider resource name |
+| `GCP_DEPLOY_SERVICE_ACCOUNT` | `github-gateway-deployer@github-gateway.iam.gserviceaccount.com` | Service account impersonated by GitHub Actions |
+| `GCP_RUNTIME_SERVICE_ACCOUNT` | `github-automation-runner@github-gateway.iam.gserviceaccount.com` | Service account attached to the running Cloud Run service |
+
+No GitHub secret is required for GCP auth if OIDC is configured correctly. Runtime secrets stay in Google Secret Manager and are injected during deploy.
+
+#### Required Google Cloud setup for GitHub OIDC
+
+The deploy workflow needs a dedicated deployer identity. Recommended shape:
+
+1. Create a deployer service account, for example:
+   - `github-gateway-deployer@github-gateway.iam.gserviceaccount.com`
+2. Grant that deployer service account:
+   - `roles/run.admin`
+   - `roles/iam.serviceAccountUser` on `github-automation-runner@github-gateway.iam.gserviceaccount.com`
+3. Create a Workload Identity Pool and GitHub OIDC provider
+4. Grant the GitHub repo permission to impersonate the deployer service account via `roles/iam.workloadIdentityUser`
+
+Recommended `gcloud` bootstrap, replacing values as needed:
+
+```bash
+PROJECT_ID=github-gateway
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
+POOL_ID=github
+PROVIDER_ID=github-actions
+DEPLOYER_SA=github-gateway-deployer@${PROJECT_ID}.iam.gserviceaccount.com
+RUNTIME_SA=github-automation-runner@${PROJECT_ID}.iam.gserviceaccount.com
+
+gcloud iam service-accounts create github-gateway-deployer \
+  --project "$PROJECT_ID" \
+  --display-name "GitHub Actions Cloud Run deployer"
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member "serviceAccount:${DEPLOYER_SA}" \
+  --role "roles/run.admin"
+
+gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
+  --project "$PROJECT_ID" \
+  --member "serviceAccount:${DEPLOYER_SA}" \
+  --role "roles/iam.serviceAccountUser"
+
+gcloud iam workload-identity-pools create "$POOL_ID" \
+  --project "$PROJECT_ID" \
+  --location global \
+  --display-name "GitHub Actions"
+
+gcloud iam workload-identity-pools providers create-oidc "$PROVIDER_ID" \
+  --project "$PROJECT_ID" \
+  --location global \
+  --workload-identity-pool "$POOL_ID" \
+  --display-name "GitHub OIDC" \
+  --issuer-uri "https://token.actions.githubusercontent.com" \
+  --attribute-mapping "google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref,attribute.actor=assertion.actor" \
+  --attribute-condition "assertion.repository=='SlateLabs/github-project-automation'"
+
+gcloud iam service-accounts add-iam-policy-binding "$DEPLOYER_SA" \
+  --project "$PROJECT_ID" \
+  --role "roles/iam.workloadIdentityUser" \
+  --member "principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/attribute.repository/SlateLabs/github-project-automation"
+```
+
+Use this resulting provider name as `GCP_WORKLOAD_IDENTITY_PROVIDER`:
+
+```bash
+projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/providers/${PROVIDER_ID}
+```
+
+This follows GitHub’s OIDC guidance and Google’s `google-github-actions/auth` / `deploy-cloudrun` action model.
 
 ### Kickoff payload contract
 
@@ -137,11 +247,11 @@ The listener is deliberately strict because `projects_v2_item` webhooks are stil
 
 - `X-GitHub-Event: projects_v2_item`
 - `projects_v2_item.node_id` or `projects_v2_item.id`
-- `changes.field_value.field_name == "Status"`
+- `changes.field_value.field_name == "Status"` or `"Workflow Status"`
 - `changes.field_value.from == "Backlog"`
 - `changes.field_value.to == "Ready"`
 
-If the listener cannot prove that the event is a kickoff transition, it fails closed with a `202 skipped` response rather than guessing from partial payload state.
+If the listener cannot prove that the event is a kickoff transition, it fails closed with a `202 skipped` response rather than guessing from partial payload state. In the current SlateLabs org project, the automation lifecycle is represented by `Workflow Status`, so that field is accepted alongside the default `Status` field.
 
 ### Trusted-actor outcomes
 
@@ -203,6 +313,32 @@ The default workflow stages are: Backlog → Clarification → Design → Plan �
 ## Stage actions
 
 Stage actions run automatically after eligibility validation passes. Some actions (like the design scaffold) run **before** their gate check to create the artifacts the gate will then evaluate; others run after gate checks pass. Each action's trigger timing is documented below.
+
+### Automatic stage handoff
+
+`orchestration-dispatch.yml` is the canonical stage runner. When a stage passes its gate, the workflow now auto-dispatches the next stage back into the same orchestrator using `repository_dispatch`. This turns the existing stage actions into a connected state machine instead of a set of isolated entry points.
+
+The current handoff sequence is:
+
+| Completed stage | Auto-queued next stage |
+|-----------------|------------------------|
+| `kickoff` | `clarification` |
+| `clarification` | `design` |
+| `design` | `plan` |
+| `plan` | `execution` |
+| `execution` | `review` |
+| `review` | `merge` |
+| `merge` | `follow-up-capture` |
+| `follow-up-capture` | `closeout` |
+| `closeout` | _(terminal)_ |
+
+This is intentionally "fail forward" for scaffold-driven stages:
+
+- `design`, `plan`, and `execution` typically auto-queue, scaffold their required artifact, and then fail their gate until a human or agent fills in the discussion/comment/PR.
+- `review`, `merge`, and `closeout` remain machine-checked stages; they only auto-advance when the required repo artifacts already satisfy the gate.
+- Each auto-handoff posts a `gpa:run-status:<stage>:started:<run_key>` marker comment on the issue so the run history remains queryable across stages.
+
+The standalone `workflow_dispatch` wrappers remain as operator escape hatches, but they are no longer the intended happy-path glue between successful stages.
 
 ### Design discussion scaffold
 
