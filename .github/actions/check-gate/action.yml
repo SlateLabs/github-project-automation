@@ -376,7 +376,7 @@ runs:
             fi
             ;;
 
-          execution)
+          execution|feedback-implementation)
             # Gate 5→6: Execution (§4 Gate 5→6 checks 1–4)
             # 1. Check for branch matching <issue-number>-* or <issue-number>/*
             branch_exists=$(gh api "repos/{owner}/{repo}/branches" --paginate \
@@ -473,139 +473,76 @@ runs:
             fi
             ;;
 
-          review)
-            # Gate: Review (§4 Gate 6→7)
-            # Implemented checks:
-            #   1. A PR referencing this issue exists (open or merged)
-            #   2. PR has at least one approving review
-            #   3. No unresolved changes-requested reviews remain
-            # Skipped checks (§4 Gate 6→7 — not yet implemented per gate contract rule 2):
-            #   - SKIPPED: All required CI status checks pass on the PR head commit
-            #   - SKIPPED: No unresolved review threads remain (or each has a GATE-WAIVER reply)
-            #   - SKIPPED: PR body contains ## Review Checklist with items for accessibility,
-            #     usability/content, documentation, hygiene — each marked complete or waived
-            #   - SKIPPED: Approving review is from a trusted actor (non-author)
-
-            # Find PR referencing this issue — deterministic: prefer branch convention,
-            # then search by issue reference. For open PRs, prefer most recently updated.
-            review_pr_json=""
-            review_pr_number=""
-
-            # Primary: branch convention (deterministic)
-            review_pr_json=$(gh pr list --state open --json number,headRefName,updatedAt --limit 100 \
+          deploy-review)
+            # Review-ready waiting state:
+            #   1. An open non-draft PR exists for the issue
+            #   2. A review-ready summary comment exists on the issue
+            review_pr_json=$(gh pr list --state open --json number,isDraft,url,headRefName,body,updatedAt --limit 100 \
               --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))] | sort_by(.updatedAt) | reverse | .[0]" 2>/dev/null || echo '')
             review_pr_number=$(echo "$review_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
 
             if [ -z "$review_pr_number" ]; then
-              # Fallback: search by issue reference (most recently updated)
-              review_pr_json=$(gh pr list --state open --search "\"#${ISSUE_NUMBER}\" in:title,body" \
-                --json number,headRefName,updatedAt --jq 'sort_by(.updatedAt) | reverse | .[0]' 2>/dev/null || echo '')
-              review_pr_number=$(echo "$review_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
-            fi
-
-            if [ -z "$review_pr_number" ]; then
-              # Check merged PRs (most recently merged)
-              review_pr_json=$(gh pr list --state merged --json number,headRefName,mergedAt --limit 500 \
-                --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))] | sort_by(.mergedAt) | reverse | .[0]" 2>/dev/null || echo '')
-              review_pr_number=$(echo "$review_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
-            fi
-
-            if [ -z "$review_pr_number" ]; then
-              # Last resort: search merged PRs by reference
-              review_pr_json=$(gh pr list --state merged --search "\"#${ISSUE_NUMBER}\" in:title,body" \
-                --json number,mergedAt --jq 'sort_by(.mergedAt) | reverse | .[0]' 2>/dev/null || echo '')
-              review_pr_number=$(echo "$review_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
-            fi
-
-            if [ -z "$review_pr_number" ]; then
-              if ! check_waiver "review-pr"; then
-                unmet+=("No PR found referencing issue #${ISSUE_NUMBER} — a PR must exist for review gate")
+              if ! check_waiver "deploy-review-pr"; then
+                unmet+=("No open PR found referencing issue #${ISSUE_NUMBER} — a review-ready PR is required")
               fi
             else
-              # Fetch reviews for the PR (include submitted_at for chronological ordering)
-              reviews_json=$(gh api "repos/{owner}/{repo}/pulls/${review_pr_number}/reviews" \
-                --jq '[.[] | {state: .state, user: .user.login, submitted_at: .submitted_at}]' 2>/dev/null || echo '[]')
-
-              # Check for at least one APPROVED review
-              approved_count=$(echo "$reviews_json" | jq '[.[] | select(.state == "APPROVED")] | length')
-              if [ "$approved_count" -eq 0 ]; then
-                if ! check_waiver "review-approval"; then
-                  unmet+=("PR #$review_pr_number has no approving review — at least one APPROVED review is required")
-                fi
-              fi
-
-              # Check for unresolved CHANGES_REQUESTED reviews.
-              # A CHANGES_REQUESTED review is resolved if the same user LATER submitted
-              # an APPROVED or DISMISSED review (chronological ordering via submitted_at).
-              changes_requested_users=$(echo "$reviews_json" | jq -r '[.[] | select(.state == "CHANGES_REQUESTED") | .user] | unique | .[]' 2>/dev/null || true)
-              unresolved_cr=""
-              while IFS= read -r cr_user; do
-                [ -z "$cr_user" ] && continue
-                # Find the latest CHANGES_REQUESTED timestamp for this user
-                latest_cr_time=$(echo "$reviews_json" | jq -r --arg user "$cr_user" \
-                  '[.[] | select(.user == $user and .state == "CHANGES_REQUESTED") | .submitted_at] | sort | last')
-                # Check if this user has an APPROVED or DISMISSED review AFTER the latest CR
-                resolved=$(echo "$reviews_json" | jq --arg user "$cr_user" --arg cr_time "$latest_cr_time" \
-                  '[.[] | select(.user == $user and (.state == "APPROVED" or .state == "DISMISSED") and .submitted_at > $cr_time)] | length')
-                if [ "$resolved" -eq 0 ]; then
-                  unresolved_cr="${unresolved_cr}${cr_user} "
-                fi
-              done <<< "$changes_requested_users"
-
-              if [ -n "$unresolved_cr" ]; then
-                if ! check_waiver "review-changes-requested"; then
-                  unmet+=("PR #$review_pr_number has unresolved changes-requested reviews from: ${unresolved_cr}— resolve or dismiss before advancing")
+              review_is_draft=$(echo "$review_pr_json" | jq -r '.isDraft // false' 2>/dev/null || echo "false")
+              if [ "$review_is_draft" = "true" ]; then
+                if ! check_waiver "deploy-review-draft"; then
+                  unmet+=("PR #$review_pr_number is still draft — mark it ready for review before entering deploy-review")
                 fi
               fi
             fi
 
-            # Document skipped checks in output for operator visibility
-            echo "::notice::Review gate skipped checks (not yet implemented): CI status checks, unresolved review threads, Review Checklist completion, trusted/non-author approval semantics"
+            review_ready_marker=$(gh issue view "$ISSUE_NUMBER" --comments --json comments \
+              --jq '.comments[].body // ""' 2>/dev/null | grep -F 'gpa:run-status:deploy-review:completed:' || true)
+            if [ -z "$review_ready_marker" ]; then
+              if ! check_waiver "deploy-review-summary"; then
+                unmet+=("No review-ready summary comment found on issue #${ISSUE_NUMBER}")
+              fi
+            fi
             ;;
 
           merge)
-            # Gate: Merge (§4 Gate 7→8)
-            # Implemented checks:
-            #   1. A merged PR referencing this issue exists
-            #   2. The merged PR had an approving review
-            # Skipped checks (§4 Gate 7→8 — not yet implemented per gate contract rule 2):
-            #   - SKIPPED: PR is mergeable (no merge conflicts, branch protection satisfied)
-            #   - SKIPPED: PR labels do not include do-not-merge
-            #   - SKIPPED: The most recent commit status is success
-
-            # Deterministic PR selection: prefer branch convention, sorted by merge time
-            merged_pr_number=""
-
-            # Primary: branch convention (most recently merged)
-            merged_pr_json=$(gh pr list --state merged --json number,headRefName,mergedAt --limit 500 \
-              --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))] | sort_by(.mergedAt) | reverse | .[0]" 2>/dev/null || echo '')
-            merged_pr_number=$(echo "$merged_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
-
-            if [ -z "$merged_pr_number" ]; then
-              # Fallback: search by issue reference (most recently merged)
-              merged_pr_json=$(gh pr list --state merged --search "\"#${ISSUE_NUMBER}\" in:title,body" \
-                --json number,mergedAt --jq 'sort_by(.mergedAt) | reverse | .[0]' 2>/dev/null || echo '')
-              merged_pr_number=$(echo "$merged_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
-            fi
-
-            if [ -z "$merged_pr_number" ]; then
+            # Merge gate:
+            #   1. An open PR exists for the issue
+            #   2. A trusted operator has posted gpa:approve on the issue
+            merge_pr_json=$(gh pr list --state open --json number,isDraft,url,headRefName,updatedAt --limit 100 \
+              --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))] | sort_by(.updatedAt) | reverse | .[0]" 2>/dev/null || echo '')
+            merge_pr_number=$(echo "$merge_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
+            if [ -z "$merge_pr_number" ]; then
               if ! check_waiver "merge-pr"; then
-                unmet+=("No merged PR found referencing issue #${ISSUE_NUMBER} — a PR must be merged for the merge gate")
-              fi
-            else
-              # Verify the merged PR had an approving review
-              merge_reviews_json=$(gh api "repos/{owner}/{repo}/pulls/${merged_pr_number}/reviews" \
-                --jq '[.[] | select(.state == "APPROVED")] | length' 2>/dev/null || echo '0')
-
-              if [ "$merge_reviews_json" -eq 0 ]; then
-                if ! check_waiver "merge-approval"; then
-                  unmet+=("Merged PR #$merged_pr_number had no approving review — review approval is required before merge")
-                fi
+                unmet+=("No open PR found referencing issue #${ISSUE_NUMBER} — an open PR is required for merge")
               fi
             fi
 
-            # Document skipped checks in output for operator visibility
-            echo "::notice::Merge gate skipped checks (not yet implemented): mergeability/conflict check, do-not-merge label check, latest commit status check"
+            approval_comments_json=$(gh issue view "$ISSUE_NUMBER" --comments --json comments \
+              --jq '.comments[] | {author: .author.login, body: .body}' 2>/dev/null || true)
+            approval_found="false"
+            while IFS= read -r comment_line; do
+              [ -z "$comment_line" ] && continue
+              comment_author=$(echo "$comment_line" | jq -r '.author // ""')
+              comment_body=$(echo "$comment_line" | jq -r '.body // ""')
+              author_trusted="false"
+              if [ -n "$trusted_users_list" ]; then
+                while IFS= read -r tuser; do
+                  if [ "$tuser" = "$comment_author" ]; then
+                    author_trusted="true"
+                    break
+                  fi
+                done <<< "$trusted_users_list"
+              fi
+              if [ "$author_trusted" = "true" ] && echo "$comment_body" | grep -qi '^gpa:approve\b'; then
+                approval_found="true"
+                break
+              fi
+            done < <(echo "$approval_comments_json" | jq -c '.' 2>/dev/null || true)
+
+            if [ "$approval_found" != "true" ]; then
+              if ! check_waiver "merge-approval"; then
+                unmet+=("No trusted operator approval comment found — post gpa:approve on the issue before merge")
+              fi
+            fi
             ;;
 
           closeout)

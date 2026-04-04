@@ -57,7 +57,7 @@ run_validation() {
   local error_output
   error_output=$(mktemp)
 
-  VALID_STAGES="kickoff clarification design plan execution follow-up-capture review merge closeout"
+  VALID_STAGES="kickoff clarification design plan execution deploy-review feedback-implementation follow-up-capture merge closeout"
 
   (
     set -euo pipefail
@@ -326,7 +326,7 @@ echo "=== Run Key Tests ==="
 
 echo ""
 echo "14. All valid stages accepted"
-for stage in kickoff clarification design plan execution follow-up-capture review merge closeout; do
+for stage in kickoff clarification design plan execution deploy-review feedback-implementation follow-up-capture merge closeout; do
   if run_validation "repository_dispatch" \
     "1" "$stage" "Org/repo/1/${stage}/100" "actor" "100" "PVTI_1"; then
     PASS=$((PASS + 1))

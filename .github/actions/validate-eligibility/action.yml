@@ -127,7 +127,7 @@ runs:
         fi
 
         # --- 5. Validate requested stage is known ---
-        valid_stages="kickoff clarification design plan execution follow-up-capture review merge closeout"
+        valid_stages="kickoff clarification design plan execution deploy-review feedback-implementation follow-up-capture merge closeout"
         stage_valid="false"
         for s in $valid_stages; do
           if [ "$s" = "$REQUESTED_STAGE" ]; then

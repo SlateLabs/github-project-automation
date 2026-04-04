@@ -185,6 +185,7 @@ fi
 
 if grep -A1 'kickoff)' "$WORKFLOW" | grep -q 'next_stage="clarification"' && \
    grep -A1 'design)' "$WORKFLOW" | grep -q 'next_stage="plan"' && \
+   grep -A1 'execution)' "$WORKFLOW" | grep -q 'next_stage="deploy-review"' && \
    grep -A1 'merge)' "$WORKFLOW" | grep -q 'next_stage="follow-up-capture"'; then
   check "stage handoff map includes key transitions" "pass"
 else
