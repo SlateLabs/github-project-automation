@@ -540,6 +540,7 @@ Current enforcement in this slice:
 - A `gpa:review-ready` marker must exist on the issue (`<!-- gpa:review-ready -->` is supported)
 - Commands are only valid if posted after the latest `gpa:review-ready` marker
 - The gateway evaluates full issue comment history and applies `latest valid command wins`
+- The webhook `issue_comment` payload is merged as an authoritative candidate to avoid stale-list races immediately after comment creation/edit
 - Command comments are deduplicated by `{repo}/{issue_number}/{comment_id}` within the gateway dedup window
 
 This keeps operator feedback/approval intake GitHub-native and resumable without introducing an external state store.

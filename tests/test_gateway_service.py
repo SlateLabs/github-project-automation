@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import unittest
+from datetime import datetime, timezone
 
 from gateway.app import GatewayApplication
 from gateway.dedup import InMemoryDedupStore
@@ -172,7 +173,11 @@ class GatewayServiceTests(unittest.TestCase):
         body: str = "gpa:feedback tighten retry guardrails",
         comment_id: int = 5001,
         action: str = "created",
+        created_at_ms: int | None = None,
     ) -> dict[str, object]:
+        if created_at_ms is None:
+            created_at_ms = self.now_ms
+        created_at = datetime.fromtimestamp(created_at_ms / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
         return {
             "action": action,
             "repository": {"full_name": "SlateLabs/github-project-automation"},
@@ -180,6 +185,7 @@ class GatewayServiceTests(unittest.TestCase):
             "comment": {
                 "id": comment_id,
                 "body": body,
+                "created_at": created_at,
             },
             "sender": {"login": actor, "type": "User"},
         }
@@ -189,13 +195,15 @@ class GatewayServiceTests(unittest.TestCase):
         payload: dict[str, object],
         *,
         delivery_id: str = "delivery-comment-1",
+        persist_comment: bool = True,
     ) -> tuple[int, dict[str, object]]:
-        self.github.upsert_issue_comment(
-            comment_id=int((payload.get("comment") or {}).get("id") or 0),
-            author=str((payload.get("sender") or {}).get("login") or ""),
-            body=str((payload.get("comment") or {}).get("body") or ""),
-            created_at_ms=self.now_ms,
-        )
+        if persist_comment:
+            self.github.upsert_issue_comment(
+                comment_id=int((payload.get("comment") or {}).get("id") or 0),
+                author=str((payload.get("sender") or {}).get("login") or ""),
+                body=str((payload.get("comment") or {}).get("body") or ""),
+                created_at_ms=self.now_ms,
+            )
         raw_body = json.dumps(payload).encode("utf-8")
         headers = {
             "X-GitHub-Delivery": delivery_id,
@@ -274,6 +282,46 @@ class GatewayServiceTests(unittest.TestCase):
         self.assertEqual(client_payload["source_command"], "feedback")
         self.assertEqual(client_payload["feedback_instructions"], "tighten retry guardrails")
 
+    def test_issue_comment_dispatches_when_github_comment_list_lags(self) -> None:
+        self.github.issue_comments = [
+            {
+                "id": 4000,
+                "created_at_ms": self.now_ms - 10_000,
+                "author": "trusted-user",
+                "body": "<!-- gpa:review-ready -->",
+            }
+        ]
+        status, body = self._issue_comment_request(
+            self._issue_comment_payload(comment_id=5050, body="gpa:feedback test gateway intake"),
+            delivery_id="delivery-comment-50",
+            persist_comment=False,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["outcome"], "dispatched")
+        self.assertEqual(self.github.dispatches[0][2]["requested_stage"], "feedback-implementation")
+        self.assertEqual(self.github.dispatches[0][2]["feedback_instructions"], "test gateway intake")
+
+    def test_issue_comment_payload_overrides_stale_api_body_for_same_comment(self) -> None:
+        self.github.issue_comments.extend(
+            [
+                {
+                    "id": 5051,
+                    "created_at_ms": self.now_ms,
+                    "author": "trusted-user",
+                    "body": "non-command stale body",
+                }
+            ]
+        )
+        status, body = self._issue_comment_request(
+            self._issue_comment_payload(comment_id=5051, body="gpa:feedback test gateway intake"),
+            delivery_id="delivery-comment-51",
+            persist_comment=False,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["outcome"], "dispatched")
+        self.assertEqual(self.github.dispatches[0][2]["requested_stage"], "feedback-implementation")
+        self.assertEqual(self.github.dispatches[0][2]["feedback_instructions"], "test gateway intake")
+
     def test_issue_comment_approve_dispatches_merge_stage(self) -> None:
         status, body = self._issue_comment_request(
             self._issue_comment_payload(body="gpa:approve", comment_id=5002),
@@ -332,7 +380,11 @@ class GatewayServiceTests(unittest.TestCase):
             ]
         )
         status, body = self._issue_comment_request(
-            self._issue_comment_payload(comment_id=5011, body="gpa:feedback first command"),
+            self._issue_comment_payload(
+                comment_id=5011,
+                body="gpa:feedback first command",
+                created_at_ms=self.now_ms - 20,
+            ),
             delivery_id="delivery-comment-11",
         )
         self.assertEqual(status, 202)

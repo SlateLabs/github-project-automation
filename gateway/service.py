@@ -7,6 +7,7 @@ import hmac
 import json
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from gateway.dedup import InMemoryDedupStore
@@ -294,6 +295,7 @@ class GatewayService:
         comment = payload.get("comment") or {}
         comment_id = int(comment.get("id") or 0)
         body = str(comment.get("body") or "")
+        now_ms = self.clock()
 
         parsed = parse_operator_command(body)
         if parsed is None:
@@ -326,6 +328,13 @@ class GatewayService:
             comments = self.github_client.get_issue_comments(repo_full_name, issue_number)
         except GitHubApiError as exc:
             return GatewayResult(502, {"outcome": "error", "reason": f"Failed to query issue comments: {exc}"})
+
+        comments = self._merge_webhook_comment(
+            comments=comments,
+            comment=comment,
+            actor=actor,
+            fallback_created_at_ms=now_ms,
+        )
 
         latest_review_ready_ms = find_latest_review_ready_marker_ms(comments)
         if latest_review_ready_ms is None:
@@ -371,7 +380,6 @@ class GatewayService:
             )
 
         comment_key = f"{repo_full_name}/{issue_number}/{comment_id}"
-        now_ms = self.clock()
         if self.dedup_store.seen_operator_comment(comment_key, now_ms):
             return GatewayResult(
                 202,
@@ -429,6 +437,47 @@ class GatewayService:
                 "payload": client_payload,
             },
         )
+
+    def _merge_webhook_comment(
+        self,
+        *,
+        comments: list[dict[str, object]],
+        comment: dict[str, Any],
+        actor: str,
+        fallback_created_at_ms: int,
+    ) -> list[dict[str, object]]:
+        """Ensure selection can see the command from the webhook payload.
+
+        GitHub issue comment list reads can lag immediately after webhook
+        delivery. Merge the webhook comment as an authoritative record so
+        recency/precedence evaluation is stable for intake.
+        """
+        comment_id = int(comment.get("id") or 0)
+        if comment_id <= 0:
+            return comments
+
+        merged = list(comments)
+        webhook_comment = {
+            "id": comment_id,
+            "created_at_ms": self._parse_comment_created_at_ms(comment, fallback_created_at_ms),
+            "author": actor,
+            "body": str(comment.get("body") or ""),
+        }
+        for idx, existing in enumerate(merged):
+            if int(existing.get("id") or 0) == comment_id:
+                merged[idx] = webhook_comment
+                return merged
+        merged.append(webhook_comment)
+        return merged
+
+    def _parse_comment_created_at_ms(self, comment: dict[str, Any], fallback_ms: int) -> int:
+        created_at = str(comment.get("created_at") or "")
+        if not created_at:
+            return fallback_ms
+        try:
+            return int(datetime.fromisoformat(created_at.replace("Z", "+00:00")).astimezone(timezone.utc).timestamp() * 1000)
+        except ValueError:
+            return fallback_ms
 
     def _dispatch_with_retry(
         self,
