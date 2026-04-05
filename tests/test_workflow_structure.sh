@@ -226,7 +226,7 @@ else
   check "project status mutation present" "fail"
 fi
 
-if grep -q 'target_status=' "$WORKFLOW" && grep -q 'Project Status target' "$WORKFLOW"; then
+if grep -q 'target_status=' "$WORKFLOW" && grep -q 'Project Status target' scripts/render_orchestration_summary.sh; then
   check "project status target mapping and summary present" "pass"
 else
   check "project status target mapping and summary present" "fail"
@@ -268,7 +268,7 @@ fi
 echo ""
 echo "11. Job summary includes trigger source"
 
-if grep -q 'TRIGGER.*steps.normalize.outputs.trigger' "$WORKFLOW" && grep -q 'Trigger' "$WORKFLOW"; then
+if grep -q 'TRIGGER.*steps.normalize.outputs.trigger' "$WORKFLOW" && grep -q 'Trigger' scripts/render_orchestration_summary.sh; then
   check "job summary includes trigger field" "pass"
 else
   check "job summary includes trigger field" "fail"
