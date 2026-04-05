@@ -222,7 +222,7 @@ The orchestration workflow accepts `repository_dispatch` events with `event_type
 |-------|------|------------|
 | `issue_number` | integer | Positive integer (`>= 1`) |
 | `issue_title` | string | Optional; used for workflow run naming when present |
-| `requested_stage` | string | One of: `kickoff`, `clarification`, `design`, `plan`, `execution`, `follow-up-capture`, `review`, `merge`, `closeout` |
+| `requested_stage` | string | One of: `kickoff`, `clarification`, `design`, `plan`, `execution`, `feedback-implementation`, `follow-up-capture`, `review`, `merge`, `closeout` |
 | `run_key` | string | Canonical format `<owner>/<repo>/<number>/<stage>/<timestamp>` — must be payload-consistent (see below) |
 | `actor` | string | Non-empty |
 | `timestamp` | string | Non-empty |
@@ -517,7 +517,7 @@ Defined in `config/trust-policy.yml`. See [discussion #3 §8](https://github.com
 
 ## Stage model
 
-The default workflow stages are: Backlog → Clarification → Design → Plan → Execution → Review → Merge → Closeout. Each transition has machine-testable gate conditions defined in discussion #3 §4.
+The default workflow stages are: Backlog → Clarification → Design → Plan → Execution → Review → Merge → Closeout, with feedback-loop re-entry supported via `feedback-implementation`. Each transition has machine-testable gate conditions defined in discussion #3 §4.
 
 Canonical contract primitives for the next operator-in-the-loop evolution now live in [gateway/orchestration_contract.py](gateway/orchestration_contract.py):
 - Coarse statuses: `Backlog`, `Ready`, `In Progress`, `In Review`, `Approved`, `Done`, `Blocked`
@@ -529,7 +529,7 @@ Canonical contract primitives for the next operator-in-the-loop evolution now li
 
 The webhook gateway now accepts `issue_comment` events and treats structured issue comments as machine-detectable orchestration commands:
 
-- `gpa:feedback <instructions>` dispatches `requested_stage: execution`
+- `gpa:feedback <instructions>` dispatches `requested_stage: feedback-implementation`
 - `gpa:approve` dispatches `requested_stage: merge`
 
 Current enforcement in this slice:
@@ -582,6 +582,7 @@ The current handoff sequence is:
 | `design` | `plan` |
 | `plan` | `execution` |
 | `execution` | `review` |
+| `feedback-implementation` | `review` |
 | `review` | `merge` |
 | `merge` | `follow-up-capture` |
 | `follow-up-capture` | `closeout` |

@@ -121,7 +121,7 @@ class GatewayServiceTests(unittest.TestCase):
             repo_config={
                 "SlateLabs/github-project-automation": ConfiguredRepo(
                     repo="SlateLabs/github-project-automation",
-                    enabled_stages=("kickoff", "plan", "execution", "merge"),
+                    enabled_stages=("kickoff", "plan", "execution", "feedback-implementation", "merge"),
                     shared_workflow_version="deadbeef",
                 )
             },
@@ -262,7 +262,7 @@ class GatewayServiceTests(unittest.TestCase):
         self.assertEqual(status, 202)
         self.assertEqual(body["outcome"], "skipped")
 
-    def test_issue_comment_feedback_dispatches_execution_stage(self) -> None:
+    def test_issue_comment_feedback_dispatches_feedback_implementation_stage(self) -> None:
         status, body = self._issue_comment_request(self._issue_comment_payload())
         self.assertEqual(status, 200)
         self.assertEqual(body["outcome"], "dispatched")
@@ -270,7 +270,7 @@ class GatewayServiceTests(unittest.TestCase):
         repo, event_type, client_payload = self.github.dispatches[0]
         self.assertEqual(repo, "SlateLabs/github-project-automation")
         self.assertEqual(event_type, "orchestration-start")
-        self.assertEqual(client_payload["requested_stage"], "execution")
+        self.assertEqual(client_payload["requested_stage"], "feedback-implementation")
         self.assertEqual(client_payload["source_command"], "feedback")
         self.assertEqual(client_payload["feedback_instructions"], "tighten retry guardrails")
 

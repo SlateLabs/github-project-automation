@@ -26,6 +26,7 @@ on:
           - design
           - plan
           - execution
+          - feedback-implementation
           - follow-up-capture
           - review
           - merge
@@ -57,6 +58,7 @@ jobs:
     outputs:
       issue_number: ${{ steps.normalize.outputs.issue_number }}
       requested_stage: ${{ steps.normalize.outputs.requested_stage }}
+      feedback_instructions: ${{ steps.normalize.outputs.feedback_instructions }}
       actor: ${{ steps.normalize.outputs.actor }}
       trigger: ${{ steps.normalize.outputs.trigger }}
       project_item_id: ${{ steps.project-context.outputs.project_item_id }}
@@ -85,12 +87,13 @@ jobs:
           RD_ACTOR: ${{ github.event.client_payload.actor }}
           RD_TIMESTAMP: ${{ github.event.client_payload.timestamp }}
           RD_PROJECT_ITEM_ID: ${{ github.event.client_payload.project_item_id }}
+          RD_FEEDBACK_INSTRUCTIONS: ${{ github.event.client_payload.feedback_instructions }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CURRENT_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
-          VALID_STAGES="kickoff clarification design plan execution follow-up-capture review merge closeout"
+          VALID_STAGES="kickoff clarification design plan execution feedback-implementation follow-up-capture review merge closeout"
 
           if [ "$TRIGGER" = "repository_dispatch" ]; then
             # --- Validate repository_dispatch payload ---
@@ -185,6 +188,11 @@ jobs:
             echo "actor=${RD_ACTOR}" >> "$GITHUB_OUTPUT"
             echo "trigger=repository_dispatch" >> "$GITHUB_OUTPUT"
             echo "project_item_id=${RD_PROJECT_ITEM_ID}" >> "$GITHUB_OUTPUT"
+            {
+              echo "feedback_instructions<<EOF"
+              printf '%s\n' "${RD_FEEDBACK_INSTRUCTIONS}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
             echo "::notice::Normalized inputs from repository_dispatch (actor: ${RD_ACTOR}, issue: ${RD_ISSUE_NUMBER}, stage: ${RD_REQUESTED_STAGE})"
           else
             # --- workflow_dispatch: pass through existing inputs ---
@@ -193,6 +201,7 @@ jobs:
             echo "actor=${WD_ACTOR}" >> "$GITHUB_OUTPUT"
             echo "trigger=workflow_dispatch" >> "$GITHUB_OUTPUT"
             echo "project_item_id=" >> "$GITHUB_OUTPUT"
+            echo "feedback_instructions=" >> "$GITHUB_OUTPUT"
             echo "::notice::Normalized inputs from workflow_dispatch (actor: ${WD_ACTOR}, issue: ${WD_ISSUE_NUMBER}, stage: ${WD_REQUESTED_STAGE})"
           fi
 
@@ -1111,7 +1120,7 @@ jobs:
           echo "::notice::Posted automated plan review comment to issue #$ISSUE_NUMBER"
 
       - name: Validate execution agent credentials
-        if: needs.intake.outputs.requested_stage == 'execution'
+        if: needs.intake.outputs.requested_stage == 'execution' || needs.intake.outputs.requested_stage == 'feedback-implementation'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         shell: bash
@@ -1120,7 +1129,7 @@ jobs:
           [ -n "$OPENAI_API_KEY" ] || { echo "::error::Execution authoring requires secrets.OPENAI_API_KEY"; exit 1; }
 
       - name: Prepare execution branch (pre-agent)
-        if: needs.intake.outputs.requested_stage == 'execution'
+        if: needs.intake.outputs.requested_stage == 'execution' || needs.intake.outputs.requested_stage == 'feedback-implementation'
         id: scaffold-execution
         uses: ./.github/actions/scaffold-execution
         with:
@@ -1131,7 +1140,7 @@ jobs:
           create_pr: 'false'
 
       - name: Load implementation plan source for execution
-        if: needs.intake.outputs.requested_stage == 'execution'
+        if: needs.intake.outputs.requested_stage == 'execution' || needs.intake.outputs.requested_stage == 'feedback-implementation'
         id: execution-plan-source
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1156,7 +1165,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Check out execution branch
-        if: needs.intake.outputs.requested_stage == 'execution'
+        if: needs.intake.outputs.requested_stage == 'execution' || needs.intake.outputs.requested_stage == 'feedback-implementation'
         env:
           BRANCH_NAME: ${{ steps.scaffold-execution.outputs.branch_name }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1177,14 +1186,16 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Prepare Codex execution prompt
-        if: needs.intake.outputs.requested_stage == 'execution'
+        if: needs.intake.outputs.requested_stage == 'execution' || needs.intake.outputs.requested_stage == 'feedback-implementation'
         id: execution-author-prompt
         env:
+          REQUESTED_STAGE: ${{ needs.intake.outputs.requested_stage }}
           ISSUE_TITLE: ${{ needs.intake.outputs.issue_title }}
           ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
           ISSUE_BODY: ${{ needs.intake.outputs.issue_body }}
           PLAN_BODY: ${{ steps.execution-plan-source.outputs.plan_body }}
           BRANCH_NAME: ${{ steps.scaffold-execution.outputs.branch_name }}
+          FEEDBACK_INSTRUCTIONS: ${{ needs.intake.outputs.feedback_instructions }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1217,11 +1228,19 @@ jobs:
           ---
           $PLAN_BODY
           ---
+
+          Operator feedback to address (if any):
+          ---
+          $FEEDBACK_INSTRUCTIONS
+          ---
+
+          Feedback source:
+          - If present, feedback came from a trusted `gpa:feedback ...` command after the latest `gpa:review-ready` marker.
           EOF
           echo "prompt_file=$prompt_file" >> "$GITHUB_OUTPUT"
 
       - name: Codex implement execution slice
-        if: needs.intake.outputs.requested_stage == 'execution'
+        if: needs.intake.outputs.requested_stage == 'execution' || needs.intake.outputs.requested_stage == 'feedback-implementation'
         id: codex-execution
         uses: openai/codex-action@v1
         with:
@@ -1233,7 +1252,7 @@ jobs:
           allow-bots: true
 
       - name: Commit and push execution changes
-        if: needs.intake.outputs.requested_stage == 'execution'
+        if: needs.intake.outputs.requested_stage == 'execution' || needs.intake.outputs.requested_stage == 'feedback-implementation'
         id: execution-commit
         env:
           BRANCH_NAME: ${{ steps.scaffold-execution.outputs.branch_name }}
@@ -1257,7 +1276,7 @@ jobs:
           git push origin "HEAD:${BRANCH_NAME}"
 
       - name: Create or recover execution PR (post-agent)
-        if: needs.intake.outputs.requested_stage == 'execution'
+        if: needs.intake.outputs.requested_stage == 'execution' || needs.intake.outputs.requested_stage == 'feedback-implementation'
         id: execution-pr
         uses: ./.github/actions/scaffold-execution
         with:
@@ -1268,7 +1287,7 @@ jobs:
           create_pr: 'true'
 
       - name: Mark PR ready for review
-        if: needs.intake.outputs.requested_stage == 'execution' && steps.execution-pr.outputs.pr_number != ''
+        if: (needs.intake.outputs.requested_stage == 'execution' || needs.intake.outputs.requested_stage == 'feedback-implementation') && steps.execution-pr.outputs.pr_number != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.execution-pr.outputs.pr_number }}
@@ -1576,6 +1595,10 @@ jobs:
               target_status="In Progress"
               ;;
             execution)
+              next_stage="review"
+              target_status="In Review"
+              ;;
+            feedback-implementation)
               next_stage="review"
               target_status="In Review"
               ;;

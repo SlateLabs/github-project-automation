@@ -25,7 +25,7 @@ REQUESTED_STAGE = "kickoff"
 DISPATCH_EVENT_TYPE = "orchestration-start"
 DISPATCH_RETRY_BACKOFFS = (1.0, 4.0, 16.0)
 OPERATOR_COMMAND_STAGE = {
-    OperatorCommandType.FEEDBACK: "execution",
+    OperatorCommandType.FEEDBACK: "feedback-implementation",
     OperatorCommandType.APPROVE: "merge",
 }
 
