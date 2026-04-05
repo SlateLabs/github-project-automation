@@ -26,7 +26,11 @@ on:
           - design
           - plan
           - execution
+          - deploy-review
+          - review-intake
           - feedback-implementation
+          - redeploy-review
+          - post-merge-verify
           - follow-up-capture
           - review
           - merge
@@ -93,7 +97,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          VALID_STAGES="kickoff clarification design plan execution feedback-implementation follow-up-capture review merge closeout"
+          VALID_STAGES="kickoff clarification design plan execution deploy-review review-intake feedback-implementation redeploy-review merge post-merge-verify follow-up-capture review closeout"
 
           if [ "$TRIGGER" = "repository_dispatch" ]; then
             # --- Validate repository_dispatch payload ---
@@ -1595,18 +1599,34 @@ jobs:
               target_status="In Progress"
               ;;
             execution)
-              next_stage="review"
+              next_stage="deploy-review"
               target_status="In Review"
               ;;
+            deploy-review)
+              next_stage="review-intake"
+              target_status="In Review"
+              ;;
+            review-intake)
+              next_stage="merge"
+              target_status="Approved"
+              ;;
             feedback-implementation)
-              next_stage="review"
+              next_stage="redeploy-review"
+              target_status="In Review"
+              ;;
+            redeploy-review)
+              next_stage="review-intake"
               target_status="In Review"
               ;;
             review)
               next_stage="merge"
-              target_status="In Review"
+              target_status="Approved"
               ;;
             merge)
+              next_stage="post-merge-verify"
+              target_status="In Progress"
+              ;;
+            post-merge-verify)
               next_stage="follow-up-capture"
               target_status="In Progress"
               ;;

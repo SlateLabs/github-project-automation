@@ -222,7 +222,7 @@ The orchestration workflow accepts `repository_dispatch` events with `event_type
 |-------|------|------------|
 | `issue_number` | integer | Positive integer (`>= 1`) |
 | `issue_title` | string | Optional; used for workflow run naming when present |
-| `requested_stage` | string | One of: `kickoff`, `clarification`, `design`, `plan`, `execution`, `feedback-implementation`, `follow-up-capture`, `review`, `merge`, `closeout` |
+| `requested_stage` | string | One of: `kickoff`, `clarification`, `design`, `plan`, `execution`, `deploy-review`, `review-intake`, `feedback-implementation`, `redeploy-review`, `merge`, `post-merge-verify`, `follow-up-capture`, `review` (legacy alias), `closeout` |
 | `run_key` | string | Canonical format `<owner>/<repo>/<number>/<stage>/<timestamp>` — must be payload-consistent (see below) |
 | `actor` | string | Non-empty |
 | `timestamp` | string | Non-empty |
@@ -517,7 +517,7 @@ Defined in `config/trust-policy.yml`. See [discussion #3 §8](https://github.com
 
 ## Stage model
 
-The default workflow stages are: Backlog → Clarification → Design → Plan → Execution → Review → Merge → Closeout, with feedback-loop re-entry supported via `feedback-implementation`. Each transition has machine-testable gate conditions defined in discussion #3 §4.
+The default workflow stages are: Backlog → Clarification → Design → Plan → Execution → Deploy Review → Review Intake → Merge → Post-Merge Verify → Follow-up Capture → Closeout, with feedback-loop re-entry via `feedback-implementation` → `redeploy-review` → `review-intake`. Each transition has machine-testable gate conditions defined in discussion #3 §4.
 
 Canonical contract primitives for the next operator-in-the-loop evolution now live in [gateway/orchestration_contract.py](gateway/orchestration_contract.py):
 - Coarse statuses: `Backlog`, `Ready`, `In Progress`, `In Review`, `Approved`, `Done`, `Blocked`
@@ -554,9 +554,13 @@ The orchestration is intended to run with minimal operator intervention once an 
 | `clarification` | Issue has `## Summary`; no `blocked` label | Seed `## Scope` if missing; auto-defer unresolved issue-level open questions to design | Issue body with clarification headings and no unresolved issue-level open questions | Issue is sufficiently specified to start design without operator edits | `design` | Missing detail cannot be reasonably deferred or issue is truly blocked |
 | `design` | Clarification passed | Create or recover design discussion before gate evaluation | Discussion with required headings, open questions resolved or `DEFERRED-TO-PLAN`, and at least one non-author review comment | Design discussion is reviewable and plan-ready | `plan` | Design questions cannot be resolved autonomously and need operator input |
 | `plan` | Design gate passed | Create or recover implementation plan comment before gate evaluation | Single plan comment with required headings, checklists, review dispositions, and slices | Plan is execution-ready | `execution` | Plan cannot be made concrete enough for execution |
-| `execution` | Plan gate passed | Create or recover execution branch and draft PR before gate evaluation | Branch exists and PR is review-ready with required headings | Reviewable code change exists | `review` | Implementation cannot proceed without external/operator decision |
-| `review` | Reviewable PR exists | Evaluate approvals and change-request state | PR with at least one approval and no unresolved changes requested | PR is merge-ready | `merge` | Review cannot be satisfied without operator intervention |
-| `merge` | Merge-ready PR exists | Verify merged PR and approval history | Merged PR referencing the issue | Change is merged and ready for follow-up capture | `follow-up-capture` | Merge cannot complete because repo state or policy prevents it |
+| `execution` | Plan gate passed | Create or recover execution branch and draft PR before gate evaluation | Branch exists and PR is review-ready with required headings | Reviewable code change exists | `deploy-review` | Implementation cannot proceed without external/operator decision |
+| `deploy-review` | Reviewable PR exists and deployment evidence is available | Evaluate review-readiness and deployment evidence for first operator loop entry | Review-ready artifact set (PR + review-ready marker/deployment evidence) | Operator feedback intake can begin | `review-intake` | Review-ready artifact set is incomplete or unverifiable |
+| `review-intake` | Review-ready artifacts exist | Evaluate approvals and change-request state | PR with at least one approval and no unresolved changes requested | PR is approved for finalize lane | `merge` | Review cannot be satisfied without operator intervention |
+| `feedback-implementation` | Trusted operator `gpa:feedback ...` command after latest review-ready marker | Implement feedback updates and prepare redeploy | Updated implementation changes and refreshed review context | Changes are ready for redeploy review | `redeploy-review` | Feedback cannot be implemented without additional operator clarification |
+| `redeploy-review` | Updated implementation and redeploy evidence available | Re-check review-readiness after feedback implementation | Updated review-ready artifact set | Operator intake can continue for next loop | `review-intake` | Redeploy evidence is missing or invalid |
+| `merge` | Approval command accepted and merge prerequisites are satisfied | Verify merged PR and approval history | Merged PR referencing the issue | Finalization enters verification | `post-merge-verify` | Merge cannot complete because repo state or policy prevents it |
+| `post-merge-verify` | Merge stage completed | Verify post-merge health and retries per policy | Verification outcome with diagnostics on failure | Ready for follow-up capture or retry decision | `follow-up-capture` | Verification failure exceeds retry budget and requires operator intervention |
 | `follow-up-capture` | Merged PR exists and execution is complete | Capture structured follow-up artifacts from issue comments | Follow-up issues or explicit follow-up evidence | Deferred work is recorded before closeout | `closeout` | Follow-up state is ambiguous and cannot be derived automatically |
 | `closeout` | Merged PR exists, source branch deleted, follow-up evidence available | Create or recover closeout retrospective and validate its structure | Closeout comment with required sections and dispositions | Issue is fully closed out | _(terminal)_ | Final retrospective or cleanup cannot be completed automatically |
 
@@ -581,10 +585,13 @@ The current handoff sequence is:
 | `clarification` | `design` |
 | `design` | `plan` |
 | `plan` | `execution` |
-| `execution` | `review` |
-| `feedback-implementation` | `review` |
-| `review` | `merge` |
-| `merge` | `follow-up-capture` |
+| `execution` | `deploy-review` |
+| `deploy-review` | `review-intake` |
+| `feedback-implementation` | `redeploy-review` |
+| `redeploy-review` | `review-intake` |
+| `review-intake` | `merge` |
+| `merge` | `post-merge-verify` |
+| `post-merge-verify` | `follow-up-capture` |
 | `follow-up-capture` | `closeout` |
 | `closeout` | _(terminal)_ |
 
@@ -592,12 +599,13 @@ This is intentionally "fail forward" for scaffold-driven stages:
 
 - `clarification` auto-seeds `## Scope` and defers unresolved issue-level open questions into design by marking them `DEFERRED-TO-DESIGN`.
 - `design` and `plan` are now agent-executed stages. Codex authors the first-pass artifact and Claude posts a machine-generated review comment before the gate runs. `execution` still needs the same treatment for code/PR work.
-- `review`, `merge`, and `closeout` remain machine-checked stages; they only auto-advance when the required repo artifacts already satisfy the gate.
+- `deploy-review`, `review-intake`, `merge`, `post-merge-verify`, and `closeout` remain machine-checked stages; they only auto-advance when the required repo artifacts already satisfy the gate.
 - Each auto-handoff posts a `gpa:run-status:<stage>:started:<run_key>` marker comment on the issue so the run history remains queryable across stages.
 - When `project_item_id` is present, the orchestrator also updates the GitHub Project `Status` during handoff:
   - `kickoff`, `clarification`, `design`, `plan` -> `In Progress`
-  - `execution`, `review` -> `In Review`
-  - `merge`, `follow-up-capture` -> `In Progress`
+  - `execution`, `deploy-review`, `redeploy-review` -> `In Review`
+  - `review-intake`, `review` (legacy alias) -> `Approved`
+  - `merge`, `post-merge-verify`, `follow-up-capture` -> `In Progress`
   - `closeout` -> `Done`
 - Manual/retry runs without `project_item_id` still execute, but they do not mutate project state and do not auto-queue the next stage.
 

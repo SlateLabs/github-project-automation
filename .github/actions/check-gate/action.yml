@@ -473,7 +473,7 @@ runs:
             fi
             ;;
 
-          review)
+          deploy-review|review-intake|redeploy-review|review)
             # Gate: Review (§4 Gate 6→7)
             # Implemented checks:
             #   1. A PR referencing this issue exists (open or merged)

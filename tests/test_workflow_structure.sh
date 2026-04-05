@@ -185,7 +185,8 @@ fi
 
 if grep -A1 'kickoff)' "$WORKFLOW" | grep -q 'next_stage="clarification"' && \
    grep -A1 'design)' "$WORKFLOW" | grep -q 'next_stage="plan"' && \
-   grep -A1 'merge)' "$WORKFLOW" | grep -q 'next_stage="follow-up-capture"'; then
+   grep -A1 'merge)' "$WORKFLOW" | grep -q 'next_stage="post-merge-verify"' && \
+   grep -A1 'post-merge-verify)' "$WORKFLOW" | grep -q 'next_stage="follow-up-capture"'; then
   check "stage handoff map includes key transitions" "pass"
 else
   check "stage handoff map includes key transitions" "fail"
