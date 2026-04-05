@@ -292,6 +292,7 @@ class GatewayServiceTests(unittest.TestCase):
         self.assertEqual(event_type, "orchestration-start")
         self.assertEqual(client_payload["requested_stage"], "feedback-implementation")
         self.assertEqual(client_payload["source_command"], "feedback")
+        self.assertEqual(client_payload["source_comment_id"], 5001)
         self.assertEqual(client_payload["feedback_instructions"], "tighten retry guardrails")
 
     def test_issue_comment_dispatches_when_github_comment_list_lags(self) -> None:
@@ -343,6 +344,7 @@ class GatewayServiceTests(unittest.TestCase):
         self.assertEqual(body["outcome"], "dispatched")
         self.assertEqual(self.github.dispatches[0][2]["requested_stage"], "merge")
         self.assertEqual(self.github.dispatches[0][2]["source_command"], "approve")
+        self.assertEqual(self.github.dispatches[0][2]["source_comment_id"], 5002)
         self.assertNotIn("feedback_instructions", self.github.dispatches[0][2])
 
     def test_issue_comment_without_structured_command_is_skipped(self) -> None:

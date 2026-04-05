@@ -95,6 +95,12 @@ else
   check "downstream steps reference normalize.outputs.project_item_id" "fail"
 fi
 
+if grep -q 'steps.normalize.outputs.source_command' "$WORKFLOW" && grep -q 'steps.normalize.outputs.source_comment_id' "$WORKFLOW"; then
+  check "downstream steps reference normalize.outputs.source_command/source_comment_id" "pass"
+else
+  check "downstream steps reference normalize.outputs.source_command/source_comment_id" "fail"
+fi
+
 echo ""
 echo "4. No stale inputs.* references outside normalize step and run-name"
 
@@ -167,6 +173,13 @@ if grep -q 'project_item_id=' "$WORKFLOW"; then
   check "project_item_id normalization present" "pass"
 else
   check "project_item_id normalization present" "fail"
+fi
+
+if grep -q "source_command 'feedback' requires requested_stage 'feedback-implementation'" "$WORKFLOW" && \
+   grep -q "feedback_instructions is required when source_command is 'feedback'" "$WORKFLOW"; then
+  check "feedback command provenance validation present" "pass"
+else
+  check "feedback command provenance validation present" "fail"
 fi
 
 echo ""

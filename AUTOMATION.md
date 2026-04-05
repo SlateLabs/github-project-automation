@@ -211,7 +211,10 @@ The orchestration workflow accepts `repository_dispatch` events with `event_type
     "run_key": "SlateLabs/github-project-automation/42/kickoff/1711234567890",
     "actor": "jflamb",
     "timestamp": "1711234567890",
-    "project_item_id": "PVTI_lADOABUjKM4BTjIKzgABC"
+    "project_item_id": "PVTI_lADOABUjKM4BTjIKzgABC",
+    "source_command": "feedback",
+    "source_comment_id": 9001,
+    "feedback_instructions": "Please fix deploy retry behavior and re-run checks."
   }
 }
 ```
@@ -227,6 +230,9 @@ The orchestration workflow accepts `repository_dispatch` events with `event_type
 | `actor` | string | Non-empty |
 | `timestamp` | string | Non-empty |
 | `project_item_id` | string | Optional but recommended; enables closed-loop GitHub Project `Status` sync and auto-handoff preservation |
+| `source_command` | string | Optional. When present, must be `feedback` or `approve`, and must be paired with `source_comment_id` |
+| `source_comment_id` | integer/string | Optional. Positive integer; required when `source_command` is provided |
+| `feedback_instructions` | string | Optional. Allowed only when `source_command=feedback`; required in that case |
 
 **Run key consistency (enforced at workflow start):** Beyond regex format, the `run_key` must be *payload-consistent* — its parsed components must agree with the other payload fields and the receiving repository:
 
@@ -234,6 +240,17 @@ The orchestration workflow accepts `repository_dispatch` events with `event_type
 - `<number>` must match `client_payload.issue_number`
 - `<stage>` must match `client_payload.requested_stage`
 - `<timestamp>` must match `client_payload.timestamp`
+
+**Operator-command coherence checks (when command fields are present):**
+
+- `source_command=feedback` requires:
+  - `requested_stage=feedback-implementation`
+  - non-empty `feedback_instructions`
+  - positive integer `source_comment_id`
+- `source_command=approve` requires:
+  - `requested_stage=merge`
+  - positive integer `source_comment_id`
+- `feedback_instructions` is rejected unless `source_command=feedback`
 
 A run key that passes the format regex but fails any consistency check is rejected. This prevents correlation breaks, dedup bypasses, and audit trail mismatches that would occur if a well-formatted but internally inconsistent run key were accepted.
 
@@ -548,6 +565,10 @@ Current enforcement in this slice:
 - The gateway evaluates full issue comment history and applies `latest valid command wins`
 - The webhook `issue_comment` payload is merged as an authoritative candidate to avoid stale-list races immediately after comment creation/edit
 - Command comments are deduplicated by `{repo}/{issue_number}/{comment_id}/{comment_version_ms}` within the gateway dedup window (`comment_version_ms` uses `updated_at` when present, otherwise `created_at`)
+- For accepted commands, the gateway dispatch payload includes provenance fields:
+  - `source_command` (`feedback` or `approve`)
+  - `source_comment_id` (authoritative triggering comment id)
+  - `feedback_instructions` (feedback only)
 
 This keeps operator feedback/approval intake GitHub-native and resumable without introducing an external state store.
 

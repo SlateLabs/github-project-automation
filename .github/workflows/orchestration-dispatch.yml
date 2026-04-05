@@ -63,6 +63,8 @@ jobs:
       issue_number: ${{ steps.normalize.outputs.issue_number }}
       requested_stage: ${{ steps.normalize.outputs.requested_stage }}
       feedback_instructions: ${{ steps.normalize.outputs.feedback_instructions }}
+      source_command: ${{ steps.normalize.outputs.source_command }}
+      source_comment_id: ${{ steps.normalize.outputs.source_comment_id }}
       actor: ${{ steps.normalize.outputs.actor }}
       trigger: ${{ steps.normalize.outputs.trigger }}
       project_item_id: ${{ steps.project-context.outputs.project_item_id }}
@@ -92,6 +94,8 @@ jobs:
           RD_TIMESTAMP: ${{ github.event.client_payload.timestamp }}
           RD_PROJECT_ITEM_ID: ${{ github.event.client_payload.project_item_id }}
           RD_FEEDBACK_INSTRUCTIONS: ${{ github.event.client_payload.feedback_instructions }}
+          RD_SOURCE_COMMAND: ${{ github.event.client_payload.source_command }}
+          RD_SOURCE_COMMENT_ID: ${{ github.event.client_payload.source_comment_id }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CURRENT_REPO: ${{ github.repository }}
         run: |
@@ -164,6 +168,45 @@ jobs:
               errors+=("missing required field: timestamp")
             fi
 
+            # operator command provenance fields (optional but must be coherent when provided)
+            has_source_command="false"
+            has_source_comment_id="false"
+            if [ -n "${RD_SOURCE_COMMAND:-}" ]; then
+              has_source_command="true"
+              case "$RD_SOURCE_COMMAND" in
+                feedback|approve) ;;
+                *)
+                  errors+=("source_command must be one of: feedback, approve (got '${RD_SOURCE_COMMAND}')")
+                  ;;
+              esac
+            fi
+            if [ -n "${RD_SOURCE_COMMENT_ID:-}" ]; then
+              has_source_comment_id="true"
+              if ! echo "$RD_SOURCE_COMMENT_ID" | grep -qE '^[1-9][0-9]*$'; then
+                errors+=("source_comment_id must be a positive integer, got: '${RD_SOURCE_COMMENT_ID}'")
+              fi
+            fi
+            if [ "$has_source_command" = "true" ] && [ "$has_source_comment_id" = "false" ]; then
+              errors+=("source_comment_id is required when source_command is provided")
+            fi
+            if [ "$has_source_command" = "false" ] && [ "$has_source_comment_id" = "true" ]; then
+              errors+=("source_command is required when source_comment_id is provided")
+            fi
+            if [ "$RD_SOURCE_COMMAND" = "feedback" ]; then
+              if [ "$RD_REQUESTED_STAGE" != "feedback-implementation" ]; then
+                errors+=("source_command 'feedback' requires requested_stage 'feedback-implementation'")
+              fi
+              if [ -z "${RD_FEEDBACK_INSTRUCTIONS:-}" ]; then
+                errors+=("feedback_instructions is required when source_command is 'feedback'")
+              fi
+            fi
+            if [ "$RD_SOURCE_COMMAND" = "approve" ] && [ "$RD_REQUESTED_STAGE" != "merge" ]; then
+              errors+=("source_command 'approve' requires requested_stage 'merge'")
+            fi
+            if [ -n "${RD_FEEDBACK_INSTRUCTIONS:-}" ] && [ "${RD_SOURCE_COMMAND:-}" != "feedback" ]; then
+              errors+=("feedback_instructions may only be set when source_command is 'feedback'")
+            fi
+
             if [ ${#errors[@]} -gt 0 ]; then
               error_msg="repository_dispatch payload validation failed:"
               for e in "${errors[@]}"; do
@@ -180,6 +223,7 @@ jobs:
                 done
                 diagnostic+="\nExpected payload: \`{ issue_number, requested_stage, run_key, actor, timestamp }\`"
                 diagnostic+="\nOptional closed-loop field: \`project_item_id\`"
+                diagnostic+="\nOptional operator-command fields (must be coherent when present): \`source_command\`, \`source_comment_id\`, \`feedback_instructions\`"
                 echo -e "$diagnostic" | gh issue comment "${RD_ISSUE_NUMBER}" --body-file -
               fi
 
@@ -192,6 +236,8 @@ jobs:
             echo "actor=${RD_ACTOR}" >> "$GITHUB_OUTPUT"
             echo "trigger=repository_dispatch" >> "$GITHUB_OUTPUT"
             echo "project_item_id=${RD_PROJECT_ITEM_ID}" >> "$GITHUB_OUTPUT"
+            echo "source_command=${RD_SOURCE_COMMAND}" >> "$GITHUB_OUTPUT"
+            echo "source_comment_id=${RD_SOURCE_COMMENT_ID}" >> "$GITHUB_OUTPUT"
             {
               echo "feedback_instructions<<EOF"
               printf '%s\n' "${RD_FEEDBACK_INSTRUCTIONS}"
@@ -205,6 +251,8 @@ jobs:
             echo "actor=${WD_ACTOR}" >> "$GITHUB_OUTPUT"
             echo "trigger=workflow_dispatch" >> "$GITHUB_OUTPUT"
             echo "project_item_id=" >> "$GITHUB_OUTPUT"
+            echo "source_command=" >> "$GITHUB_OUTPUT"
+            echo "source_comment_id=" >> "$GITHUB_OUTPUT"
             echo "feedback_instructions=" >> "$GITHUB_OUTPUT"
             echo "::notice::Normalized inputs from workflow_dispatch (actor: ${WD_ACTOR}, issue: ${WD_ISSUE_NUMBER}, stage: ${WD_REQUESTED_STAGE})"
           fi
@@ -1200,6 +1248,8 @@ jobs:
           PLAN_BODY: ${{ steps.execution-plan-source.outputs.plan_body }}
           BRANCH_NAME: ${{ steps.scaffold-execution.outputs.branch_name }}
           FEEDBACK_INSTRUCTIONS: ${{ needs.intake.outputs.feedback_instructions }}
+          SOURCE_COMMAND: ${{ needs.intake.outputs.source_command }}
+          SOURCE_COMMENT_ID: ${{ needs.intake.outputs.source_comment_id }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1239,6 +1289,8 @@ jobs:
           ---
 
           Feedback source:
+          - Source command: ${SOURCE_COMMAND:-none}
+          - Source comment ID: ${SOURCE_COMMENT_ID:-none}
           - If present, feedback came from a trusted `gpa:feedback ...` command after the latest `gpa:review-ready` marker.
           EOF
           echo "prompt_file=$prompt_file" >> "$GITHUB_OUTPUT"

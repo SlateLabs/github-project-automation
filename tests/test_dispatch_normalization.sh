@@ -47,10 +47,13 @@ run_validation() {
   local rd_actor="${5:-}"
   local rd_timestamp="${6:-}"
   local rd_project_item_id="${7:-}"
-  local wd_issue_number="${8:-}"
-  local wd_requested_stage="${9:-}"
-  local wd_actor="${10:-}"
-  local current_repo="${11:-}"
+  local rd_feedback_instructions="${8:-}"
+  local rd_source_command="${9:-}"
+  local rd_source_comment_id="${10:-}"
+  local wd_issue_number="${11:-}"
+  local wd_requested_stage="${12:-}"
+  local wd_actor="${13:-}"
+  local current_repo="${14:-}"
 
   local output_file
   output_file=$(mktemp)
@@ -121,6 +124,44 @@ run_validation() {
         errors+=("missing required field: timestamp")
       fi
 
+      has_source_command="false"
+      has_source_comment_id="false"
+      if [ -n "${rd_source_command:-}" ]; then
+        has_source_command="true"
+        case "$rd_source_command" in
+          feedback|approve) ;;
+          *)
+            errors+=("source_command must be one of: feedback, approve")
+            ;;
+        esac
+      fi
+      if [ -n "${rd_source_comment_id:-}" ]; then
+        has_source_comment_id="true"
+        if ! echo "$rd_source_comment_id" | grep -qE '^[1-9][0-9]*$'; then
+          errors+=("source_comment_id must be a positive integer")
+        fi
+      fi
+      if [ "$has_source_command" = "true" ] && [ "$has_source_comment_id" = "false" ]; then
+        errors+=("source_comment_id is required when source_command is provided")
+      fi
+      if [ "$has_source_command" = "false" ] && [ "$has_source_comment_id" = "true" ]; then
+        errors+=("source_command is required when source_comment_id is provided")
+      fi
+      if [ "$rd_source_command" = "feedback" ]; then
+        if [ "$rd_requested_stage" != "feedback-implementation" ]; then
+          errors+=("source_command 'feedback' requires requested_stage 'feedback-implementation'")
+        fi
+        if [ -z "${rd_feedback_instructions:-}" ]; then
+          errors+=("feedback_instructions is required when source_command is 'feedback'")
+        fi
+      fi
+      if [ "$rd_source_command" = "approve" ] && [ "$rd_requested_stage" != "merge" ]; then
+        errors+=("source_command 'approve' requires requested_stage 'merge'")
+      fi
+      if [ -n "${rd_feedback_instructions:-}" ] && [ "${rd_source_command:-}" != "feedback" ]; then
+        errors+=("feedback_instructions may only be set when source_command is 'feedback'")
+      fi
+
       if [ ${#errors[@]} -gt 0 ]; then
         for e in "${errors[@]}"; do
           echo "ERROR: $e" >&2
@@ -133,12 +174,18 @@ run_validation() {
       echo "actor=${rd_actor}" >> "$GITHUB_OUTPUT"
       echo "trigger=repository_dispatch" >> "$GITHUB_OUTPUT"
       echo "project_item_id=${rd_project_item_id}" >> "$GITHUB_OUTPUT"
+      echo "source_command=${rd_source_command}" >> "$GITHUB_OUTPUT"
+      echo "source_comment_id=${rd_source_comment_id}" >> "$GITHUB_OUTPUT"
+      echo "feedback_instructions=${rd_feedback_instructions}" >> "$GITHUB_OUTPUT"
     else
       echo "issue_number=${wd_issue_number}" >> "$GITHUB_OUTPUT"
       echo "requested_stage=${wd_requested_stage}" >> "$GITHUB_OUTPUT"
       echo "actor=${wd_actor}" >> "$GITHUB_OUTPUT"
       echo "trigger=workflow_dispatch" >> "$GITHUB_OUTPUT"
       echo "project_item_id=" >> "$GITHUB_OUTPUT"
+      echo "source_command=" >> "$GITHUB_OUTPUT"
+      echo "source_comment_id=" >> "$GITHUB_OUTPUT"
+      echo "feedback_instructions=" >> "$GITHUB_OUTPUT"
     fi
   ) 2>"$error_output"
   local rc=$?
@@ -294,7 +341,7 @@ echo "=== Trigger-Path Parity Tests ==="
 echo ""
 echo "12. workflow_dispatch produces normalized outputs"
 if run_validation "workflow_dispatch" \
-  "" "" "" "" "" "" "99" "design" "operator-user"; then
+  "" "" "" "" "" "" "" "" "" "99" "design" "operator-user" ""; then
   assert_eq "issue_number" "99" "$(get_output issue_number)"
   assert_eq "requested_stage" "design" "$(get_output requested_stage)"
   assert_eq "actor" "operator-user" "$(get_output actor)"
@@ -327,7 +374,7 @@ echo "=== Run Key Tests ==="
 echo ""
 echo "14. All valid stages accepted"
 for stage in kickoff clarification design plan execution deploy-review review-intake feedback-implementation redeploy-review merge post-merge-verify follow-up-capture review closeout; do
-  if run_validation "repository_dispatch" \
+if run_validation "repository_dispatch" \
     "1" "$stage" "Org/repo/1/${stage}/100" "actor" "100" "PVTI_1"; then
     PASS=$((PASS + 1))
     echo "  ✓ stage '$stage' accepted"
@@ -356,7 +403,7 @@ echo ""
 echo "16. run_key repo mismatch rejected"
 if run_validation "repository_dispatch" \
   "42" "kickoff" "WrongOrg/wrong-repo/42/kickoff/1711234567890" "actor1" "1711234567890" "PVTI_42" \
-  "" "" "" "SlateLabs/github-project-automation"; then
+  "" "" "" "" "" "" "SlateLabs/github-project-automation"; then
   FAIL=$((FAIL + 1))
   echo "  ✗ Should have failed with repo mismatch"
   TESTS+=("FAIL: repo mismatch accepted")
@@ -368,7 +415,7 @@ echo ""
 echo "17. run_key issue_number mismatch rejected"
 if run_validation "repository_dispatch" \
   "42" "kickoff" "SlateLabs/github-project-automation/99/kickoff/1711234567890" "actor1" "1711234567890" "PVTI_42" \
-  "" "" "" "SlateLabs/github-project-automation"; then
+  "" "" "" "" "" "" "SlateLabs/github-project-automation"; then
   FAIL=$((FAIL + 1))
   echo "  ✗ Should have failed with issue_number mismatch"
   TESTS+=("FAIL: issue_number mismatch accepted")
@@ -380,7 +427,7 @@ echo ""
 echo "18. run_key stage mismatch rejected"
 if run_validation "repository_dispatch" \
   "42" "kickoff" "SlateLabs/github-project-automation/42/design/1711234567890" "actor1" "1711234567890" "PVTI_42" \
-  "" "" "" "SlateLabs/github-project-automation"; then
+  "" "" "" "" "" "" "SlateLabs/github-project-automation"; then
   FAIL=$((FAIL + 1))
   echo "  ✗ Should have failed with stage mismatch"
   TESTS+=("FAIL: stage mismatch accepted")
@@ -392,7 +439,7 @@ echo ""
 echo "19. run_key timestamp mismatch rejected"
 if run_validation "repository_dispatch" \
   "42" "kickoff" "SlateLabs/github-project-automation/42/kickoff/9999999999999" "actor1" "1711234567890" "PVTI_42" \
-  "" "" "" "SlateLabs/github-project-automation"; then
+  "" "" "" "" "" "" "SlateLabs/github-project-automation"; then
   FAIL=$((FAIL + 1))
   echo "  ✗ Should have failed with timestamp mismatch"
   TESTS+=("FAIL: timestamp mismatch accepted")
@@ -404,7 +451,7 @@ echo ""
 echo "20. Consistent run_key with current_repo passes"
 if run_validation "repository_dispatch" \
   "42" "kickoff" "SlateLabs/github-project-automation/42/kickoff/1711234567890" "jflamb" "1711234567890" "PVTI_42" \
-  "" "" "" "SlateLabs/github-project-automation"; then
+  "" "" "" "" "" "" "SlateLabs/github-project-automation"; then
   assert_eq "issue_number" "42" "$(get_output issue_number)"
   assert_eq "trigger" "repository_dispatch" "$(get_output trigger)"
 else
@@ -417,7 +464,7 @@ echo ""
 echo "21. run_key consistency skipped when current_repo is empty (no GITHUB_REPOSITORY)"
 if run_validation "repository_dispatch" \
   "42" "kickoff" "AnyOrg/any-repo/42/kickoff/1711234567890" "actor1" "1711234567890" "PVTI_42" \
-  "" "" "" ""; then
+  "" "" "" "" "" "" ""; then
   assert_eq "issue_number" "42" "$(get_output issue_number)"
 else
   FAIL=$((FAIL + 1))
@@ -429,7 +476,7 @@ echo ""
 echo "22. Multiple run_key mismatches reported together"
 if run_validation "repository_dispatch" \
   "42" "kickoff" "WrongOrg/wrong-repo/99/design/9999999999999" "actor1" "1711234567890" "PVTI_42" \
-  "" "" "" "SlateLabs/github-project-automation"; then
+  "" "" "" "" "" "" "SlateLabs/github-project-automation"; then
   FAIL=$((FAIL + 1))
   echo "  ✗ Should have failed with multiple mismatches"
   TESTS+=("FAIL: multiple mismatches accepted")
@@ -449,6 +496,56 @@ else
   FAIL=$((FAIL + 1))
   echo "  ✗ Missing project_item_id should be tolerated"
   TESTS+=("FAIL: missing project_item_id rejected")
+fi
+
+echo ""
+echo "24. feedback source contract accepts coherent feedback payload"
+if run_validation "repository_dispatch" \
+  "77" "feedback-implementation" "SlateLabs/repo/77/feedback-implementation/123" "trusted-user" "123" "PVTI_77" \
+  "tighten retry guardrails" "feedback" "7001"; then
+  assert_eq "source_command" "feedback" "$(get_output source_command)"
+  assert_eq "source_comment_id" "7001" "$(get_output source_comment_id)"
+  assert_eq "feedback_instructions" "tighten retry guardrails" "$(get_output feedback_instructions)"
+else
+  FAIL=$((FAIL + 1))
+  echo "  ✗ coherent feedback payload should pass"
+  TESTS+=("FAIL: coherent feedback payload rejected")
+fi
+
+echo ""
+echo "25. feedback source contract rejects missing feedback instructions"
+if run_validation "repository_dispatch" \
+  "77" "feedback-implementation" "SlateLabs/repo/77/feedback-implementation/123" "trusted-user" "123" "PVTI_77" \
+  "" "feedback" "7002"; then
+  FAIL=$((FAIL + 1))
+  echo "  ✗ Should have failed with missing feedback instructions"
+  TESTS+=("FAIL: missing feedback instructions accepted")
+else
+  assert_contains "error mentions feedback instructions" "feedback_instructions is required when source_command is 'feedback'" "$LAST_ERRORS"
+fi
+
+echo ""
+echo "26. feedback source contract rejects feedback command routed to wrong stage"
+if run_validation "repository_dispatch" \
+  "77" "merge" "SlateLabs/repo/77/merge/123" "trusted-user" "123" "PVTI_77" \
+  "please adjust" "feedback" "7003"; then
+  FAIL=$((FAIL + 1))
+  echo "  ✗ Should have failed with feedback stage mismatch"
+  TESTS+=("FAIL: feedback stage mismatch accepted")
+else
+  assert_contains "error mentions feedback stage mapping" "source_command 'feedback' requires requested_stage 'feedback-implementation'" "$LAST_ERRORS"
+fi
+
+echo ""
+echo "27. feedback source contract rejects orphan source_comment_id"
+if run_validation "repository_dispatch" \
+  "77" "kickoff" "SlateLabs/repo/77/kickoff/123" "trusted-user" "123" "PVTI_77" \
+  "" "" "7004"; then
+  FAIL=$((FAIL + 1))
+  echo "  ✗ Should have failed with missing source_command"
+  TESTS+=("FAIL: orphan source_comment_id accepted")
+else
+  assert_contains "error mentions source_command requirement" "source_command is required when source_comment_id is provided" "$LAST_ERRORS"
 fi
 
 echo ""
