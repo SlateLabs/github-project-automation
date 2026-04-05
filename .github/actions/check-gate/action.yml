@@ -60,6 +60,10 @@ runs:
         unmet=()
         waived=()
         requested_stage_normalized=$(printf '%s' "$REQUESTED_STAGE" | tr -d '\r' | xargs)
+        gate_stage="$requested_stage_normalized"
+        if [ "$gate_stage" = "feedback-implementation" ]; then
+          gate_stage="execution"
+        fi
 
         # --- Build trusted-user list for waiver validation (§4 rule 5) ---
         trusted_users_list=""
@@ -106,7 +110,7 @@ runs:
         }
 
         # --- Gate checks by stage ---
-        case "$requested_stage_normalized" in
+        case "$gate_stage" in
           kickoff)
             # Gate 1→2: Backlog triage
             # Issue exists (already validated by eligibility check)
