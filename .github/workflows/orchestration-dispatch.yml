@@ -1258,9 +1258,13 @@ jobs:
           current_pr_sha=$(echo "$pr_json" | jq -r '.headRefOid // empty' 2>/dev/null || true)
 
           comments_json=$(gh issue view "$ISSUE_NUMBER" --comments --json comments)
-          last_reviewed_sha=$(printf '%s' "$comments_json" | python3 - <<'PY'
+          comments_json_file=$(mktemp)
+          trap 'rm -f "$comments_json_file"' EXIT
+          printf '%s' "$comments_json" > "$comments_json_file"
+          last_reviewed_sha=$(python3 - "$comments_json_file" <<'PY'
           import json, re, sys
-          payload = json.load(sys.stdin)
+          with open(sys.argv[1], "r", encoding="utf-8") as fh:
+              payload = json.load(fh)
           comments = payload.get("comments", [])
           blocks = []
           current = None
