@@ -254,42 +254,39 @@ jobs:
 
           if [ "$REQUESTED_STAGE" = "feedback-implementation" ] && [ -z "$feedback_body" ]; then
             comments_json=$(gh issue view "$ISSUE_NUMBER" --comments --json comments)
-            recovered=$(python3 - "$comments_json" <<'PY'
-            import json, sys
-
-            comments = json.loads(sys.argv[1]).get("comments", [])
-            target = None
-            for comment in comments:
-                body = comment.get("body", "")
-                if "gpa:run-status:agent-review:completed:" in body:
-                    target = body
-
-            if not target:
-                print("")
-                raise SystemExit(0)
-
-            lines = target.splitlines()
-            table_done = False
-            payload = []
-            blank_run = 0
-            for line in lines:
-                if not table_done:
-                    if line.startswith("| **Disposition** |"):
-                        table_done = True
-                    continue
-                if not line.strip():
-                    blank_run += 1
-                    if payload:
-                        payload.append(line)
-                    continue
-                if blank_run < 1:
-                    # Skip the summary paragraph immediately after the table.
-                    continue
-                payload.append(line)
-
-            text = "\n".join(payload).strip()
-            print(text)
-            PY
+            target_comment=$(
+              printf '%s' "$comments_json" |
+                jq -r '.comments | map(select(.body | contains("gpa:run-status:agent-review:completed:"))) | last | .body // ""'
+            )
+            recovered=$(
+              printf '%s\n' "$target_comment" |
+                awk '
+                  BEGIN { table_done = 0; blank_run = 0; payload = "" }
+                  !table_done {
+                    if ($0 ~ /^\| \*\*Disposition\*\* \|/) {
+                      table_done = 1
+                    }
+                    next
+                  }
+                  {
+                    if ($0 ~ /^[[:space:]]*$/) {
+                      blank_run++
+                      if (length(payload)) {
+                        payload = payload ORS $0
+                      }
+                      next
+                    }
+                    if (blank_run < 1) {
+                      next
+                    }
+                    if (length(payload)) {
+                      payload = payload ORS $0
+                    } else {
+                      payload = $0
+                    }
+                  }
+                  END { print payload }
+                '
             )
             if [ -n "$recovered" ]; then
               feedback_body="$recovered"
