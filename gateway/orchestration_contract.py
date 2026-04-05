@@ -47,6 +47,9 @@ class OperatorCommandType(str, Enum):
     APPROVE = "approve"
 
 
+REVIEW_READY_MARKER = "gpa:review-ready"
+
+
 STAGE_TRANSITIONS: dict[OrchestrationStage, tuple[OrchestrationStage, ...]] = {
     OrchestrationStage.KICKOFF: (OrchestrationStage.CLARIFICATION,),
     OrchestrationStage.CLARIFICATION: (OrchestrationStage.DESIGN,),
@@ -222,3 +225,17 @@ def select_latest_operator_command(
     # Latest valid command wins by created timestamp, then comment id.
     candidates.sort(key=lambda c: (c.created_at_ms, c.comment_id))
     return candidates[-1]
+
+
+def find_latest_review_ready_marker_ms(comments: Iterable[Mapping[str, object]]) -> int | None:
+    latest: int | None = None
+    for comment in comments:
+        body = str(comment.get("body") or "")
+        if REVIEW_READY_MARKER not in body:
+            continue
+        created_at_ms = int(comment.get("created_at_ms") or 0)
+        if created_at_ms <= 0:
+            continue
+        if latest is None or created_at_ms > latest:
+            latest = created_at_ms
+    return latest

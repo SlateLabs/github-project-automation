@@ -4,11 +4,13 @@ import unittest
 
 from gateway.orchestration_contract import (
     CoarseStatus,
+    REVIEW_READY_MARKER,
     OperatorCommandType,
     OrchestrationStage,
     RetryMetadata,
     StageEvent,
     StageOutcome,
+    find_latest_review_ready_marker_ms,
     is_transition_allowed,
     parse_operator_command,
     select_latest_operator_command,
@@ -143,6 +145,15 @@ class OrchestrationContractTests(unittest.TestCase):
             review_ready_after_ms=1000,
         )
         self.assertIsNone(selected)
+
+    def test_find_latest_review_ready_marker(self) -> None:
+        comments = [
+            {"id": 1, "created_at_ms": 1000, "author": "bot", "body": f"<!-- {REVIEW_READY_MARKER} -->"},
+            {"id": 2, "created_at_ms": 1200, "author": "bot", "body": "normal comment"},
+            {"id": 3, "created_at_ms": 1300, "author": "bot", "body": f"{REVIEW_READY_MARKER} deployment: https://example"},
+        ]
+        self.assertEqual(find_latest_review_ready_marker_ms(comments), 1300)
+        self.assertIsNone(find_latest_review_ready_marker_ms([{"id": 9, "created_at_ms": 1400, "body": "none"}]))
 
 
 if __name__ == "__main__":

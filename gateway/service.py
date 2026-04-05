@@ -18,6 +18,7 @@ from gateway.github_api import (
     TrustPolicy,
 )
 from gateway.orchestration_contract import OperatorCommandType, parse_operator_command
+from gateway.orchestration_contract import find_latest_review_ready_marker_ms, select_latest_operator_command
 
 
 REQUESTED_STAGE = "kickoff"
@@ -297,24 +298,13 @@ class GatewayService:
         parsed = parse_operator_command(body)
         if parsed is None:
             return GatewayResult(202, {"outcome": "skipped", "reason": "No structured operator command found"})
-        command_type, instructions = parsed
-
+        hinted_command_type, _ = parsed
+        requested_stage = OPERATOR_COMMAND_STAGE[hinted_command_type]
         if not repo_full_name or issue_number <= 0 or comment_id <= 0:
             return GatewayResult(400, {"outcome": "rejected", "reason": "issue_comment payload is missing repository, issue number, or comment id"})
 
         if repo_full_name not in self.repo_config:
             return GatewayResult(202, {"outcome": "skipped", "reason": f"Repository '{repo_full_name}' is not configured in config/repos.yml"})
-
-        requested_stage = OPERATOR_COMMAND_STAGE[command_type]
-        configured_repo = self.repo_config[repo_full_name]
-        if requested_stage not in configured_repo.enabled_stages:
-            return GatewayResult(
-                422,
-                {
-                    "outcome": "rejected",
-                    "reason": f"Repository '{repo_full_name}' does not enable stage '{requested_stage}'",
-                },
-            )
 
         decision = self._resolve_actor_decision(payload, actor, repo_full_name)
         if decision.outcome != "trusted":
@@ -331,6 +321,54 @@ class GatewayService:
                 )
             )
             return GatewayResult(202, {"outcome": "dropped", "reason": decision.reason})
+
+        try:
+            comments = self.github_client.get_issue_comments(repo_full_name, issue_number)
+        except GitHubApiError as exc:
+            return GatewayResult(502, {"outcome": "error", "reason": f"Failed to query issue comments: {exc}"})
+
+        latest_review_ready_ms = find_latest_review_ready_marker_ms(comments)
+        if latest_review_ready_ms is None:
+            return GatewayResult(
+                422,
+                {
+                    "outcome": "rejected",
+                    "reason": f"No 'gpa:review-ready' marker found on issue #{issue_number}",
+                },
+            )
+
+        selected = select_latest_operator_command(
+            comments=comments,
+            trusted_users=set(self.trust_policy.trusted_users),
+            review_ready_after_ms=latest_review_ready_ms,
+        )
+        if selected is None:
+            return GatewayResult(
+                202,
+                {
+                    "outcome": "skipped",
+                    "reason": "No valid trusted operator command found after latest review-ready marker",
+                },
+            )
+        if selected.comment_id != comment_id:
+            return GatewayResult(
+                202,
+                {
+                    "outcome": "skipped",
+                    "reason": f"Command comment #{comment_id} is stale; latest valid command is comment #{selected.comment_id}",
+                },
+            )
+
+        requested_stage = OPERATOR_COMMAND_STAGE[selected.command_type]
+        configured_repo = self.repo_config[repo_full_name]
+        if requested_stage not in configured_repo.enabled_stages:
+            return GatewayResult(
+                422,
+                {
+                    "outcome": "rejected",
+                    "reason": f"Repository '{repo_full_name}' does not enable stage '{requested_stage}'",
+                },
+            )
 
         comment_key = f"{repo_full_name}/{issue_number}/{comment_id}"
         now_ms = self.clock()
@@ -351,10 +389,10 @@ class GatewayService:
             "actor": actor,
             "timestamp": str(now_ms),
             "source_comment_id": comment_id,
-            "source_command": command_type.value,
+            "source_command": selected.command_type.value,
         }
-        if command_type == OperatorCommandType.FEEDBACK and instructions:
-            client_payload["feedback_instructions"] = instructions
+        if selected.command_type == OperatorCommandType.FEEDBACK and selected.instructions:
+            client_payload["feedback_instructions"] = selected.instructions
 
         last_error = self._dispatch_with_retry(repo_full_name, client_payload, delivery_id, actor, issue_number, run_key)
         if last_error is not None:

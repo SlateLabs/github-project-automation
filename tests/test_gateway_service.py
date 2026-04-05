@@ -51,6 +51,14 @@ class FakeGitHubClient:
         self.labels_added: list[tuple[str, int, str]] = []
         self.dispatches: list[tuple[str, str, dict[str, object]]] = []
         self.dispatch_failures: int = 0
+        self.issue_comments: list[dict[str, object]] = [
+            {
+                "id": 4000,
+                "created_at_ms": 1_709_999_990_000,
+                "author": "trusted-user",
+                "body": "<!-- gpa:review-ready -->",
+            }
+        ]
 
     def get_project_item_context(self, item_node_id: str) -> ProjectItemContext:
         assert item_node_id == "PVTI_123"
@@ -73,6 +81,26 @@ class FakeGitHubClient:
             self.dispatch_failures -= 1
             raise GitHubApiError("dispatch failed (simulated)")
         self.dispatches.append((repo_full_name, event_type, client_payload))
+
+    def get_issue_comments(self, repo_full_name: str, issue_number: int) -> list[dict[str, object]]:
+        assert repo_full_name == "SlateLabs/github-project-automation"
+        assert issue_number == 1
+        return list(self.issue_comments)
+
+    def upsert_issue_comment(self, *, comment_id: int, author: str, body: str, created_at_ms: int) -> None:
+        for existing in self.issue_comments:
+            if int(existing.get("id") or 0) == comment_id:
+                existing["author"] = author
+                existing["body"] = body
+                return
+        self.issue_comments.append(
+            {
+                "id": comment_id,
+                "created_at_ms": created_at_ms,
+                "author": author,
+                "body": body,
+            }
+        )
 
 
 def signature(secret: str, body: bytes) -> str:
@@ -162,6 +190,12 @@ class GatewayServiceTests(unittest.TestCase):
         *,
         delivery_id: str = "delivery-comment-1",
     ) -> tuple[int, dict[str, object]]:
+        self.github.upsert_issue_comment(
+            comment_id=int((payload.get("comment") or {}).get("id") or 0),
+            author=str((payload.get("sender") or {}).get("login") or ""),
+            body=str((payload.get("comment") or {}).get("body") or ""),
+            created_at_ms=self.now_ms,
+        )
         raw_body = json.dumps(payload).encode("utf-8")
         headers = {
             "X-GitHub-Delivery": delivery_id,
@@ -268,6 +302,43 @@ class GatewayServiceTests(unittest.TestCase):
         self.assertEqual(second[0], 202)
         self.assertEqual(second[1]["outcome"], "deduplicated")
         self.assertEqual(len(self.github.dispatches), 1)
+
+    def test_issue_comment_is_rejected_without_review_ready_marker(self) -> None:
+        self.github.issue_comments = []
+        status, body = self._issue_comment_request(
+            self._issue_comment_payload(comment_id=5010),
+            delivery_id="delivery-comment-10",
+        )
+        self.assertEqual(status, 422)
+        self.assertEqual(body["outcome"], "rejected")
+        self.assertIn("gpa:review-ready", body["reason"])
+        self.assertEqual(self.github.dispatches, [])
+
+    def test_issue_comment_is_skipped_when_superseded_by_newer_command(self) -> None:
+        self.github.issue_comments.extend(
+            [
+                {
+                    "id": 5011,
+                    "created_at_ms": self.now_ms - 20,
+                    "author": "trusted-user",
+                    "body": "gpa:feedback first command",
+                },
+                {
+                    "id": 5012,
+                    "created_at_ms": self.now_ms - 10,
+                    "author": "trusted-user",
+                    "body": "gpa:approve",
+                },
+            ]
+        )
+        status, body = self._issue_comment_request(
+            self._issue_comment_payload(comment_id=5011, body="gpa:feedback first command"),
+            delivery_id="delivery-comment-11",
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(body["outcome"], "skipped")
+        self.assertIn("latest valid command is comment #5012", body["reason"])
+        self.assertEqual(self.github.dispatches, [])
 
     def test_issue_comment_from_untrusted_actor_is_dropped(self) -> None:
         status, body = self._issue_comment_request(

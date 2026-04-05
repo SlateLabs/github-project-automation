@@ -537,9 +537,12 @@ Current enforcement in this slice:
 - Commands are accepted only from trusted actors under `config/trust-policy.yml`
 - Only `created` and `edited` issue comments are processed
 - Commands on pull request conversations are ignored (commands must be posted on the source issue)
+- A `gpa:review-ready` marker must exist on the issue (`<!-- gpa:review-ready -->` is supported)
+- Commands are only valid if posted after the latest `gpa:review-ready` marker
+- The gateway evaluates full issue comment history and applies `latest valid command wins`
 - Command comments are deduplicated by `{repo}/{issue_number}/{comment_id}` within the gateway dedup window
 
-This provides a minimal operator feedback loop trigger without introducing an external state store. Recency checks against the latest review-ready marker remain a follow-on slice.
+This keeps operator feedback/approval intake GitHub-native and resumable without introducing an external state store.
 
 ### Stage contract
 
