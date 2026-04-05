@@ -1689,6 +1689,18 @@ jobs:
         run: |
           set -euo pipefail
 
+          case "$DISPOSITION" in
+            auto-approve)
+              next_stage="merge"
+              ;;
+            rework-required)
+              next_stage="feedback-implementation"
+              ;;
+            *)
+              next_stage="deploy-review"
+              ;;
+          esac
+
           checkpoint=$(jq -cn \
             --arg run_key "$RUN_KEY" \
             --arg stage "agent-review" \
@@ -1697,7 +1709,7 @@ jobs:
             --arg disposition "$DISPOSITION" \
             --arg artifact_ref "pr:$PR_NUMBER" \
             --arg pr_head_sha "$PR_HEAD_SHA" \
-            --arg next_stage "$([ "$DISPOSITION" = "auto-approve" ] && printf '%s' merge || [ "$DISPOSITION" = "rework-required" ] && printf '%s' feedback-implementation || printf '%s' deploy-review)" \
+            --arg next_stage "$next_stage" \
             '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,disposition:$disposition,artifact_ref:$artifact_ref,pr_head_sha:$pr_head_sha,next_stage:$next_stage}')
 
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
