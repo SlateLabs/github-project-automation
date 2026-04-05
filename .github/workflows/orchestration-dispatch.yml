@@ -74,6 +74,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Normalize inputs
         id: normalize
@@ -1315,6 +1317,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          git config --local --unset-all http.https://github.com/.extraheader || true
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           default_branch=$(gh repo view "${GITHUB_REPOSITORY}" --json defaultBranchRef --jq '.defaultBranchRef.name')
           if git ls-remote --exit-code --heads origin "$BRANCH_NAME" >/dev/null 2>&1; then
@@ -1404,6 +1407,7 @@ jobs:
         env:
           BRANCH_NAME: ${{ steps.scaffold-execution.outputs.branch_name }}
           ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+          GH_TOKEN: ${{ steps.execution-app-token.outputs.token || secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1420,7 +1424,8 @@ jobs:
           fi
 
           git commit -m "feat: implement issue #${ISSUE_NUMBER} execution slice"
-          git push origin "HEAD:${BRANCH_NAME}"
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${BRANCH_NAME}"
 
       - name: Create or recover execution PR (post-agent)
         if: needs.intake.outputs.requested_stage == 'execution' || needs.intake.outputs.requested_stage == 'feedback-implementation'
