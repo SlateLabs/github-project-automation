@@ -546,7 +546,7 @@ Current enforcement in this slice:
 - Commands are only valid if posted after the latest valid `gpa:review-ready` artifact comment
 - The gateway evaluates full issue comment history and applies `latest valid command wins`
 - The webhook `issue_comment` payload is merged as an authoritative candidate to avoid stale-list races immediately after comment creation/edit
-- Command comments are deduplicated by `{repo}/{issue_number}/{comment_id}` within the gateway dedup window
+- Command comments are deduplicated by `{repo}/{issue_number}/{comment_id}/{comment_version_ms}` within the gateway dedup window (`comment_version_ms` uses `updated_at` when present, otherwise `created_at`)
 
 This keeps operator feedback/approval intake GitHub-native and resumable without introducing an external state store.
 

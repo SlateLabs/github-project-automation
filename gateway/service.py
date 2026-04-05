@@ -382,13 +382,14 @@ class GatewayService:
                 },
             )
 
-        comment_key = f"{repo_full_name}/{issue_number}/{comment_id}"
+        comment_version_ms = self._parse_comment_updated_at_ms(comment, now_ms)
+        comment_key = f"{repo_full_name}/{issue_number}/{comment_id}/{comment_version_ms}"
         if self.dedup_store.seen_operator_comment(comment_key, now_ms):
             return GatewayResult(
                 202,
                 {
                     "outcome": "deduplicated",
-                    "reason": f"Command comment #{comment_id} has already been processed",
+                    "reason": f"Command comment #{comment_id} (version {comment_version_ms}) has already been processed",
                 },
             )
 
@@ -475,10 +476,25 @@ class GatewayService:
 
     def _parse_comment_created_at_ms(self, comment: dict[str, Any], fallback_ms: int) -> int:
         created_at = str(comment.get("created_at") or "")
-        if not created_at:
+        return self._parse_iso8601_ms(created_at, fallback_ms)
+
+    def _parse_comment_updated_at_ms(self, comment: dict[str, Any], fallback_ms: int) -> int:
+        updated_at = str(comment.get("updated_at") or "")
+        if updated_at:
+            return self._parse_iso8601_ms(updated_at, fallback_ms)
+        created_at = str(comment.get("created_at") or "")
+        return self._parse_iso8601_ms(created_at, fallback_ms)
+
+    def _parse_iso8601_ms(self, iso8601_timestamp: str, fallback_ms: int) -> int:
+        if not iso8601_timestamp:
             return fallback_ms
         try:
-            return int(datetime.fromisoformat(created_at.replace("Z", "+00:00")).astimezone(timezone.utc).timestamp() * 1000)
+            return int(
+                datetime.fromisoformat(iso8601_timestamp.replace("Z", "+00:00"))
+                .astimezone(timezone.utc)
+                .timestamp()
+                * 1000
+            )
         except ValueError:
             return fallback_ms
 

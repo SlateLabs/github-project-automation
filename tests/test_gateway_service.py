@@ -180,10 +180,14 @@ class GatewayServiceTests(unittest.TestCase):
         comment_id: int = 5001,
         action: str = "created",
         created_at_ms: int | None = None,
+        updated_at_ms: int | None = None,
     ) -> dict[str, object]:
         if created_at_ms is None:
             created_at_ms = self.now_ms
+        if updated_at_ms is None:
+            updated_at_ms = created_at_ms
         created_at = datetime.fromtimestamp(created_at_ms / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+        updated_at = datetime.fromtimestamp(updated_at_ms / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
         return {
             "action": action,
             "repository": {"full_name": "SlateLabs/github-project-automation"},
@@ -192,6 +196,7 @@ class GatewayServiceTests(unittest.TestCase):
                 "id": comment_id,
                 "body": body,
                 "created_at": created_at,
+                "updated_at": updated_at,
             },
             "sender": {"login": actor, "type": "User"},
         }
@@ -348,7 +353,7 @@ class GatewayServiceTests(unittest.TestCase):
         self.assertEqual(body["outcome"], "skipped")
         self.assertEqual(self.github.dispatches, [])
 
-    def test_issue_comment_is_deduplicated_by_comment_id(self) -> None:
+    def test_issue_comment_is_deduplicated_by_comment_version(self) -> None:
         payload = self._issue_comment_payload(comment_id=5004)
         first = self._issue_comment_request(payload, delivery_id="delivery-comment-4a")
         second = self._issue_comment_request(payload, delivery_id="delivery-comment-4b")
@@ -356,6 +361,31 @@ class GatewayServiceTests(unittest.TestCase):
         self.assertEqual(second[0], 202)
         self.assertEqual(second[1]["outcome"], "deduplicated")
         self.assertEqual(len(self.github.dispatches), 1)
+
+    def test_issue_comment_created_then_edited_same_comment_is_reprocessed(self) -> None:
+        created_payload = self._issue_comment_payload(
+            comment_id=5006,
+            body="gpa:feedback first draft",
+            action="created",
+            created_at_ms=self.now_ms - 30,
+            updated_at_ms=self.now_ms - 30,
+        )
+        edited_payload = self._issue_comment_payload(
+            comment_id=5006,
+            body="gpa:feedback corrected instructions",
+            action="edited",
+            created_at_ms=self.now_ms - 30,
+            updated_at_ms=self.now_ms - 5,
+        )
+
+        created = self._issue_comment_request(created_payload, delivery_id="delivery-comment-6a")
+        edited = self._issue_comment_request(edited_payload, delivery_id="delivery-comment-6b")
+
+        self.assertEqual(created[0], 200)
+        self.assertEqual(edited[0], 200)
+        self.assertEqual(len(self.github.dispatches), 2)
+        self.assertEqual(self.github.dispatches[0][2]["feedback_instructions"], "first draft")
+        self.assertEqual(self.github.dispatches[1][2]["feedback_instructions"], "corrected instructions")
 
     def test_issue_comment_is_rejected_without_review_ready_marker(self) -> None:
         self.github.issue_comments = []
