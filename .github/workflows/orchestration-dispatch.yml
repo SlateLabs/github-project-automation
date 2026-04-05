@@ -478,6 +478,7 @@ jobs:
       state_valid: ${{ steps.state-check.outputs.state_valid }}
       review_disposition: ${{ steps.parse-agent-review.outputs.disposition }}
       review_feedback_body: ${{ steps.parse-agent-review.outputs.feedback_body }}
+      feedback_no_progress: ${{ steps.feedback-progress.outputs.no_progress }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -1159,6 +1160,46 @@ jobs:
           actor: ${{ needs.intake.outputs.actor }}
           create_pr: 'false'
 
+      - name: Load feedback loop context
+        if: needs.intake.outputs.requested_stage == 'feedback-implementation'
+        id: feedback-loop-context
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pr_json=$(gh pr list --state open --json number,headRefName,headRefOid,updatedAt --limit 100 \
+            --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))] | sort_by(.updatedAt) | reverse | .[0]" 2>/dev/null || echo '')
+          current_pr_sha=$(echo "$pr_json" | jq -r '.headRefOid // empty' 2>/dev/null || true)
+
+          comments_json=$(gh issue view "$ISSUE_NUMBER" --comments --json comments)
+          last_reviewed_sha=$(python3 - <<'PY' "$comments_json"
+          import json, re, sys
+          payload = json.loads(sys.argv[1])
+          comments = payload.get("comments", [])
+          blocks = []
+          current = None
+          marker = "gpa:run-status:agent-review:completed:"
+          for comment in comments:
+              body = comment.get("body", "")
+              if marker in body:
+                  current = body
+                  blocks.append(current)
+          sha = ""
+          if blocks:
+              body = blocks[-1]
+              m = re.search(r"\| \*\*PR head SHA\*\* \| `([0-9a-f]{7,40})` \|", body)
+              if m:
+                  sha = m.group(1)
+          print(sha)
+          PY
+          )
+
+          echo "current_pr_sha=$current_pr_sha" >> "$GITHUB_OUTPUT"
+          echo "last_reviewed_sha=$last_reviewed_sha" >> "$GITHUB_OUTPUT"
+
       - name: Load implementation plan source for execution
         if: needs.intake.outputs.requested_stage == 'execution' || needs.intake.outputs.requested_stage == 'feedback-implementation'
         id: execution-plan-source
@@ -1322,6 +1363,41 @@ jobs:
             echo "::notice::PR #$PR_NUMBER already ready for review"
           fi
 
+      - name: Load post-execution PR state
+        if: needs.intake.outputs.requested_stage == 'execution' || needs.intake.outputs.requested_stage == 'feedback-implementation'
+        id: post-execution-pr-state
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pr_json=$(gh pr list --state open --json number,headRefName,headRefOid,updatedAt --limit 100 \
+            --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))] | sort_by(.updatedAt) | reverse | .[0]" 2>/dev/null || echo '')
+          current_pr_sha=$(echo "$pr_json" | jq -r '.headRefOid // empty' 2>/dev/null || true)
+          echo "current_pr_sha=$current_pr_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Detect feedback implementation progress
+        if: needs.intake.outputs.requested_stage == 'feedback-implementation'
+        id: feedback-progress
+        env:
+          START_SHA: ${{ steps.feedback-loop-context.outputs.current_pr_sha }}
+          LAST_REVIEWED_SHA: ${{ steps.feedback-loop-context.outputs.last_reviewed_sha }}
+          END_SHA: ${{ steps.post-execution-pr-state.outputs.current_pr_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          no_progress="false"
+          if [ -n "${START_SHA:-}" ] && [ -n "${LAST_REVIEWED_SHA:-}" ] && [ -n "${END_SHA:-}" ] && \
+             [ "$START_SHA" = "$LAST_REVIEWED_SHA" ] && [ "$END_SHA" = "$LAST_REVIEWED_SHA" ]; then
+            no_progress="true"
+            echo "::warning::Feedback implementation made no progress relative to the last reviewed PR head SHA ($LAST_REVIEWED_SHA)"
+          fi
+
+          echo "no_progress=$no_progress" >> "$GITHUB_OUTPUT"
+
       - name: Load agent review PR context
         if: needs.intake.outputs.requested_stage == 'agent-review'
         id: agent-review-context
@@ -1332,7 +1408,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          pr_json=$(gh pr list --state open --json number,title,url,body,headRefName,files,additions,deletions,changedFiles --limit 100 \
+          pr_json=$(gh pr list --state open --json number,title,url,body,headRefName,headRefOid,files,additions,deletions,changedFiles --limit 100 \
             --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))][0]")
           pr_number=$(echo "$pr_json" | jq -r '.number // empty')
           if [ -z "$pr_number" ]; then
@@ -1343,6 +1419,7 @@ jobs:
           pr_body=$(echo "$pr_json" | jq -r '.body // ""')
           pr_url=$(echo "$pr_json" | jq -r '.url // ""')
           pr_title=$(echo "$pr_json" | jq -r '.title // ""')
+          pr_head_sha=$(echo "$pr_json" | jq -r '.headRefOid // ""')
           files_summary=$(echo "$pr_json" | jq -r '.files[]?.path // ""')
           diff_file="$RUNNER_TEMP/agent-review.diff"
           gh pr diff "$pr_number" --patch --color=never > "$diff_file"
@@ -1366,6 +1443,9 @@ jobs:
             echo 'EOF'
             echo 'pr_title<<EOF'
             printf '%s\n' "$pr_title"
+            echo 'EOF'
+            echo 'pr_head_sha<<EOF'
+            printf '%s\n' "$pr_head_sha"
             echo 'EOF'
             echo 'files_summary<<EOF'
             printf '%s\n' "$files_summary"
@@ -1509,6 +1589,7 @@ jobs:
           RUN_KEY: ${{ needs.intake.outputs.run_key }}
           PR_NUMBER: ${{ steps.agent-review-context.outputs.pr_number }}
           PR_URL: ${{ steps.agent-review-context.outputs.pr_url }}
+          PR_HEAD_SHA: ${{ steps.agent-review-context.outputs.pr_head_sha }}
           DISPOSITION: ${{ steps.parse-agent-review.outputs.disposition }}
           SUMMARY: ${{ steps.parse-agent-review.outputs.summary }}
           FEEDBACK_BODY: ${{ steps.parse-agent-review.outputs.feedback_body }}
@@ -1524,6 +1605,7 @@ jobs:
           |-------|-------|
           | **Run key** | \`$RUN_KEY\` |
           | **PR** | $PR_URL |
+          | **PR head SHA** | \`$PR_HEAD_SHA\` |
           | **Disposition** | \`$DISPOSITION\` |
 
           $SUMMARY
@@ -1890,6 +1972,7 @@ jobs:
           REQUESTED_STAGE: ${{ needs.intake.outputs.requested_stage }}
           REVIEW_DISPOSITION: ${{ needs.gate.outputs.review_disposition }}
           FEEDBACK_SOURCE: ${{ needs.intake.outputs.feedback_source }}
+          FEEDBACK_NO_PROGRESS: ${{ needs.gate.outputs.feedback_no_progress }}
         run: |
           case "$REQUESTED_STAGE" in
             kickoff)
@@ -1938,6 +2021,9 @@ jobs:
               ;;
             feedback-implementation)
               if [ "$FEEDBACK_SOURCE" = "operator" ]; then
+                next_stage="deploy-review"
+                target_status="In Review"
+              elif [ "$FEEDBACK_NO_PROGRESS" = "true" ]; then
                 next_stage="deploy-review"
                 target_status="In Review"
               else
