@@ -473,18 +473,128 @@ runs:
             fi
             ;;
 
-          deploy-review|review-intake|redeploy-review|review)
-            # Gate: Review (§4 Gate 6→7)
-            # Implemented checks:
-            #   1. A PR referencing this issue exists (open or merged)
-            #   2. PR has at least one approving review
-            #   3. No unresolved changes-requested reviews remain
-            # Skipped checks (§4 Gate 6→7 — not yet implemented per gate contract rule 2):
-            #   - SKIPPED: All required CI status checks pass on the PR head commit
-            #   - SKIPPED: No unresolved review threads remain (or each has a GATE-WAIVER reply)
-            #   - SKIPPED: PR body contains ## Review Checklist with items for accessibility,
-            #     usability/content, documentation, hygiene — each marked complete or waived
-            #   - SKIPPED: Approving review is from a trusted actor (non-author)
+          deploy-review|redeploy-review)
+            # Gate: deploy-review / redeploy-review
+            # Required artifact set (fail-closed):
+            #   1. A non-draft open PR referencing the issue
+            #   2. Latest review-ready summary comment with marker
+            #      - <!-- gpa:review-ready -->
+            #      - PR: #<number> (or full PR URL)
+            #      - Deployment URL: https://...
+            #      - Deployment Status: <non-empty, non-placeholder>
+
+            deploy_pr_json=""
+            deploy_pr_number=""
+            deploy_pr_is_draft="false"
+
+            # Primary: branch convention, then fallback by issue reference.
+            deploy_pr_json=$(gh pr list --state open --json number,isDraft,headRefName,updatedAt --limit 100 \
+              --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))] | sort_by(.updatedAt) | reverse | .[0]" 2>/dev/null || echo '')
+            deploy_pr_number=$(echo "$deploy_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
+
+            if [ -z "$deploy_pr_number" ]; then
+              deploy_pr_json=$(gh pr list --state open --search "\"#${ISSUE_NUMBER}\" in:title,body" \
+                --json number,isDraft,updatedAt --jq 'sort_by(.updatedAt) | reverse | .[0]' 2>/dev/null || echo '')
+              deploy_pr_number=$(echo "$deploy_pr_json" | jq -r '.number // empty' 2>/dev/null || true)
+            fi
+
+            if [ -z "$deploy_pr_number" ]; then
+              if ! check_waiver "deploy-review-pr"; then
+                unmet+=("No open PR found referencing issue #${ISSUE_NUMBER} — deploy review requires a reviewable PR")
+              fi
+            else
+              deploy_pr_is_draft=$(echo "$deploy_pr_json" | jq -r '.isDraft // false' 2>/dev/null || echo "false")
+              if [ "$deploy_pr_is_draft" = "true" ]; then
+                if ! check_waiver "deploy-review-pr-ready"; then
+                  unmet+=("PR #$deploy_pr_number is still draft — deploy review requires a non-draft PR")
+                fi
+              fi
+            fi
+
+            review_comments_json=$(gh issue view "$ISSUE_NUMBER" --comments --json comments 2>/dev/null || echo '{"comments":[]}')
+            review_ready_json=$(echo "$review_comments_json" | jq -c '
+              [.comments[]
+               | select((.body // "") | contains("gpa:review-ready"))
+               | {id: .id, createdAt: (.createdAt // ""), body: (.body // "")}]
+              | sort_by(.createdAt)
+              | last // {}' 2>/dev/null || echo '{}')
+            review_ready_id=$(echo "$review_ready_json" | jq -r '.id // empty' 2>/dev/null || true)
+            review_ready_body=$(echo "$review_ready_json" | jq -r '.body // ""' 2>/dev/null || true)
+
+            if [ -z "$review_ready_id" ]; then
+              if ! check_waiver "deploy-review-marker"; then
+                unmet+=("No review-ready marker comment found — post a summary comment containing <!-- gpa:review-ready -->")
+              fi
+            else
+              review_ready_pr_field=$(printf '%s\n' "$review_ready_body" | sed -nE 's/^[[:space:]]*[Pp][Rr][[:space:]]*:[[:space:]]*(.+)$/\1/p' | head -1 || true)
+              review_ready_deployment_url=$(printf '%s\n' "$review_ready_body" | sed -nE 's/^[[:space:]]*[Dd]eployment[[:space:]]+[Uu][Rr][Ll][[:space:]]*:[[:space:]]*(.+)$/\1/p' | head -1 || true)
+              review_ready_deployment_status=$(printf '%s\n' "$review_ready_body" | sed -nE 's/^[[:space:]]*[Dd]eployment[[:space:]]+[Ss]tatus[[:space:]]*:[[:space:]]*(.+)$/\1/p' | head -1 || true)
+
+              review_ready_pr_number=$(python3 -c 'import re,sys; v=(sys.argv[1] if len(sys.argv)>1 else "").strip(); u=re.search(r"https://github\\.com/[^/\\s]+/[^/\\s]+/pull/(\\d+)", v); n=re.search(r"#?(\\d+)", v); print(u.group(1) if u else (n.group(1) if n else ""))' "$review_ready_pr_field" 2>/dev/null || true)
+
+              deployment_url_valid=$(python3 -c 'import sys; from urllib.parse import urlparse; v=(sys.argv[1] if len(sys.argv)>1 else "").strip(); p=urlparse(v); h=(p.hostname or "").lower(); ok=(p.scheme in {"http","https"} and bool(p.netloc) and h not in {"localhost","127.0.0.1"}); print("true" if ok else "false")' "$review_ready_deployment_url" 2>/dev/null || true)
+
+              deployment_status_valid=$(python3 -c 'import sys; v=(sys.argv[1] if len(sys.argv)>1 else "").strip().lower(); invalid={"","pending","unknown","n/a","na","tbd","todo","unset"}; print("false" if v in invalid else "true")' "$review_ready_deployment_status" 2>/dev/null || true)
+
+              if [ -z "$review_ready_pr_number" ]; then
+                if ! check_waiver "deploy-review-marker-pr"; then
+                  unmet+=("Latest gpa:review-ready comment is missing a valid PR field (expected 'PR: #<number>' or PR URL)")
+                fi
+              fi
+              if [ "$deployment_url_valid" != "true" ]; then
+                if ! check_waiver "deploy-review-marker-deployment-url"; then
+                  unmet+=("Latest gpa:review-ready comment is missing a valid Deployment URL (http/https required)")
+                fi
+              fi
+              if [ "$deployment_status_valid" != "true" ]; then
+                if ! check_waiver "deploy-review-marker-deployment-status"; then
+                  unmet+=("Latest gpa:review-ready comment is missing a valid Deployment Status")
+                fi
+              fi
+
+              if [ -n "$deploy_pr_number" ] && [ -n "$review_ready_pr_number" ] && [ "$deploy_pr_number" != "$review_ready_pr_number" ]; then
+                if ! check_waiver "deploy-review-marker-pr-mismatch"; then
+                  unmet+=("Latest gpa:review-ready comment PR ($review_ready_pr_number) does not match open PR #$deploy_pr_number")
+                fi
+              fi
+            fi
+            ;;
+
+          review-intake|review)
+            # Gate: review intake / review approval
+            # Preconditions:
+            #   1. Review-ready artifact set exists (marker + PR + deployment URL + deployment status)
+            #   2. A PR referencing this issue exists (open or merged)
+            #   3. PR has at least one approving review
+            #   4. No unresolved changes-requested reviews remain
+
+            review_comments_json=$(gh issue view "$ISSUE_NUMBER" --comments --json comments 2>/dev/null || echo '{"comments":[]}')
+            review_ready_json=$(echo "$review_comments_json" | jq -c '
+              [.comments[]
+               | select((.body // "") | contains("gpa:review-ready"))
+               | {id: .id, createdAt: (.createdAt // ""), body: (.body // "")}]
+              | sort_by(.createdAt)
+              | last // {}' 2>/dev/null || echo '{}')
+            review_ready_id=$(echo "$review_ready_json" | jq -r '.id // empty' 2>/dev/null || true)
+            review_ready_body=$(echo "$review_ready_json" | jq -r '.body // ""' 2>/dev/null || true)
+
+            if [ -z "$review_ready_id" ]; then
+              if ! check_waiver "review-ready-marker"; then
+                unmet+=("No valid gpa:review-ready summary comment found — review intake requires a review-ready artifact set")
+              fi
+            else
+              review_ready_pr_field=$(printf '%s\n' "$review_ready_body" | sed -nE 's/^[[:space:]]*[Pp][Rr][[:space:]]*:[[:space:]]*(.+)$/\1/p' | head -1 || true)
+              review_ready_deployment_url=$(printf '%s\n' "$review_ready_body" | sed -nE 's/^[[:space:]]*[Dd]eployment[[:space:]]+[Uu][Rr][Ll][[:space:]]*:[[:space:]]*(.+)$/\1/p' | head -1 || true)
+              review_ready_deployment_status=$(printf '%s\n' "$review_ready_body" | sed -nE 's/^[[:space:]]*[Dd]eployment[[:space:]]+[Ss]tatus[[:space:]]*:[[:space:]]*(.+)$/\1/p' | head -1 || true)
+
+              review_artifact_complete=$(python3 -c 'import re,sys; from urllib.parse import urlparse; pr=(sys.argv[1] if len(sys.argv)>1 else "").strip(); du=(sys.argv[2] if len(sys.argv)>2 else "").strip(); ds=(sys.argv[3] if len(sys.argv)>3 else "").strip().lower(); p=urlparse(du); has_pr=bool(re.search(r"https://github\\.com/[^/\\s]+/[^/\\s]+/pull/\\d+|#?\\d+", pr)); has_url=(p.scheme in {"http","https"} and bool(p.netloc) and (p.hostname or "").lower() not in {"localhost","127.0.0.1"}); has_status=ds not in {"","pending","unknown","n/a","na","tbd","todo","unset"}; print("true" if has_pr and has_url and has_status else "false")' "$review_ready_pr_field" "$review_ready_deployment_url" "$review_ready_deployment_status" 2>/dev/null || true)
+
+              if [ "$review_artifact_complete" != "true" ]; then
+                if ! check_waiver "review-ready-artifact"; then
+                  unmet+=("Latest gpa:review-ready comment must include PR, Deployment URL, and Deployment Status")
+                fi
+              fi
+            fi
 
             # Find PR referencing this issue — deterministic: prefer branch convention,
             # then search by issue reference. For open PRs, prefer most recently updated.

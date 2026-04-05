@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import re
 from typing import Iterable, Mapping
+from urllib.parse import urlparse
 
 
 class CoarseStatus(str, Enum):
@@ -48,6 +50,12 @@ class OperatorCommandType(str, Enum):
 
 
 REVIEW_READY_MARKER = "gpa:review-ready"
+_REVIEW_READY_PR_LINE = re.compile(r"(?im)^\s*pr\s*:\s*(?P<value>.+?)\s*$")
+_REVIEW_READY_PR_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/(?P<number>\d+)")
+_REVIEW_READY_PR_NUMBER = re.compile(r"#(?P<number>\d+)\b|^(?P<bare>\d+)\b")
+_REVIEW_READY_DEPLOYMENT_URL_LINE = re.compile(r"(?im)^\s*deployment\s+url\s*:\s*(?P<value>\S+)\s*$")
+_REVIEW_READY_DEPLOYMENT_STATUS_LINE = re.compile(r"(?im)^\s*deployment\s+status\s*:\s*(?P<value>.+?)\s*$")
+_INVALID_DEPLOYMENT_STATUS_VALUES = {"pending", "unknown", "n/a", "na", "tbd", "todo", "unset"}
 
 
 STAGE_TRANSITIONS: dict[OrchestrationStage, tuple[OrchestrationStage, ...]] = {
@@ -156,6 +164,16 @@ class ParsedOperatorCommand:
     instructions: str | None = None
 
 
+@dataclass(frozen=True)
+class ReviewReadyArtifact:
+    comment_id: int
+    created_at_ms: int
+    pr_number: int
+    deployment_url: str
+    deployment_status: str
+    body: str
+
+
 def is_transition_allowed(current: OrchestrationStage, candidate_next: OrchestrationStage) -> bool:
     return candidate_next in STAGE_TRANSITIONS.get(current, ())
 
@@ -239,3 +257,88 @@ def find_latest_review_ready_marker_ms(comments: Iterable[Mapping[str, object]])
         if latest is None or created_at_ms > latest:
             latest = created_at_ms
     return latest
+
+
+def find_latest_review_ready_artifact(comments: Iterable[Mapping[str, object]]) -> ReviewReadyArtifact | None:
+    latest: ReviewReadyArtifact | None = None
+    for comment in comments:
+        artifact = parse_review_ready_artifact(comment)
+        if artifact is None:
+            continue
+        if latest is None or (artifact.created_at_ms, artifact.comment_id) > (latest.created_at_ms, latest.comment_id):
+            latest = artifact
+    return latest
+
+
+def parse_review_ready_artifact(comment: Mapping[str, object]) -> ReviewReadyArtifact | None:
+    comment_id = int(comment.get("id") or 0)
+    created_at_ms = int(comment.get("created_at_ms") or 0)
+    body = str(comment.get("body") or "")
+
+    if comment_id <= 0 or created_at_ms <= 0 or REVIEW_READY_MARKER not in body:
+        return None
+
+    pr_number = _extract_pr_number(body)
+    deployment_url = _extract_deployment_url(body)
+    deployment_status = _extract_deployment_status(body)
+    if pr_number is None or deployment_url is None or deployment_status is None:
+        return None
+
+    return ReviewReadyArtifact(
+        comment_id=comment_id,
+        created_at_ms=created_at_ms,
+        pr_number=pr_number,
+        deployment_url=deployment_url,
+        deployment_status=deployment_status,
+        body=body,
+    )
+
+
+def _extract_pr_number(body: str) -> int | None:
+    line = _REVIEW_READY_PR_LINE.search(body)
+    if line is None:
+        return None
+
+    value = line.group("value").strip()
+    if not value:
+        return None
+
+    pr_url_match = _REVIEW_READY_PR_URL.search(value)
+    if pr_url_match is not None:
+        return int(pr_url_match.group("number"))
+
+    pr_number_match = _REVIEW_READY_PR_NUMBER.search(value)
+    if pr_number_match is None:
+        return None
+
+    number = pr_number_match.group("number") or pr_number_match.group("bare")
+    return int(number) if number else None
+
+
+def _extract_deployment_url(body: str) -> str | None:
+    line = _REVIEW_READY_DEPLOYMENT_URL_LINE.search(body)
+    if line is None:
+        return None
+
+    url = line.group("value").strip()
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+
+    host = (parsed.hostname or "").lower()
+    if host in {"localhost", "127.0.0.1"}:
+        return None
+    return url
+
+
+def _extract_deployment_status(body: str) -> str | None:
+    line = _REVIEW_READY_DEPLOYMENT_STATUS_LINE.search(body)
+    if line is None:
+        return None
+
+    value = line.group("value").strip()
+    if not value:
+        return None
+    if value.lower() in _INVALID_DEPLOYMENT_STATUS_VALUES:
+        return None
+    return value

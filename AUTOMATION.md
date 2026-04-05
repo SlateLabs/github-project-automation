@@ -537,8 +537,13 @@ Current enforcement in this slice:
 - Commands are accepted only from trusted actors under `config/trust-policy.yml`
 - Only `created` and `edited` issue comments are processed
 - Commands on pull request conversations are ignored (commands must be posted on the source issue)
-- A `gpa:review-ready` marker must exist on the issue (`<!-- gpa:review-ready -->` is supported)
-- Commands are only valid if posted after the latest `gpa:review-ready` marker
+- A valid review-ready artifact comment must exist on the issue before command intake is allowed.
+  Required fields in the same comment:
+  - `<!-- gpa:review-ready -->`
+  - `PR: #<number>` (or PR URL)
+  - `Deployment URL: https://...`
+  - `Deployment Status: <non-empty status>`
+- Commands are only valid if posted after the latest valid `gpa:review-ready` artifact comment
 - The gateway evaluates full issue comment history and applies `latest valid command wins`
 - The webhook `issue_comment` payload is merged as an authoritative candidate to avoid stale-list races immediately after comment creation/edit
 - Command comments are deduplicated by `{repo}/{issue_number}/{comment_id}` within the gateway dedup window
@@ -556,10 +561,10 @@ The orchestration is intended to run with minimal operator intervention once an 
 | `design` | Clarification passed | Create or recover design discussion before gate evaluation | Discussion with required headings, open questions resolved or `DEFERRED-TO-PLAN`, and at least one non-author review comment | Design discussion is reviewable and plan-ready | `plan` | Design questions cannot be resolved autonomously and need operator input |
 | `plan` | Design gate passed | Create or recover implementation plan comment before gate evaluation | Single plan comment with required headings, checklists, review dispositions, and slices | Plan is execution-ready | `execution` | Plan cannot be made concrete enough for execution |
 | `execution` | Plan gate passed | Create or recover execution branch and draft PR before gate evaluation | Branch exists and PR is review-ready with required headings | Reviewable code change exists | `deploy-review` | Implementation cannot proceed without external/operator decision |
-| `deploy-review` | Reviewable PR exists and deployment evidence is available | Evaluate review-readiness and deployment evidence for first operator loop entry | Review-ready artifact set (PR + review-ready marker/deployment evidence) | Operator feedback intake can begin | `review-intake` | Review-ready artifact set is incomplete or unverifiable |
+| `deploy-review` | Reviewable non-draft PR exists | Validate complete review-ready artifact set for first operator loop entry | Latest `gpa:review-ready` issue summary contains PR + deployment URL + deployment status and matches the review PR | Operator feedback intake can begin | `review-intake` | Review-ready artifact set is incomplete, stale, or unverifiable |
 | `review-intake` | Review-ready artifacts exist | Evaluate approvals and change-request state | PR with at least one approval and no unresolved changes requested | PR is approved for finalize lane | `merge` | Review cannot be satisfied without operator intervention |
-| `feedback-implementation` | Trusted operator `gpa:feedback ...` command after latest review-ready marker | Implement feedback updates and prepare redeploy | Updated implementation changes and refreshed review context | Changes are ready for redeploy review | `redeploy-review` | Feedback cannot be implemented without additional operator clarification |
-| `redeploy-review` | Updated implementation and redeploy evidence available | Re-check review-readiness after feedback implementation | Updated review-ready artifact set | Operator intake can continue for next loop | `review-intake` | Redeploy evidence is missing or invalid |
+| `feedback-implementation` | Trusted operator `gpa:feedback ...` command after latest valid review-ready artifact comment | Implement feedback updates and prepare redeploy | Updated implementation changes and refreshed review context | Changes are ready for redeploy review | `redeploy-review` | Feedback cannot be implemented without additional operator clarification |
+| `redeploy-review` | Updated implementation and redeploy evidence available | Re-check complete review-ready artifact set after feedback implementation | Updated `gpa:review-ready` issue summary with PR + deployment URL + deployment status | Operator intake can continue for next loop | `review-intake` | Redeploy evidence is missing or invalid |
 | `merge` | Approval command accepted and merge prerequisites are satisfied | Verify merged PR and approval history | Merged PR referencing the issue | Finalization enters verification | `post-merge-verify` | Merge cannot complete because repo state or policy prevents it |
 | `post-merge-verify` | Merge stage completed | Verify post-merge health and retries per policy | Verification outcome with diagnostics on failure | Ready for follow-up capture or retry decision | `follow-up-capture` | Verification failure exceeds retry budget and requires operator intervention |
 | `follow-up-capture` | Merged PR exists and execution is complete | Capture structured follow-up artifacts from issue comments | Follow-up issues or explicit follow-up evidence | Deferred work is recorded before closeout | `closeout` | Follow-up state is ambiguous and cannot be derived automatically |

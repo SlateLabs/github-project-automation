@@ -19,7 +19,7 @@ from gateway.github_api import (
     TrustPolicy,
 )
 from gateway.orchestration_contract import OperatorCommandType, parse_operator_command
-from gateway.orchestration_contract import find_latest_review_ready_marker_ms, select_latest_operator_command
+from gateway.orchestration_contract import find_latest_review_ready_artifact, select_latest_operator_command
 
 
 REQUESTED_STAGE = "kickoff"
@@ -336,20 +336,23 @@ class GatewayService:
             fallback_created_at_ms=now_ms,
         )
 
-        latest_review_ready_ms = find_latest_review_ready_marker_ms(comments)
-        if latest_review_ready_ms is None:
+        latest_review_ready = find_latest_review_ready_artifact(comments)
+        if latest_review_ready is None:
             return GatewayResult(
                 422,
                 {
                     "outcome": "rejected",
-                    "reason": f"No 'gpa:review-ready' marker found on issue #{issue_number}",
+                    "reason": (
+                        f"No valid 'gpa:review-ready' artifact found on issue #{issue_number}. "
+                        "Required fields in the same comment: PR, Deployment URL, Deployment Status."
+                    ),
                 },
             )
 
         selected = select_latest_operator_command(
             comments=comments,
             trusted_users=set(self.trust_policy.trusted_users),
-            review_ready_after_ms=latest_review_ready_ms,
+            review_ready_after_ms=latest_review_ready.created_at_ms,
         )
         if selected is None:
             return GatewayResult(

@@ -10,8 +10,10 @@ from gateway.orchestration_contract import (
     RetryMetadata,
     StageEvent,
     StageOutcome,
+    find_latest_review_ready_artifact,
     find_latest_review_ready_marker_ms,
     is_transition_allowed,
+    parse_review_ready_artifact,
     parse_operator_command,
     select_latest_operator_command,
 )
@@ -154,6 +156,64 @@ class OrchestrationContractTests(unittest.TestCase):
         ]
         self.assertEqual(find_latest_review_ready_marker_ms(comments), 1300)
         self.assertIsNone(find_latest_review_ready_marker_ms([{"id": 9, "created_at_ms": 1400, "body": "none"}]))
+
+    def test_parse_review_ready_artifact_requires_pr_deployment_url_and_status(self) -> None:
+        artifact = parse_review_ready_artifact(
+            {
+                "id": 7,
+                "created_at_ms": 2000,
+                "author": "bot",
+                "body": (
+                    "<!-- gpa:review-ready -->\n"
+                    "PR: #123\n"
+                    "Deployment URL: https://preview.example.dev/run/123\n"
+                    "Deployment Status: healthy\n"
+                ),
+            }
+        )
+        self.assertIsNotNone(artifact)
+        assert artifact is not None
+        self.assertEqual(artifact.pr_number, 123)
+        self.assertEqual(artifact.deployment_url, "https://preview.example.dev/run/123")
+        self.assertEqual(artifact.deployment_status, "healthy")
+
+        self.assertIsNone(
+            parse_review_ready_artifact(
+                {
+                    "id": 8,
+                    "created_at_ms": 2100,
+                    "author": "bot",
+                    "body": "<!-- gpa:review-ready -->\nPR: #123\nDeployment Status: healthy",
+                }
+            )
+        )
+
+    def test_find_latest_review_ready_artifact(self) -> None:
+        comments = [
+            {
+                "id": 10,
+                "created_at_ms": 1000,
+                "author": "bot",
+                "body": "<!-- gpa:review-ready -->\nPR: #45\nDeployment URL: https://a.example.dev\nDeployment Status: ready",
+            },
+            {
+                "id": 11,
+                "created_at_ms": 1100,
+                "author": "bot",
+                "body": "<!-- gpa:review-ready -->\nPR: #45\nDeployment URL: (deployment URL not yet wired)\nDeployment Status: pending",
+            },
+            {
+                "id": 12,
+                "created_at_ms": 1200,
+                "author": "bot",
+                "body": "<!-- gpa:review-ready -->\nPR: #46\nDeployment URL: https://b.example.dev\nDeployment Status: success",
+            },
+        ]
+        artifact = find_latest_review_ready_artifact(comments)
+        self.assertIsNotNone(artifact)
+        assert artifact is not None
+        self.assertEqual(artifact.comment_id, 12)
+        self.assertEqual(artifact.pr_number, 46)
 
 
 if __name__ == "__main__":
