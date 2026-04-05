@@ -178,6 +178,14 @@ For agent-authored stage artifacts, stage-specific machine data is persisted via
 <!-- gpa:artifact-payload:{"kind":"artifact_payload","version":"gpa.v1","stage":"agent-review","data":{"disposition":"auto-approve","decision":{"next_stage":"merge","reason_codes":["agent_review_auto_approve"]}}} -->
 ```
 
+Additional migrated stages publish the same `artifact_payload` envelope shape:
+
+```html
+<!-- gpa:artifact-payload:{"kind":"artifact_payload","version":"gpa.v1","stage":"plan-review","data":{"decision":{"next_stage":"execution","reason_codes":["plan_review_published"]}}} -->
+<!-- gpa:artifact-payload:{"kind":"artifact_payload","version":"gpa.v1","stage":"follow-up-capture","data":{"markers_found":2,"issues_created":2,"skipped":0,"decision":{"next_stage":"closeout","reason_codes":["follow_up_capture_completed"]}}} -->
+<!-- gpa:artifact-payload:{"kind":"artifact_payload","version":"gpa.v1","stage":"closeout","data":{"created":true,"merged_pr_count":1,"follow_up_count":2,"decision":{"next_stage":"","reason_codes":["closeout_scaffold_created"]}}} -->
+```
+
 Legacy markers remain temporarily for compatibility, but canonical envelopes are the source of truth when present.
 
 ### What stays in the artifact

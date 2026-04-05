@@ -1236,7 +1236,22 @@ jobs:
             exit 1
           fi
 
-          review_body="<!-- gpa:run-status:plan-review:completed:${RUN_KEY} -->"$'\n\n'"${REVIEW_BODY}"
+          artifact_payload=$(jq -cn \
+            --arg run_key "$RUN_KEY" \
+            '{
+              kind:"artifact_payload",
+              version:"gpa.v1",
+              run_key:$run_key,
+              stage:"plan-review",
+              data:{
+                decision:{
+                  next_stage:"execution",
+                  reason_codes:["plan_review_published"]
+                }
+              }
+            }')
+
+          review_body="<!-- gpa:run-status:plan-review:completed:${RUN_KEY} -->"$'\n'"<!-- gpa:artifact-payload:${artifact_payload} -->"$'\n\n'"${REVIEW_BODY}"
           gh issue comment "$ISSUE_NUMBER" --body "$review_body" >/dev/null
           echo "::notice::Posted automated plan review comment to issue #$ISSUE_NUMBER"
 
@@ -2434,25 +2449,69 @@ jobs:
           fi
 
           checkpoint_line=""
+          canonical_checkpoint_line=""
           case "$REQUESTED_STAGE" in
             agent-review|deploy-review)
               ;;
             *)
+              next_stage=""
+              case "$REQUESTED_STAGE" in
+                kickoff) next_stage="clarification" ;;
+                clarification) next_stage="design" ;;
+                design) next_stage="plan" ;;
+                plan) next_stage="execution" ;;
+                execution) next_stage="agent-review" ;;
+                feedback-implementation)
+                  # feedback-implementation can fan out based on the source/progress;
+                  # leave next_stage unresolved here and let handoff decide.
+                  next_stage=""
+                  ;;
+                merge) next_stage="follow-up-capture" ;;
+                follow-up-capture) next_stage="closeout" ;;
+                closeout) next_stage="" ;;
+              esac
+
+              reason_codes='["stage_gate_passed"]'
+              if [ -n "$next_stage" ]; then
+                reason_codes='["stage_gate_passed","stage_handoff_queued"]'
+              fi
+
               checkpoint=$(jq -cn \
                 --arg run_key "$RUN_KEY" \
                 --arg stage "$REQUESTED_STAGE" \
                 --arg state "completed" \
                 --arg actor "$ACTOR" \
                 --arg run_url "$RUN_URL" \
+                --arg next_stage "$next_stage" \
                 --argjson waived "${WAIVED:-[]}" \
-                '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,run_url:$run_url,waived_conditions:$waived}')
+                '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,run_url:$run_url,next_stage:$next_stage,waived_conditions:$waived}')
+
+              canonical_checkpoint=$(jq -cn \
+                --arg run_key "$RUN_KEY" \
+                --arg stage "$REQUESTED_STAGE" \
+                --arg actor "$ACTOR" \
+                --arg run_url "$RUN_URL" \
+                --arg next_stage "$next_stage" \
+                --argjson reason_codes "$reason_codes" \
+                --argjson waived "${WAIVED:-[]}" \
+                '{
+                  kind:"checkpoint",
+                  version:"gpa.v1",
+                  run_key:$run_key,
+                  stage:{name:$stage,status:"completed",actor:$actor},
+                  decision:{next_stage:$next_stage,reason_codes:$reason_codes},
+                  data:{run_url:$run_url,waived_conditions:$waived}
+                }')
+
               checkpoint_line="<!-- gpa:checkpoint $checkpoint -->"
+              canonical_checkpoint_line="<!-- gpa:checkpoint-v1 $canonical_checkpoint -->"
               ;;
           esac
 
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Orchestration run — stage transition accepted
           <!-- gpa:run-status:$REQUESTED_STAGE:completed:$RUN_KEY -->
+          $canonical_checkpoint_line
           $checkpoint_line
 
           | Field | Value |

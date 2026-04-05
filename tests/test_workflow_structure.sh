@@ -9,6 +9,8 @@
 set -euo pipefail
 
 WORKFLOW=".github/workflows/orchestration-dispatch.yml"
+FOLLOW_UP_ACTION=".github/actions/capture-follow-ups/action.yml"
+CLOSEOUT_ACTION=".github/actions/scaffold-closeout/action.yml"
 cd "$(git rev-parse --show-toplevel)"
 
 PASS=0
@@ -221,6 +223,24 @@ if grep -Fq 'gpa:artifact-payload:' "$WORKFLOW"; then
   check "agent-review artifact payload marker is parsed" "pass"
 else
   check "agent-review artifact payload marker is parsed" "fail"
+fi
+
+if grep -Fq 'stage:"plan-review"' "$WORKFLOW" && grep -Fq '<!-- gpa:artifact-payload:${artifact_payload} -->' "$WORKFLOW"; then
+  check "plan review emits canonical artifact payload" "pass"
+else
+  check "plan review emits canonical artifact payload" "fail"
+fi
+
+if grep -Fq 'stage:"follow-up-capture"' "$FOLLOW_UP_ACTION" && grep -Fq '<!-- gpa:artifact-payload:${capture_payload} -->' "$FOLLOW_UP_ACTION"; then
+  check "follow-up capture emits canonical artifact payload" "pass"
+else
+  check "follow-up capture emits canonical artifact payload" "fail"
+fi
+
+if grep -Fq 'stage:"closeout"' "$CLOSEOUT_ACTION" && grep -Fq '<!-- gpa:artifact-payload:${created_payload} -->' "$CLOSEOUT_ACTION"; then
+  check "closeout scaffold emits canonical artifact payload" "pass"
+else
+  check "closeout scaffold emits canonical artifact payload" "fail"
 fi
 
 if grep -q 'REVIEW_NEXT_STAGE: .*needs.gate.outputs.review_next_stage' "$WORKFLOW" && \

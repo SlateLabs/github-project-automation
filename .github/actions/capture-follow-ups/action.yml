@@ -149,6 +149,24 @@ runs:
         echo "::notice::Found $total_markers FOLLOW-UP marker(s) in issue #$ISSUE_NUMBER"
 
         if [ "$total_markers" -eq 0 ]; then
+          no_followups_payload=$(jq -cn \
+            --arg run_key "$RUN_KEY" \
+            '{
+              kind:"artifact_payload",
+              version:"gpa.v1",
+              run_key:$run_key,
+              stage:"follow-up-capture",
+              data:{
+                markers_found:0,
+                issues_created:0,
+                skipped:0,
+                decision:{
+                  next_stage:"closeout",
+                  reason_codes:["follow_up_capture_no_markers"]
+                }
+              }
+            }')
+
           echo "issues_created=0" >> "$GITHUB_OUTPUT"
           echo "issue_urls=" >> "$GITHUB_OUTPUT"
           echo "skipped=0" >> "$GITHUB_OUTPUT"
@@ -159,6 +177,7 @@ runs:
         ### Follow-up capture — no markers found
         <!-- $status_marker -->
         <!-- gpa:run-status:follow-up-capture:completed:$RUN_KEY -->
+        <!-- gpa:artifact-payload:${no_followups_payload} -->
 
         | Field | Value |
         |-------|-------|
@@ -301,10 +320,32 @@ runs:
         | **Issues created** | $issues_created |
         | **Skipped (existing)** | $skipped |"
 
+        capture_payload=$(jq -cn \
+          --arg run_key "$RUN_KEY" \
+          --argjson markers_found "$total_markers" \
+          --argjson issues_created "$issues_created" \
+          --argjson skipped "$skipped" \
+          '{
+            kind:"artifact_payload",
+            version:"gpa.v1",
+            run_key:$run_key,
+            stage:"follow-up-capture",
+            data:{
+              markers_found:$markers_found,
+              issues_created:$issues_created,
+              skipped:$skipped,
+              decision:{
+                next_stage:"closeout",
+                reason_codes:["follow_up_capture_completed"]
+              }
+            }
+          }')
+
         gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
         ### Follow-up capture — complete
         <!-- $status_marker -->
         <!-- gpa:run-status:follow-up-capture:completed:$RUN_KEY -->
+        <!-- gpa:artifact-payload:${capture_payload} -->
 
         $meta_rows
 

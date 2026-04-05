@@ -115,10 +115,27 @@ runs:
           table_rows="${table_rows}
         | **Result** | :fast_forward: Skipped — closeout comment already exists |"
 
+          skipped_payload=$(jq -cn \
+            --arg run_key "$RUN_KEY" \
+            '{
+              kind:"artifact_payload",
+              version:"gpa.v1",
+              run_key:$run_key,
+              stage:"closeout",
+              data:{
+                created:false,
+                decision:{
+                  next_stage:"",
+                  reason_codes:["closeout_scaffold_already_exists"]
+                }
+              }
+            }')
+
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
         ### Closeout scaffold — already exists
         <!-- $status_marker -->
         <!-- gpa:run-status:closeout:skipped:$RUN_KEY -->
+        <!-- gpa:artifact-payload:${skipped_payload} -->
 
         $table_rows
 
@@ -234,10 +251,31 @@ runs:
         | **Follow-ups** | $follow_up_count |
         | **Result** | :white_check_mark: Closeout retrospective created |"
 
+        created_payload=$(jq -cn \
+          --arg run_key "$RUN_KEY" \
+          --argjson merged_pr_count "$merged_count" \
+          --argjson follow_up_count "$follow_up_count" \
+          '{
+            kind:"artifact_payload",
+            version:"gpa.v1",
+            run_key:$run_key,
+            stage:"closeout",
+            data:{
+              created:true,
+              merged_pr_count:$merged_pr_count,
+              follow_up_count:$follow_up_count,
+              decision:{
+                next_stage:"",
+                reason_codes:["closeout_scaffold_created"]
+              }
+            }
+          }')
+
         gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
         ### Closeout scaffold — created
         <!-- $status_marker -->
         <!-- gpa:run-status:closeout:completed:$RUN_KEY -->
+        <!-- gpa:artifact-payload:${created_payload} -->
 
         $table_rows
 
