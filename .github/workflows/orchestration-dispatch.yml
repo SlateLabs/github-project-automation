@@ -1460,6 +1460,8 @@ jobs:
             exit 1
           fi
 
+          rm -rf .codex || true
+          git rm -r --cached --ignore-unmatch .codex >/dev/null 2>&1 || true
           git add -A
           if git diff --cached --quiet; then
             echo "::error::Execution agent changes could not be staged"
@@ -1602,7 +1604,7 @@ jobs:
           PR_BODY: ${{ steps.agent-review-context.outputs.pr_body }}
           FILES_SUMMARY: ${{ steps.agent-review-context.outputs.files_summary }}
           DIFF_FILE: ${{ steps.agent-review-context.outputs.diff_file }}
-          REVIEW_FILE: .gpa-agent-review.json
+          REVIEW_FILE: .gpa-agent-review.md
         shell: bash
         run: |
           set -euo pipefail
@@ -1614,14 +1616,19 @@ jobs:
           diff_text = Path(os.environ["DIFF_FILE"]).read_text()
           prompt = f"""You are the autonomous agent reviewer for issue #{os.environ["ISSUE_NUMBER"]}.
 
-          Review the proposed implementation and write JSON to the repository file `{os.environ["REVIEW_FILE"]}`.
+          Review the proposed implementation and write markdown to the repository file `{os.environ["REVIEW_FILE"]}`.
 
-          Required JSON shape:
-          {{
-            "disposition": "auto-approve" | "rework-required" | "operator-review-required",
-            "summary": "<one short paragraph>",
-            "feedback_markdown": "<markdown bullets or short paragraphs for the next actor>"
-          }}
+          Required file structure:
+          - First line exactly: `gpa:agent-review:<disposition>`
+            where disposition is one of:
+            - `auto-approve`
+            - `rework-required`
+            - `operator-review-required`
+          - Then a blank line
+          - Then a section `## Summary`
+          - Then a short paragraph
+          - Then a section `## Feedback`
+          - Then markdown bullets or short paragraphs for the next actor
 
           Decision rules:
           - Use "auto-approve" when the PR is coherent, bounded, and safe to merge without operator review.
@@ -1630,7 +1637,7 @@ jobs:
           - Default to "auto-approve" unless there is a concrete reason not to.
           - Do not ask for operator review just because the change is incomplete; prefer "rework-required" in that case.
           - Do not modify any tracked repository files other than writing `{os.environ["REVIEW_FILE"]}`.
-          - Do not print the JSON in prose; write the file directly.
+          - Do not print the review in prose; write the file directly.
 
           Issue title:
           {os.environ["ISSUE_TITLE"]}
@@ -1682,7 +1689,7 @@ jobs:
         if: needs.intake.outputs.requested_stage == 'agent-review'
         id: parse-agent-review
         env:
-          REVIEW_FILE: .gpa-agent-review.json
+          REVIEW_FILE: .gpa-agent-review.md
         shell: bash
         run: |
           set -euo pipefail
@@ -1692,9 +1699,18 @@ jobs:
             exit 1
           fi
 
-          disposition=$(jq -r '.disposition // empty' "$REVIEW_FILE")
-          summary=$(jq -r '.summary // empty' "$REVIEW_FILE")
-          feedback_markdown=$(jq -r '.feedback_markdown // empty' "$REVIEW_FILE")
+          disposition=$(sed -n '1s/^gpa:agent-review://p' "$REVIEW_FILE" | tr -d '\r')
+          summary=$(awk '
+            BEGIN {section=0}
+            /^## Summary[[:space:]]*$/ {section=1; next}
+            /^## Feedback[[:space:]]*$/ {section=0; exit}
+            section==1 {print}
+          ' "$REVIEW_FILE")
+          feedback_markdown=$(awk '
+            BEGIN {section=0}
+            /^## Feedback[[:space:]]*$/ {section=1; next}
+            section==1 {print}
+          ' "$REVIEW_FILE")
 
           case "$disposition" in
             auto-approve|rework-required|operator-review-required) ;;
@@ -2098,6 +2114,8 @@ jobs:
           git checkout -B "$branch_name" "origin/$branch_name"
 
           if git merge --no-edit "origin/$base_ref"; then
+            rm -rf .codex || true
+            git rm -r --cached --ignore-unmatch .codex >/dev/null 2>&1 || true
             if [ -n "$(git status --porcelain)" ]; then
               git add -A
               git commit --amend --no-edit
@@ -2218,6 +2236,8 @@ jobs:
             exit 0
           fi
 
+          rm -rf .codex || true
+          git rm -r --cached --ignore-unmatch .codex >/dev/null 2>&1 || true
           git add -A
           git commit --no-edit
           git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:${BRANCH_NAME}"
