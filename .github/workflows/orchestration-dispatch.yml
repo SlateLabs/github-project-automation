@@ -2564,7 +2564,7 @@ jobs:
           fi
 
           mutation=$(cat <<'GRAPHQL'
-          mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: ID!) {
+          mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
             updateProjectV2ItemFieldValue(
               input: {
                 projectId: $projectId
@@ -2586,7 +2586,7 @@ jobs:
             -F projectId="$project_id" \
             -F itemId="$PROJECT_ITEM_ID" \
             -F fieldId="$status_field_id" \
-            -F optionId="$status_option_id" >/dev/null
+            -f optionId="$status_option_id" >/dev/null
 
           echo "::notice::Updated project Status to '$TARGET_STATUS'"
           echo "updated=true" >> "$GITHUB_OUTPUT"
