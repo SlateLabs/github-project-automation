@@ -245,6 +245,8 @@ jobs:
           ISSUE_NUMBER: ${{ steps.normalize.outputs.issue_number }}
           INPUT_FEEDBACK_BODY: ${{ steps.normalize.outputs.feedback_body }}
           INPUT_FEEDBACK_SOURCE: ${{ steps.normalize.outputs.feedback_source }}
+          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
+          TRIGGER: ${{ steps.normalize.outputs.trigger }}
         shell: bash
         run: |
           set -euo pipefail
@@ -301,7 +303,7 @@ jobs:
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
           echo "feedback_source=$feedback_source" >> "$GITHUB_OUTPUT"
-          echo "::notice::Run key: $run_key (source: $TRIGGER)"
+          echo "::notice::Run key: $RUN_KEY (source: $TRIGGER)"
 
       - name: Create orchestration app token (project item recovery)
         if: steps.normalize.outputs.project_item_id == '' && vars.ORCHESTRATION_APP_ID != ''
