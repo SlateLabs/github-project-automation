@@ -17,11 +17,17 @@ from gateway.github_api import (
     ProjectItemContext,
     TrustPolicy,
 )
+from gateway.orchestration_contract import OperatorCommandType, parse_operator_command
+from gateway.orchestration_contract import find_latest_review_ready_marker_ms, select_latest_operator_command
 
 
 REQUESTED_STAGE = "kickoff"
 DISPATCH_EVENT_TYPE = "orchestration-start"
 DISPATCH_RETRY_BACKOFFS = (1.0, 4.0, 16.0)
+OPERATOR_COMMAND_STAGE = {
+    OperatorCommandType.FEEDBACK: "execution",
+    OperatorCommandType.APPROVE: "merge",
+}
 
 
 @dataclass(frozen=True)
@@ -95,6 +101,8 @@ class GatewayService:
             return GatewayResult(200, {"outcome": "accepted", "event": "ping"})
 
         if event_name != "projects_v2_item":
+            if event_name == "issue_comment":
+                return self._handle_operator_command(payload, delivery_id, actor)
             self.logger(
                 {
                     "delivery_id": delivery_id,
@@ -272,6 +280,156 @@ class GatewayService:
             )
             return GatewayResult(502, {"outcome": "error", "reason": str(exc), "run_key": run_key})
 
+    def _handle_operator_command(self, payload: dict[str, Any], delivery_id: str, actor: str) -> GatewayResult:
+        action = str(payload.get("action") or "")
+        if action not in {"created", "edited"}:
+            return GatewayResult(202, {"outcome": "skipped", "reason": "Only created/edited issue comments are supported"})
+
+        issue = payload.get("issue") or {}
+        if issue.get("pull_request"):
+            return GatewayResult(202, {"outcome": "skipped", "reason": "PR review loop commands must be posted on the source issue"})
+
+        repo_full_name = str((payload.get("repository") or {}).get("full_name") or "")
+        issue_number = int(issue.get("number") or 0)
+        comment = payload.get("comment") or {}
+        comment_id = int(comment.get("id") or 0)
+        body = str(comment.get("body") or "")
+
+        parsed = parse_operator_command(body)
+        if parsed is None:
+            return GatewayResult(202, {"outcome": "skipped", "reason": "No structured operator command found"})
+        hinted_command_type, _ = parsed
+        requested_stage = OPERATOR_COMMAND_STAGE[hinted_command_type]
+        if not repo_full_name or issue_number <= 0 or comment_id <= 0:
+            return GatewayResult(400, {"outcome": "rejected", "reason": "issue_comment payload is missing repository, issue number, or comment id"})
+
+        if repo_full_name not in self.repo_config:
+            return GatewayResult(202, {"outcome": "skipped", "reason": f"Repository '{repo_full_name}' is not configured in config/repos.yml"})
+
+        decision = self._resolve_actor_decision(payload, actor, repo_full_name)
+        if decision.outcome != "trusted":
+            self.logger(
+                self._log_fields(
+                    delivery_id=delivery_id,
+                    actor=actor,
+                    repo=repo_full_name,
+                    issue=issue_number,
+                    run_key=f"{repo_full_name}/{issue_number}/{requested_stage}/{self.clock()}",
+                    outcome="dropped",
+                    reason=decision.reason,
+                    requested_stage=requested_stage,
+                )
+            )
+            return GatewayResult(202, {"outcome": "dropped", "reason": decision.reason})
+
+        try:
+            comments = self.github_client.get_issue_comments(repo_full_name, issue_number)
+        except GitHubApiError as exc:
+            return GatewayResult(502, {"outcome": "error", "reason": f"Failed to query issue comments: {exc}"})
+
+        latest_review_ready_ms = find_latest_review_ready_marker_ms(comments)
+        if latest_review_ready_ms is None:
+            return GatewayResult(
+                422,
+                {
+                    "outcome": "rejected",
+                    "reason": f"No 'gpa:review-ready' marker found on issue #{issue_number}",
+                },
+            )
+
+        selected = select_latest_operator_command(
+            comments=comments,
+            trusted_users=set(self.trust_policy.trusted_users),
+            review_ready_after_ms=latest_review_ready_ms,
+        )
+        if selected is None:
+            return GatewayResult(
+                202,
+                {
+                    "outcome": "skipped",
+                    "reason": "No valid trusted operator command found after latest review-ready marker",
+                },
+            )
+        if selected.comment_id != comment_id:
+            return GatewayResult(
+                202,
+                {
+                    "outcome": "skipped",
+                    "reason": f"Command comment #{comment_id} is stale; latest valid command is comment #{selected.comment_id}",
+                },
+            )
+
+        requested_stage = OPERATOR_COMMAND_STAGE[selected.command_type]
+        configured_repo = self.repo_config[repo_full_name]
+        if requested_stage not in configured_repo.enabled_stages:
+            return GatewayResult(
+                422,
+                {
+                    "outcome": "rejected",
+                    "reason": f"Repository '{repo_full_name}' does not enable stage '{requested_stage}'",
+                },
+            )
+
+        comment_key = f"{repo_full_name}/{issue_number}/{comment_id}"
+        now_ms = self.clock()
+        if self.dedup_store.seen_operator_comment(comment_key, now_ms):
+            return GatewayResult(
+                202,
+                {
+                    "outcome": "deduplicated",
+                    "reason": f"Command comment #{comment_id} has already been processed",
+                },
+            )
+
+        run_key = f"{repo_full_name}/{issue_number}/{requested_stage}/{now_ms}"
+        client_payload: dict[str, object] = {
+            "issue_number": issue_number,
+            "requested_stage": requested_stage,
+            "run_key": run_key,
+            "actor": actor,
+            "timestamp": str(now_ms),
+            "source_comment_id": comment_id,
+            "source_command": selected.command_type.value,
+        }
+        if selected.command_type == OperatorCommandType.FEEDBACK and selected.instructions:
+            client_payload["feedback_instructions"] = selected.instructions
+
+        last_error = self._dispatch_with_retry(repo_full_name, client_payload, delivery_id, actor, issue_number, run_key)
+        if last_error is not None:
+            self.logger(
+                self._log_fields(
+                    delivery_id=delivery_id,
+                    actor=actor,
+                    repo=repo_full_name,
+                    issue=issue_number,
+                    run_key=run_key,
+                    outcome="dispatch-failed",
+                    reason=str(last_error),
+                    requested_stage=requested_stage,
+                )
+            )
+            return GatewayResult(502, {"outcome": "dispatch-failed", "reason": str(last_error), "run_key": run_key})
+
+        self.logger(
+            self._log_fields(
+                delivery_id=delivery_id,
+                actor=actor,
+                repo=repo_full_name,
+                issue=issue_number,
+                run_key=run_key,
+                outcome="dispatched",
+                requested_stage=requested_stage,
+            )
+        )
+        return GatewayResult(
+            200,
+            {
+                "outcome": "dispatched",
+                "run_key": run_key,
+                "payload": client_payload,
+            },
+        )
+
     def _dispatch_with_retry(
         self,
         repo_full_name: str,
@@ -424,13 +582,14 @@ class GatewayService:
         run_key: str,
         outcome: str,
         reason: str | None = None,
+        requested_stage: str = REQUESTED_STAGE,
     ) -> dict[str, Any]:
         fields = {
             "delivery_id": delivery_id,
             "actor": actor,
             "repo": repo,
             "issue": issue,
-            "requested_stage": REQUESTED_STAGE,
+            "requested_stage": requested_stage,
             "run_key": run_key,
             "outcome": outcome,
         }

@@ -336,6 +336,32 @@ class GitHubApiClient:
             is_org_member=is_org_member,
         )
 
+    def get_issue_comments(self, repo_full_name: str, issue_number: int) -> list[dict[str, object]]:
+        owner, repo = repo_full_name.split("/", 1)
+        comments = self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/issues/{issue_number}/comments?per_page=100",
+            expected_statuses=(200,),
+        )
+
+        results: list[dict[str, object]] = []
+        for comment in comments:
+            created_at = str(comment.get("created_at") or "")
+            created_at_ms = 0
+            if created_at:
+                created_at_ms = int(
+                    datetime.fromisoformat(created_at.replace("Z", "+00:00")).astimezone(timezone.utc).timestamp() * 1000
+                )
+            results.append(
+                {
+                    "id": int(comment.get("id") or 0),
+                    "created_at_ms": created_at_ms,
+                    "author": str((comment.get("user") or {}).get("login") or ""),
+                    "body": str(comment.get("body") or ""),
+                }
+            )
+        return results
+
     def ensure_issue_label(self, repo_full_name: str, issue_number: int, label: str) -> None:
         owner, repo = repo_full_name.split("/", 1)
         try:

@@ -519,6 +519,31 @@ Defined in `config/trust-policy.yml`. See [discussion #3 §8](https://github.com
 
 The default workflow stages are: Backlog → Clarification → Design → Plan → Execution → Review → Merge → Closeout. Each transition has machine-testable gate conditions defined in discussion #3 §4.
 
+Canonical contract primitives for the next operator-in-the-loop evolution now live in [gateway/orchestration_contract.py](gateway/orchestration_contract.py):
+- Coarse statuses: `Backlog`, `Ready`, `In Progress`, `In Review`, `Approved`, `Done`, `Blocked`
+- Internal stages for build lane, review-loop lane, and finalize lane
+- Stage event schema fields (`run_key`, `idempotency_key`, `attempt/max_attempts`, retry metadata)
+- Structured operator command tokens: `gpa:feedback <instructions>` and `gpa:approve`
+
+### Operator command intake (current slice)
+
+The webhook gateway now accepts `issue_comment` events and treats structured issue comments as machine-detectable orchestration commands:
+
+- `gpa:feedback <instructions>` dispatches `requested_stage: execution`
+- `gpa:approve` dispatches `requested_stage: merge`
+
+Current enforcement in this slice:
+
+- Commands are accepted only from trusted actors under `config/trust-policy.yml`
+- Only `created` and `edited` issue comments are processed
+- Commands on pull request conversations are ignored (commands must be posted on the source issue)
+- A `gpa:review-ready` marker must exist on the issue (`<!-- gpa:review-ready -->` is supported)
+- Commands are only valid if posted after the latest `gpa:review-ready` marker
+- The gateway evaluates full issue comment history and applies `latest valid command wins`
+- Command comments are deduplicated by `{repo}/{issue_number}/{comment_id}` within the gateway dedup window
+
+This keeps operator feedback/approval intake GitHub-native and resumable without introducing an external state store.
+
 ### Stage contract
 
 The orchestration is intended to run with minimal operator intervention once an issue moves to `Ready`. Each stage therefore has an explicit contract:
