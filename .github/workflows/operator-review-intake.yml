@@ -14,7 +14,15 @@ permissions:
 
 jobs:
   intake:
-    if: github.event.issue.pull_request == null
+    if: >-
+      github.event.issue.pull_request == null &&
+      github.event.comment.user.type != 'Bot' &&
+      (
+        startsWith(github.event.comment.body, 'gpa:feedback') ||
+        startsWith(github.event.comment.body, 'gpa:approve') ||
+        startsWith(github.event.comment.body, 'GPA:feedback') ||
+        startsWith(github.event.comment.body, 'GPA:approve')
+      )
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
