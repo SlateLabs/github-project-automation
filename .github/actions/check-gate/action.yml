@@ -567,17 +567,15 @@ runs:
 
             agent_review_auto_approved="false"
             agent_review_comment_body=$(gh issue view "$ISSUE_NUMBER" --comments --json comments \
-              --jq '.comments[].body // ""' 2>/dev/null | awk '
-                /gpa:run-status:agent-review:completed:/ { capture=1; block=$0 ORS; next }
-                capture && /^### / { last=block; capture=0; block="" }
-                capture { block=block $0 ORS }
-                END {
-                  if (capture) {
-                    last=block
-                  }
-                  printf "%s", last
-                }
-              ' || true)
+              --jq '
+                .comments
+                | map(.body // "")
+                | map(select(
+                    contains("gpa:run-status:agent-review:completed:") and
+                    contains("| **Disposition** |")
+                  ))
+                | .[-1] // ""
+              ' 2>/dev/null || true)
             if [ -n "$agent_review_comment_body" ] && echo "$agent_review_comment_body" | grep -Fq '| **Disposition** | `auto-approve` |'; then
               agent_review_auto_approved="true"
             fi
