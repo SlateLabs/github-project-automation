@@ -9,6 +9,7 @@
 set -euo pipefail
 
 WORKFLOW=".github/workflows/orchestration-dispatch.yml"
+GATE_ACTION=".github/actions/check-gate/action.yml"
 cd "$(git rev-parse --show-toplevel)"
 
 PASS=0
@@ -253,6 +254,22 @@ if grep -q 'TRIGGER.*steps.normalize.outputs.trigger' "$WORKFLOW" && grep -q 'Tr
   check "job summary includes trigger field" "pass"
 else
   check "job summary includes trigger field" "fail"
+fi
+
+echo ""
+echo "12. Deploy-review evidence gate is fail-closed"
+
+if grep -q 'deploy-review-marker-deployment-source' "$GATE_ACTION" && \
+   grep -q 'Deployment Source' "$GATE_ACTION"; then
+  check "deploy-review requires structured Deployment Source metadata" "pass"
+else
+  check "deploy-review requires structured Deployment Source metadata" "fail"
+fi
+
+if grep -q 'review-ready comment must include PR, Deployment URL, Deployment Source, and Deployment Status' "$GATE_ACTION"; then
+  check "review-intake gate requires full deploy evidence contract" "pass"
+else
+  check "review-intake gate requires full deploy evidence contract" "fail"
 fi
 
 echo ""

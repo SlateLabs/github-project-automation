@@ -344,7 +344,7 @@ class GatewayService:
                     "outcome": "rejected",
                     "reason": (
                         f"No valid 'gpa:review-ready' artifact found on issue #{issue_number}. "
-                        "Required fields in the same comment: PR, Deployment URL, Deployment Status."
+                        "Required fields in the same comment: PR, Deployment URL, Deployment Source, Deployment Status."
                     ),
                 },
             )

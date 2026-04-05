@@ -14,6 +14,7 @@ from gateway.service import GatewayService
 REVIEW_READY_ARTIFACT_COMMENT = """<!-- gpa:review-ready -->
 PR: #1
 Deployment URL: https://preview.example.dev/issues/1
+Deployment Source: cloud-run
 Deployment Status: healthy
 """
 
@@ -404,7 +405,7 @@ class GatewayServiceTests(unittest.TestCase):
                 "id": 4000,
                 "created_at_ms": self.now_ms - 50_000,
                 "author": "trusted-user",
-                "body": "<!-- gpa:review-ready -->\nPR: #1\nDeployment URL: (deployment URL not yet wired)\nDeployment Status: pending",
+                "body": "<!-- gpa:review-ready -->\nPR: #1\nDeployment URL: (deployment URL not yet wired)\nDeployment Source: cloud-run\nDeployment Status: pending",
             }
         ]
         status, body = self._issue_comment_request(
@@ -414,6 +415,30 @@ class GatewayServiceTests(unittest.TestCase):
         self.assertEqual(status, 422)
         self.assertEqual(body["outcome"], "rejected")
         self.assertIn("Required fields", body["reason"])
+        self.assertEqual(self.github.dispatches, [])
+
+    def test_issue_comment_is_rejected_when_deployment_source_is_untrusted(self) -> None:
+        self.github.issue_comments = [
+            {
+                "id": 4000,
+                "created_at_ms": self.now_ms - 50_000,
+                "author": "trusted-user",
+                "body": (
+                    "<!-- gpa:review-ready -->\n"
+                    "PR: #1\n"
+                    "Deployment URL: https://preview.example.dev/issues/1\n"
+                    "Deployment Source: best-effort\n"
+                    "Deployment Status: healthy"
+                ),
+            }
+        ]
+        status, body = self._issue_comment_request(
+            self._issue_comment_payload(comment_id=5091),
+            delivery_id="delivery-comment-91",
+        )
+        self.assertEqual(status, 422)
+        self.assertEqual(body["outcome"], "rejected")
+        self.assertIn("Deployment Source", body["reason"])
         self.assertEqual(self.github.dispatches, [])
 
     def test_issue_comment_is_skipped_when_superseded_by_newer_command(self) -> None:

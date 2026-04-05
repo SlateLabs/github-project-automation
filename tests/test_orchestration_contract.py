@@ -157,7 +157,7 @@ class OrchestrationContractTests(unittest.TestCase):
         self.assertEqual(find_latest_review_ready_marker_ms(comments), 1300)
         self.assertIsNone(find_latest_review_ready_marker_ms([{"id": 9, "created_at_ms": 1400, "body": "none"}]))
 
-    def test_parse_review_ready_artifact_requires_pr_deployment_url_and_status(self) -> None:
+    def test_parse_review_ready_artifact_requires_pr_deployment_url_source_and_status(self) -> None:
         artifact = parse_review_ready_artifact(
             {
                 "id": 7,
@@ -167,6 +167,7 @@ class OrchestrationContractTests(unittest.TestCase):
                     "<!-- gpa:review-ready -->\n"
                     "PR: #123\n"
                     "Deployment URL: https://preview.example.dev/run/123\n"
+                    "Deployment Source: cloud-run\n"
                     "Deployment Status: healthy\n"
                 ),
             }
@@ -175,6 +176,7 @@ class OrchestrationContractTests(unittest.TestCase):
         assert artifact is not None
         self.assertEqual(artifact.pr_number, 123)
         self.assertEqual(artifact.deployment_url, "https://preview.example.dev/run/123")
+        self.assertEqual(artifact.deployment_source, "cloud-run")
         self.assertEqual(artifact.deployment_status, "healthy")
 
         self.assertIsNone(
@@ -183,7 +185,25 @@ class OrchestrationContractTests(unittest.TestCase):
                     "id": 8,
                     "created_at_ms": 2100,
                     "author": "bot",
-                    "body": "<!-- gpa:review-ready -->\nPR: #123\nDeployment Status: healthy",
+                    "body": "<!-- gpa:review-ready -->\nPR: #123\nDeployment URL: https://preview.example.dev/run/123\nDeployment Status: healthy",
+                }
+            )
+        )
+
+    def test_parse_review_ready_artifact_rejects_unknown_deployment_source(self) -> None:
+        self.assertIsNone(
+            parse_review_ready_artifact(
+                {
+                    "id": 9,
+                    "created_at_ms": 2200,
+                    "author": "bot",
+                    "body": (
+                        "<!-- gpa:review-ready -->\n"
+                        "PR: #123\n"
+                        "Deployment URL: https://preview.example.dev/run/123\n"
+                        "Deployment Source: best-effort\n"
+                        "Deployment Status: healthy\n"
+                    ),
                 }
             )
         )
@@ -194,7 +214,7 @@ class OrchestrationContractTests(unittest.TestCase):
                 "id": 10,
                 "created_at_ms": 1000,
                 "author": "bot",
-                "body": "<!-- gpa:review-ready -->\nPR: #45\nDeployment URL: https://a.example.dev\nDeployment Status: ready",
+                "body": "<!-- gpa:review-ready -->\nPR: #45\nDeployment URL: https://a.example.dev\nDeployment Source: cloud-run\nDeployment Status: ready",
             },
             {
                 "id": 11,
@@ -206,7 +226,7 @@ class OrchestrationContractTests(unittest.TestCase):
                 "id": 12,
                 "created_at_ms": 1200,
                 "author": "bot",
-                "body": "<!-- gpa:review-ready -->\nPR: #46\nDeployment URL: https://b.example.dev\nDeployment Status: success",
+                "body": "<!-- gpa:review-ready -->\nPR: #46\nDeployment URL: https://b.example.dev\nDeployment Source: vercel\nDeployment Status: success",
             },
         ]
         artifact = find_latest_review_ready_artifact(comments)

@@ -54,8 +54,21 @@ _REVIEW_READY_PR_LINE = re.compile(r"(?im)^\s*pr\s*:\s*(?P<value>.+?)\s*$")
 _REVIEW_READY_PR_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/(?P<number>\d+)")
 _REVIEW_READY_PR_NUMBER = re.compile(r"#(?P<number>\d+)\b|^(?P<bare>\d+)\b")
 _REVIEW_READY_DEPLOYMENT_URL_LINE = re.compile(r"(?im)^\s*deployment\s+url\s*:\s*(?P<value>\S+)\s*$")
+_REVIEW_READY_DEPLOYMENT_SOURCE_LINE = re.compile(r"(?im)^\s*deployment\s+source\s*:\s*(?P<value>.+?)\s*$")
 _REVIEW_READY_DEPLOYMENT_STATUS_LINE = re.compile(r"(?im)^\s*deployment\s+status\s*:\s*(?P<value>.+?)\s*$")
 _INVALID_DEPLOYMENT_STATUS_VALUES = {"pending", "unknown", "n/a", "na", "tbd", "todo", "unset"}
+_ALLOWED_DEPLOYMENT_SOURCES = {
+    "cloud-run",
+    "vercel",
+    "netlify",
+    "render",
+    "railway",
+    "fly-io",
+    "aws-amplify",
+    "azure-static-web-apps",
+    "github-pages",
+    "kubernetes",
+}
 
 
 STAGE_TRANSITIONS: dict[OrchestrationStage, tuple[OrchestrationStage, ...]] = {
@@ -170,6 +183,7 @@ class ReviewReadyArtifact:
     created_at_ms: int
     pr_number: int
     deployment_url: str
+    deployment_source: str
     deployment_status: str
     body: str
 
@@ -280,8 +294,9 @@ def parse_review_ready_artifact(comment: Mapping[str, object]) -> ReviewReadyArt
 
     pr_number = _extract_pr_number(body)
     deployment_url = _extract_deployment_url(body)
+    deployment_source = _extract_deployment_source(body)
     deployment_status = _extract_deployment_status(body)
-    if pr_number is None or deployment_url is None or deployment_status is None:
+    if pr_number is None or deployment_url is None or deployment_source is None or deployment_status is None:
         return None
 
     return ReviewReadyArtifact(
@@ -289,6 +304,7 @@ def parse_review_ready_artifact(comment: Mapping[str, object]) -> ReviewReadyArt
         created_at_ms=created_at_ms,
         pr_number=pr_number,
         deployment_url=deployment_url,
+        deployment_source=deployment_source,
         deployment_status=deployment_status,
         body=body,
     )
@@ -342,3 +358,19 @@ def _extract_deployment_status(body: str) -> str | None:
     if value.lower() in _INVALID_DEPLOYMENT_STATUS_VALUES:
         return None
     return value
+
+
+def _extract_deployment_source(body: str) -> str | None:
+    line = _REVIEW_READY_DEPLOYMENT_SOURCE_LINE.search(body)
+    if line is None:
+        return None
+
+    value = line.group("value").strip()
+    normalized = value.lower().replace("_", "-")
+    if not normalized:
+        return None
+    if normalized in {"unknown", "n/a", "na", "tbd", "todo", "unset"}:
+        return None
+    if normalized not in _ALLOWED_DEPLOYMENT_SOURCES:
+        return None
+    return normalized

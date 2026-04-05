@@ -481,6 +481,7 @@ runs:
             #      - <!-- gpa:review-ready -->
             #      - PR: #<number> (or full PR URL)
             #      - Deployment URL: https://...
+            #      - Deployment Source: <known source>
             #      - Deployment Status: <non-empty, non-placeholder>
 
             deploy_pr_json=""
@@ -528,11 +529,14 @@ runs:
             else
               review_ready_pr_field=$(printf '%s\n' "$review_ready_body" | sed -nE 's/^[[:space:]]*[Pp][Rr][[:space:]]*:[[:space:]]*(.+)$/\1/p' | head -1 || true)
               review_ready_deployment_url=$(printf '%s\n' "$review_ready_body" | sed -nE 's/^[[:space:]]*[Dd]eployment[[:space:]]+[Uu][Rr][Ll][[:space:]]*:[[:space:]]*(.+)$/\1/p' | head -1 || true)
+              review_ready_deployment_source=$(printf '%s\n' "$review_ready_body" | sed -nE 's/^[[:space:]]*[Dd]eployment[[:space:]]+[Ss]ource[[:space:]]*:[[:space:]]*(.+)$/\1/p' | head -1 || true)
               review_ready_deployment_status=$(printf '%s\n' "$review_ready_body" | sed -nE 's/^[[:space:]]*[Dd]eployment[[:space:]]+[Ss]tatus[[:space:]]*:[[:space:]]*(.+)$/\1/p' | head -1 || true)
 
               review_ready_pr_number=$(python3 -c 'import re,sys; v=(sys.argv[1] if len(sys.argv)>1 else "").strip(); u=re.search(r"https://github\\.com/[^/\\s]+/[^/\\s]+/pull/(\\d+)", v); n=re.search(r"#?(\\d+)", v); print(u.group(1) if u else (n.group(1) if n else ""))' "$review_ready_pr_field" 2>/dev/null || true)
 
               deployment_url_valid=$(python3 -c 'import sys; from urllib.parse import urlparse; v=(sys.argv[1] if len(sys.argv)>1 else "").strip(); p=urlparse(v); h=(p.hostname or "").lower(); ok=(p.scheme in {"http","https"} and bool(p.netloc) and h not in {"localhost","127.0.0.1"}); print("true" if ok else "false")' "$review_ready_deployment_url" 2>/dev/null || true)
+
+              deployment_source_valid=$(python3 -c 'import sys; v=(sys.argv[1] if len(sys.argv)>1 else "").strip().lower().replace("_","-"); allowed={"cloud-run","vercel","netlify","render","railway","fly-io","aws-amplify","azure-static-web-apps","github-pages","kubernetes"}; invalid={"","unknown","n/a","na","tbd","todo","unset"}; print("true" if (v not in invalid and v in allowed) else "false")' "$review_ready_deployment_source" 2>/dev/null || true)
 
               deployment_status_valid=$(python3 -c 'import sys; v=(sys.argv[1] if len(sys.argv)>1 else "").strip().lower(); invalid={"","pending","unknown","n/a","na","tbd","todo","unset"}; print("false" if v in invalid else "true")' "$review_ready_deployment_status" 2>/dev/null || true)
 
@@ -544,6 +548,11 @@ runs:
               if [ "$deployment_url_valid" != "true" ]; then
                 if ! check_waiver "deploy-review-marker-deployment-url"; then
                   unmet+=("Latest gpa:review-ready comment is missing a valid Deployment URL (http/https required)")
+                fi
+              fi
+              if [ "$deployment_source_valid" != "true" ]; then
+                if ! check_waiver "deploy-review-marker-deployment-source"; then
+                  unmet+=("Latest gpa:review-ready comment is missing a valid Deployment Source (known source required)")
                 fi
               fi
               if [ "$deployment_status_valid" != "true" ]; then
@@ -563,7 +572,7 @@ runs:
           review-intake|review)
             # Gate: review intake / review approval
             # Preconditions:
-            #   1. Review-ready artifact set exists (marker + PR + deployment URL + deployment status)
+            #   1. Review-ready artifact set exists (marker + PR + deployment URL + deployment source + deployment status)
             #   2. A PR referencing this issue exists (open or merged)
             #   3. PR has at least one approving review
             #   4. No unresolved changes-requested reviews remain
@@ -585,13 +594,14 @@ runs:
             else
               review_ready_pr_field=$(printf '%s\n' "$review_ready_body" | sed -nE 's/^[[:space:]]*[Pp][Rr][[:space:]]*:[[:space:]]*(.+)$/\1/p' | head -1 || true)
               review_ready_deployment_url=$(printf '%s\n' "$review_ready_body" | sed -nE 's/^[[:space:]]*[Dd]eployment[[:space:]]+[Uu][Rr][Ll][[:space:]]*:[[:space:]]*(.+)$/\1/p' | head -1 || true)
+              review_ready_deployment_source=$(printf '%s\n' "$review_ready_body" | sed -nE 's/^[[:space:]]*[Dd]eployment[[:space:]]+[Ss]ource[[:space:]]*:[[:space:]]*(.+)$/\1/p' | head -1 || true)
               review_ready_deployment_status=$(printf '%s\n' "$review_ready_body" | sed -nE 's/^[[:space:]]*[Dd]eployment[[:space:]]+[Ss]tatus[[:space:]]*:[[:space:]]*(.+)$/\1/p' | head -1 || true)
 
-              review_artifact_complete=$(python3 -c 'import re,sys; from urllib.parse import urlparse; pr=(sys.argv[1] if len(sys.argv)>1 else "").strip(); du=(sys.argv[2] if len(sys.argv)>2 else "").strip(); ds=(sys.argv[3] if len(sys.argv)>3 else "").strip().lower(); p=urlparse(du); has_pr=bool(re.search(r"https://github\\.com/[^/\\s]+/[^/\\s]+/pull/\\d+|#?\\d+", pr)); has_url=(p.scheme in {"http","https"} and bool(p.netloc) and (p.hostname or "").lower() not in {"localhost","127.0.0.1"}); has_status=ds not in {"","pending","unknown","n/a","na","tbd","todo","unset"}; print("true" if has_pr and has_url and has_status else "false")' "$review_ready_pr_field" "$review_ready_deployment_url" "$review_ready_deployment_status" 2>/dev/null || true)
+              review_artifact_complete=$(python3 -c 'import re,sys; from urllib.parse import urlparse; pr=(sys.argv[1] if len(sys.argv)>1 else "").strip(); du=(sys.argv[2] if len(sys.argv)>2 else "").strip(); src=(sys.argv[3] if len(sys.argv)>3 else "").strip().lower().replace("_","-"); ds=(sys.argv[4] if len(sys.argv)>4 else "").strip().lower(); p=urlparse(du); has_pr=bool(re.search(r"https://github\\.com/[^/\\s]+/[^/\\s]+/pull/\\d+|#?\\d+", pr)); has_url=(p.scheme in {"http","https"} and bool(p.netloc) and (p.hostname or "").lower() not in {"localhost","127.0.0.1"}); allowed_src={"cloud-run","vercel","netlify","render","railway","fly-io","aws-amplify","azure-static-web-apps","github-pages","kubernetes"}; has_source=(src in allowed_src); has_status=ds not in {"","pending","unknown","n/a","na","tbd","todo","unset"}; print("true" if has_pr and has_url and has_source and has_status else "false")' "$review_ready_pr_field" "$review_ready_deployment_url" "$review_ready_deployment_source" "$review_ready_deployment_status" 2>/dev/null || true)
 
               if [ "$review_artifact_complete" != "true" ]; then
                 if ! check_waiver "review-ready-artifact"; then
-                  unmet+=("Latest gpa:review-ready comment must include PR, Deployment URL, and Deployment Status")
+                  unmet+=("Latest gpa:review-ready comment must include PR, Deployment URL, Deployment Source, and Deployment Status")
                 fi
               fi
             fi
