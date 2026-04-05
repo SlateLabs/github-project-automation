@@ -525,6 +525,22 @@ Canonical contract primitives for the next operator-in-the-loop evolution now li
 - Stage event schema fields (`run_key`, `idempotency_key`, `attempt/max_attempts`, retry metadata)
 - Structured operator command tokens: `gpa:feedback <instructions>` and `gpa:approve`
 
+### Operator command intake (current slice)
+
+The webhook gateway now accepts `issue_comment` events and treats structured issue comments as machine-detectable orchestration commands:
+
+- `gpa:feedback <instructions>` dispatches `requested_stage: execution`
+- `gpa:approve` dispatches `requested_stage: merge`
+
+Current enforcement in this slice:
+
+- Commands are accepted only from trusted actors under `config/trust-policy.yml`
+- Only `created` and `edited` issue comments are processed
+- Commands on pull request conversations are ignored (commands must be posted on the source issue)
+- Command comments are deduplicated by `{repo}/{issue_number}/{comment_id}` within the gateway dedup window
+
+This provides a minimal operator feedback loop trigger without introducing an external state store. Recency checks against the latest review-ready marker remain a follow-on slice.
+
 ### Stage contract
 
 The orchestration is intended to run with minimal operator intervention once an issue moves to `Ready`. Each stage therefore has an explicit contract:

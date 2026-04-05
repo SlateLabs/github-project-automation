@@ -79,6 +79,10 @@ class OrchestrationContractTests(unittest.TestCase):
             parse_operator_command("gpa:feedback tighten retry guardrails"),
             (OperatorCommandType.FEEDBACK, "tighten retry guardrails"),
         )
+        self.assertEqual(
+            parse_operator_command("gpa:feedback\nPlease fix flaky deploy check\nand retry."),
+            (OperatorCommandType.FEEDBACK, "Please fix flaky deploy check\nand retry."),
+        )
         self.assertIsNone(parse_operator_command("gpa:feedback"))
         self.assertIsNone(parse_operator_command("looks good"))
 

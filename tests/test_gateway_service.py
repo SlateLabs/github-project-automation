@@ -93,7 +93,7 @@ class GatewayServiceTests(unittest.TestCase):
             repo_config={
                 "SlateLabs/github-project-automation": ConfiguredRepo(
                     repo="SlateLabs/github-project-automation",
-                    enabled_stages=("kickoff", "plan"),
+                    enabled_stages=("kickoff", "plan", "execution", "merge"),
                     shared_workflow_version="deadbeef",
                 )
             },
@@ -133,6 +133,39 @@ class GatewayServiceTests(unittest.TestCase):
         headers = {
             "X-GitHub-Delivery": delivery_id,
             "X-GitHub-Event": "projects_v2_item",
+            "X-Hub-Signature-256": signature(self.secret, raw_body),
+        }
+        return self.app.handle("POST", "/github/webhook", headers, raw_body)
+
+    def _issue_comment_payload(
+        self,
+        *,
+        actor: str = "trusted-user",
+        body: str = "gpa:feedback tighten retry guardrails",
+        comment_id: int = 5001,
+        action: str = "created",
+    ) -> dict[str, object]:
+        return {
+            "action": action,
+            "repository": {"full_name": "SlateLabs/github-project-automation"},
+            "issue": {"number": 1},
+            "comment": {
+                "id": comment_id,
+                "body": body,
+            },
+            "sender": {"login": actor, "type": "User"},
+        }
+
+    def _issue_comment_request(
+        self,
+        payload: dict[str, object],
+        *,
+        delivery_id: str = "delivery-comment-1",
+    ) -> tuple[int, dict[str, object]]:
+        raw_body = json.dumps(payload).encode("utf-8")
+        headers = {
+            "X-GitHub-Delivery": delivery_id,
+            "X-GitHub-Event": "issue_comment",
             "X-Hub-Signature-256": signature(self.secret, raw_body),
         }
         return self.app.handle("POST", "/github/webhook", headers, raw_body)
@@ -194,6 +227,56 @@ class GatewayServiceTests(unittest.TestCase):
         )
         self.assertEqual(status, 202)
         self.assertEqual(body["outcome"], "skipped")
+
+    def test_issue_comment_feedback_dispatches_execution_stage(self) -> None:
+        status, body = self._issue_comment_request(self._issue_comment_payload())
+        self.assertEqual(status, 200)
+        self.assertEqual(body["outcome"], "dispatched")
+        self.assertEqual(len(self.github.dispatches), 1)
+        repo, event_type, client_payload = self.github.dispatches[0]
+        self.assertEqual(repo, "SlateLabs/github-project-automation")
+        self.assertEqual(event_type, "orchestration-start")
+        self.assertEqual(client_payload["requested_stage"], "execution")
+        self.assertEqual(client_payload["source_command"], "feedback")
+        self.assertEqual(client_payload["feedback_instructions"], "tighten retry guardrails")
+
+    def test_issue_comment_approve_dispatches_merge_stage(self) -> None:
+        status, body = self._issue_comment_request(
+            self._issue_comment_payload(body="gpa:approve", comment_id=5002),
+            delivery_id="delivery-comment-2",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["outcome"], "dispatched")
+        self.assertEqual(self.github.dispatches[0][2]["requested_stage"], "merge")
+        self.assertEqual(self.github.dispatches[0][2]["source_command"], "approve")
+        self.assertNotIn("feedback_instructions", self.github.dispatches[0][2])
+
+    def test_issue_comment_without_structured_command_is_skipped(self) -> None:
+        status, body = self._issue_comment_request(
+            self._issue_comment_payload(body="looks good", comment_id=5003),
+            delivery_id="delivery-comment-3",
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(body["outcome"], "skipped")
+        self.assertEqual(self.github.dispatches, [])
+
+    def test_issue_comment_is_deduplicated_by_comment_id(self) -> None:
+        payload = self._issue_comment_payload(comment_id=5004)
+        first = self._issue_comment_request(payload, delivery_id="delivery-comment-4a")
+        second = self._issue_comment_request(payload, delivery_id="delivery-comment-4b")
+        self.assertEqual(first[0], 200)
+        self.assertEqual(second[0], 202)
+        self.assertEqual(second[1]["outcome"], "deduplicated")
+        self.assertEqual(len(self.github.dispatches), 1)
+
+    def test_issue_comment_from_untrusted_actor_is_dropped(self) -> None:
+        status, body = self._issue_comment_request(
+            self._issue_comment_payload(actor="outsider", comment_id=5005),
+            delivery_id="delivery-comment-5",
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(body["outcome"], "dropped")
+        self.assertEqual(self.github.dispatches, [])
 
     def test_rejects_missing_repository_field(self) -> None:
         self.github.context = ProjectItemContext(

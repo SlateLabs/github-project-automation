@@ -26,6 +26,7 @@ class InMemoryDedupStore:
         self._delivery_ids: dict[str, int] = {}
         self._active_runs: dict[str, ActiveRun] = {}
         self._completed_runs: dict[str, CompletedRun] = {}
+        self._operator_comment_ids: dict[str, int] = {}
         self._lock = Lock()
 
     def _prune(self, now_ms: int) -> None:
@@ -39,6 +40,11 @@ class InMemoryDedupStore:
             prefix: run
             for prefix, run in self._completed_runs.items()
             if run.completed_at_ms >= cutoff
+        }
+        self._operator_comment_ids = {
+            comment_key: seen_at
+            for comment_key, seen_at in self._operator_comment_ids.items()
+            if seen_at >= cutoff
         }
 
     def seen_delivery(self, delivery_id: str, now_ms: int) -> bool:
@@ -78,3 +84,10 @@ class InMemoryDedupStore:
         with self._lock:
             self._active_runs.pop(prefix, None)
 
+    def seen_operator_comment(self, comment_key: str, now_ms: int) -> bool:
+        with self._lock:
+            self._prune(now_ms)
+            seen = comment_key in self._operator_comment_ids
+            if not seen:
+                self._operator_comment_ids[comment_key] = now_ms
+            return seen

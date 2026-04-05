@@ -158,11 +158,22 @@ def is_transition_allowed(current: OrchestrationStage, candidate_next: Orchestra
 
 
 def parse_operator_command(text: str) -> tuple[OperatorCommandType, str | None] | None:
-    line = text.strip()
-    if line == "gpa:approve":
+    lines = [line.strip() for line in text.splitlines()]
+    non_empty = [line for line in lines if line]
+    if not non_empty:
+        return None
+
+    first_line = non_empty[0]
+    if first_line == "gpa:approve":
         return (OperatorCommandType.APPROVE, None)
-    if line.startswith("gpa:feedback"):
-        instructions = line[len("gpa:feedback") :].strip()
+
+    if first_line.startswith("gpa:feedback"):
+        trailing = first_line[len("gpa:feedback") :].strip()
+        if trailing:
+            instructions = trailing
+        else:
+            remaining = "\n".join(non_empty[1:]).strip()
+            instructions = remaining
         if instructions:
             return (OperatorCommandType.FEEDBACK, instructions)
     return None
