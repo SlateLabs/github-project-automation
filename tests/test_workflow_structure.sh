@@ -253,10 +253,10 @@ else
   check "codex plan author step present" "fail"
 fi
 
-if grep -q 'Publish Claude plan review comment (pre-gate)' "$WORKFLOW"; then
-  check "claude plan review step present" "pass"
+if grep -q 'Publish Codex plan review comment (pre-gate)' "$WORKFLOW"; then
+  check "codex plan review step present" "pass"
 else
-  check "claude plan review step present" "fail"
+  check "codex plan review step present" "fail"
 fi
 
 if grep -q 'Validate stage agent credentials' "$WORKFLOW" && grep -q 'OPENAI_API_KEY' "$WORKFLOW" && grep -q 'ANTHROPIC_API_KEY' "$WORKFLOW"; then

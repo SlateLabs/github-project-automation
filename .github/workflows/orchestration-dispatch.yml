@@ -1097,13 +1097,14 @@ jobs:
             -X PATCH -f "body=${new_body}" >/dev/null
           echo "::notice::Codex authored implementation plan comment"
 
-      - name: Prepare Claude implementation plan review prompt
+      - name: Prepare Codex implementation plan review prompt
         if: needs.intake.outputs.requested_stage == 'plan'
         id: plan-review-prompt
         env:
           ISSUE_TITLE: ${{ needs.intake.outputs.issue_title }}
           ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
           ISSUE_BODY: ${{ needs.intake.outputs.issue_body }}
+          REVIEW_FILE: .gpa-plan-review.json
         shell: bash
         run: |
           set -euo pipefail
@@ -1113,15 +1114,23 @@ jobs:
           from pathlib import Path
 
           plan_body = Path(os.environ["RUNNER_TEMP"], "implementation-plan.md").read_text()
-          prompt = f"""Review the following implementation plan for issue #{os.environ["ISSUE_NUMBER"]}.
+          prompt = f"""You are the autonomous implementation-plan reviewer for issue #{os.environ["ISSUE_NUMBER"]}.
 
-          Review goals:
-          - Check whether the plan is bounded, executable, and aligned to the issue and design.
+          Review the proposed implementation plan and write JSON to the repository file `{os.environ["REVIEW_FILE"]}`.
+
+          Required JSON shape:
+          {{
+            "summary": "<one short paragraph>",
+            "review_markdown": "<markdown that starts with gpa:plan-review:auto and contains concise execution-oriented feedback>"
+          }}
+
+          Rules:
+          - The review should check whether the plan is bounded, executable, and aligned to the issue and design.
           - Prefer actionable critique over generic praise.
           - If the plan is good enough for execution, say so clearly.
-          - Reply with markdown only. Do not wrap the response in JSON, YAML, or code fences.
-          - Start the comment with `gpa:plan-review:auto`.
+          - `review_markdown` must start with `gpa:plan-review:auto`.
           - Keep the review concise and execution-oriented.
+          - Do not modify tracked repository files other than writing `{os.environ["REVIEW_FILE"]}`.
 
           Source issue title:
           {os.environ["ISSUE_TITLE"]}
@@ -1146,26 +1155,65 @@ jobs:
             fh.write("EOF\n")
           PY
 
-      - name: Post automated plan review comment (pre-gate)
+      - name: Run Codex implementation plan review
         if: needs.intake.outputs.requested_stage == 'plan'
-        id: claude-plan-review
-        uses: anthropics/claude-code-action@v1
+        id: codex-plan-review
+        uses: openai/codex-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: ${{ steps.plan-review-prompt.outputs.prompt }}
-          show_full_output: ${{ vars.ORCHESTRATION_CLAUDE_SHOW_FULL_OUTPUT == 'true' }}
-          claude_args: >-
-            --max-turns 1
-          allowed_bots: "*"
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          sandbox: workspace-write
+          model: ${{ vars.ORCHESTRATION_CODEX_MODEL }}
+          effort: ${{ vars.ORCHESTRATION_CODEX_EFFORT }}
+          allow-bots: true
 
-      - name: Publish Claude plan review comment (pre-gate)
+      - name: Parse Codex implementation plan review
+        if: needs.intake.outputs.requested_stage == 'plan'
+        id: parse-plan-review
+        env:
+          REVIEW_FILE: .gpa-plan-review.json
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "$REVIEW_FILE" ]; then
+            echo "::error::Implementation plan review did not produce $REVIEW_FILE"
+            exit 1
+          fi
+
+          summary=$(jq -r '.summary // empty' "$REVIEW_FILE")
+          review_markdown=$(jq -r '.review_markdown // empty' "$REVIEW_FILE")
+          if [ -z "$review_markdown" ]; then
+            echo "::error::Implementation plan review did not produce review_markdown"
+            cat "$REVIEW_FILE"
+            exit 1
+          fi
+
+          case "$review_markdown" in
+            gpa:plan-review:auto*) ;;
+            *)
+              echo "::error::Implementation plan review must start with gpa:plan-review:auto"
+              cat "$REVIEW_FILE"
+              exit 1
+              ;;
+          esac
+
+          {
+            echo 'summary<<EOF'
+            printf '%s\n' "$summary"
+            echo 'EOF'
+            echo 'review_body<<EOF'
+            printf '%s\n' "$review_markdown"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish Codex plan review comment (pre-gate)
         if: needs.intake.outputs.requested_stage == 'plan'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
-          REVIEW_EXECUTION_FILE: ${{ steps.claude-plan-review.outputs.execution_file }}
           RUN_KEY: ${{ needs.intake.outputs.run_key }}
+          REVIEW_BODY: ${{ steps.parse-plan-review.outputs.review_body }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1179,24 +1227,12 @@ jobs:
             exit 0
           fi
 
-          if [ -z "${REVIEW_EXECUTION_FILE:-}" ] || [ ! -f "$REVIEW_EXECUTION_FILE" ]; then
-            echo "::error::Claude plan review did not produce an execution file"
+          if [ -z "${REVIEW_BODY:-}" ]; then
+            echo "::error::Implementation plan review did not produce a comment body"
             exit 1
           fi
 
-          review_body=$(
-            jq -rs -r '
-              map(if type == "array" then .[] else . end)
-              | map(select(.type == "result" and .subtype == "success"))[-1].result // ""
-            ' "$REVIEW_EXECUTION_FILE"
-          )
-          review_body=$(printf '%s' "$review_body" | perl -0pe 's/\A```[a-zA-Z0-9_-]*\n//; s/\n```\s*\z/\n/s')
-          if [ -z "$review_body" ]; then
-            echo "::error::Claude plan review did not produce a comment body"
-            exit 1
-          fi
-
-          review_body="<!-- gpa:run-status:plan-review:completed:${RUN_KEY} -->"$'\n\n'"${review_body}"
+          review_body="<!-- gpa:run-status:plan-review:completed:${RUN_KEY} -->"$'\n\n'"${REVIEW_BODY}"
           gh issue comment "$ISSUE_NUMBER" --body "$review_body" >/dev/null
           echo "::notice::Posted automated plan review comment to issue #$ISSUE_NUMBER"
 
