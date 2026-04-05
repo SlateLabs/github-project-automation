@@ -2006,8 +2006,117 @@ jobs:
 
           echo "state_valid=true" >> "$GITHUB_OUTPUT"
 
+      - name: Create orchestration app token (merge sync)
+        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && vars.ORCHESTRATION_APP_ID != ''
+        id: merge-sync-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.ORCHESTRATION_APP_ID }}
+          private-key: ${{ secrets.ORCHESTRATION_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+
+      - name: Sync feature branch with main (pre-merge)
+        id: merge-sync
+        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync-token.outputs.token != ''
+        env:
+          GH_TOKEN: ${{ steps.merge-sync-token.outputs.token }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pr_json=$(gh pr list --state open --json number,headRefName,baseRefName --limit 100 \
+            --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))][0]")
+          pr_number=$(echo "$pr_json" | jq -r '.number // empty')
+          branch_name=$(echo "$pr_json" | jq -r '.headRefName // empty')
+          base_ref=$(echo "$pr_json" | jq -r '.baseRefName // "main"')
+
+          if [ -z "$pr_number" ] || [ -z "$branch_name" ]; then
+            echo "::error::No open PR found for issue #$ISSUE_NUMBER to sync before merge"
+            exit 1
+          fi
+
+          git config user.name "project-automation-gateway[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+
+          git fetch origin "$base_ref" "$branch_name"
+          git checkout -B "$branch_name" "origin/$branch_name"
+
+          if git merge --no-edit "origin/$base_ref"; then
+            if [ -n "$(git status --porcelain)" ]; then
+              git add -A
+              git commit --amend --no-edit
+            fi
+            if [ "$(git rev-parse HEAD)" != "$(git rev-parse "origin/$branch_name")" ]; then
+              git push origin "HEAD:$branch_name"
+              echo "::notice::Synced $branch_name with $base_ref before merge"
+              echo "sync_result=updated" >> "$GITHUB_OUTPUT"
+            else
+              echo "::notice::Branch $branch_name already included $base_ref"
+              echo "sync_result=unchanged" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            git merge --abort || true
+            echo "::warning::Automatic merge sync from $base_ref into $branch_name requires manual conflict resolution"
+            echo "sync_result=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post merge remediation required comment
+        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync.outputs.sync_result == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+          RUN_KEY: ${{ needs.intake.outputs.run_key }}
+          ACTOR: ${{ needs.intake.outputs.actor }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          checkpoint=$(jq -cn \
+            --arg run_key "$RUN_KEY" \
+            --arg stage "merge" \
+            --arg state "blocked" \
+            --arg actor "$ACTOR" \
+            --arg reason "merge-sync-conflict" \
+            --arg run_url "$RUN_URL" \
+            '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,reason:$reason,run_url:$run_url,next_stage:"deploy-review"}')
+
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+          ### Merge requires conflict resolution
+          <!-- gpa:run-status:merge:failed:$RUN_KEY -->
+          <!-- gpa:checkpoint $checkpoint -->
+
+          | Field | Value |
+          |-------|-------|
+          | **Run key** | \`$RUN_KEY\` |
+          | **Actor** | @$ACTOR |
+          | **Result** | :warning: Automatic sync with \`main\` hit merge conflicts |
+          | **Actions run** | [$RUN_ID]($RUN_URL) |
+
+          The merge lane attempted to sync the feature branch with \`main\` before final merge, but Git could not apply the merge cleanly.
+
+          Next step:
+          - re-run \`feedback-implementation\` to reconcile the branch against the latest \`main\`
+          COMMENT_EOF
+          )"
+
+      - name: Fail on merge sync conflict
+        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync.outputs.sync_result == 'conflict'
+        shell: bash
+        run: |
+          echo "::error::Automatic pre-merge sync with main hit conflicts"
+          exit 1
+
       - name: Merge approved PR (post-gate)
-        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge'
+        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync.outputs.sync_result != 'conflict'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
