@@ -1460,6 +1460,8 @@ jobs:
             exit 1
           fi
 
+          rm -rf .codex || true
+          git rm -r --cached --ignore-unmatch .codex >/dev/null 2>&1 || true
           git add -A
           if git diff --cached --quiet; then
             echo "::error::Execution agent changes could not be staged"
@@ -2112,6 +2114,8 @@ jobs:
           git checkout -B "$branch_name" "origin/$branch_name"
 
           if git merge --no-edit "origin/$base_ref"; then
+            rm -rf .codex || true
+            git rm -r --cached --ignore-unmatch .codex >/dev/null 2>&1 || true
             if [ -n "$(git status --porcelain)" ]; then
               git add -A
               git commit --amend --no-edit
@@ -2232,6 +2236,8 @@ jobs:
             exit 0
           fi
 
+          rm -rf .codex || true
+          git rm -r --cached --ignore-unmatch .codex >/dev/null 2>&1 || true
           git add -A
           git commit --no-edit
           git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:${BRANCH_NAME}"
