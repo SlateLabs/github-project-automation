@@ -204,6 +204,37 @@ class GitHubApiClient:
             expected_statuses=(200,),
         )
 
+    def _project_item_context_from_node(self, node: dict[str, Any], content: dict[str, Any]) -> ProjectItemContext:
+        item_type = content.get("__typename") or "Unknown"
+        issue_labels = tuple(label["name"] for label in content.get("labels", {}).get("nodes", []))
+
+        repository_field_repo = None
+        repository_field_archived = False
+        status = None
+
+        for field_value in node.get("fieldValues", {}).get("nodes", []):
+            typename = field_value.get("__typename")
+            field_name = field_value.get("field", {}).get("name")
+            if typename == "ProjectV2ItemFieldRepositoryValue" and field_name == "Repository":
+                repo = field_value.get("repository") or {}
+                repository_field_repo = repo.get("nameWithOwner")
+                repository_field_archived = bool(repo.get("isArchived"))
+            elif typename == "ProjectV2ItemFieldSingleSelectValue" and field_name == "Status":
+                status = field_value.get("name")
+
+        return ProjectItemContext(
+            project_item_id=node["id"],
+            item_type=item_type,
+            issue_title=content.get("title"),
+            issue_number=content.get("number"),
+            issue_repo=(content.get("repository") or {}).get("nameWithOwner"),
+            issue_state=content.get("state"),
+            issue_labels=issue_labels,
+            repository_field_repo=repository_field_repo,
+            repository_field_archived=repository_field_archived,
+            status=status,
+        )
+
     def get_project_item_context(self, item_node_id: str) -> ProjectItemContext:
         query = """
         query($itemId: ID!) {
@@ -269,35 +300,80 @@ class GitHubApiClient:
             raise GitHubApiError(f"Project item '{item_node_id}' was not found")
 
         content = node.get("content") or {}
-        item_type = content.get("__typename") or "Unknown"
-        issue_labels = tuple(label["name"] for label in content.get("labels", {}).get("nodes", []))
+        return self._project_item_context_from_node(node, content)
 
-        repository_field_repo = None
-        repository_field_archived = False
-        status = None
+    def get_issue_project_item_context(self, repo_full_name: str, issue_number: int) -> ProjectItemContext:
+        owner, repo = repo_full_name.split("/", 1)
+        query = """
+        query($owner: String!, $repo: String!, $number: Int!) {
+          repository(owner: $owner, name: $repo) {
+            issue(number: $number) {
+              __typename
+              title
+              number
+              state
+              labels(first: 20) {
+                nodes {
+                  name
+                }
+              }
+              repository {
+                nameWithOwner
+              }
+              projectItems(first: 20) {
+                nodes {
+                  id
+                  project {
+                    ... on ProjectV2 {
+                      title
+                      closed
+                    }
+                  }
+                  fieldValues(first: 20) {
+                    nodes {
+                      __typename
+                      ... on ProjectV2ItemFieldSingleSelectValue {
+                        name
+                        field {
+                          ... on ProjectV2FieldCommon {
+                            name
+                          }
+                        }
+                      }
+                      ... on ProjectV2ItemFieldRepositoryValue {
+                        repository {
+                          nameWithOwner
+                          isArchived
+                        }
+                        field {
+                          ... on ProjectV2FieldCommon {
+                            name
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        payload = self.graphql(query, {"owner": owner, "repo": repo, "number": issue_number})
+        issue = payload.get("data", {}).get("repository", {}).get("issue")
+        if not issue:
+            raise GitHubApiError(f"Issue '{repo_full_name}#{issue_number}' was not found")
 
-        for field_value in node.get("fieldValues", {}).get("nodes", []):
-            typename = field_value.get("__typename")
-            field_name = field_value.get("field", {}).get("name")
-            if typename == "ProjectV2ItemFieldRepositoryValue" and field_name == "Repository":
-                repo = field_value.get("repository") or {}
-                repository_field_repo = repo.get("nameWithOwner")
-                repository_field_archived = bool(repo.get("isArchived"))
-            elif typename == "ProjectV2ItemFieldSingleSelectValue" and field_name == "Status":
-                status = field_value.get("name")
+        item_nodes = issue.get("projectItems", {}).get("nodes", [])
+        open_items = [item for item in item_nodes if not (item.get("project") or {}).get("closed", False)]
+        if not open_items:
+            raise GitHubApiError(f"Issue '{repo_full_name}#{issue_number}' is not attached to an open project item")
 
-        return ProjectItemContext(
-            project_item_id=node["id"],
-            item_type=item_type,
-            issue_title=content.get("title"),
-            issue_number=content.get("number"),
-            issue_repo=(content.get("repository") or {}).get("nameWithOwner"),
-            issue_state=content.get("state"),
-            issue_labels=issue_labels,
-            repository_field_repo=repository_field_repo,
-            repository_field_archived=repository_field_archived,
-            status=status,
+        preferred = next(
+            (item for item in open_items if (item.get("project") or {}).get("title") == "Workflow Orchestration"),
+            open_items[0],
         )
+        return self._project_item_context_from_node(preferred, issue)
 
     def get_actor_context(self, organization: str, repo_full_name: str, actor_login: str) -> ActorContext:
         org_role = None
@@ -384,4 +460,72 @@ class GitHubApiClient:
             f"/repos/{owner}/{repo}/dispatches",
             payload={"event_type": event_type, "client_payload": client_payload},
             expected_statuses=(204,),
+        )
+
+    def update_project_item_status(self, project_item_id: str, status_name: str) -> None:
+        metadata_query = """
+        query($itemId: ID!) {
+          node(id: $itemId) {
+            ... on ProjectV2Item {
+              id
+              project {
+                ... on ProjectV2 {
+                  id
+                  fields(first: 20) {
+                    nodes {
+                      ... on ProjectV2SingleSelectField {
+                        id
+                        name
+                        options {
+                          id
+                          name
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        metadata = self.graphql(metadata_query, {"itemId": project_item_id})
+        item = metadata.get("data", {}).get("node")
+        if not item:
+            raise GitHubApiError(f"Project item '{project_item_id}' was not found for status update")
+
+        project = item.get("project") or {}
+        project_id = project.get("id")
+        status_field = next((field for field in project.get("fields", {}).get("nodes", []) if field.get("name") == "Status"), None)
+        if not project_id or not status_field:
+            raise GitHubApiError(f"Project item '{project_item_id}' is missing a Status field")
+
+        option_id = next((option.get("id") for option in status_field.get("options", []) if option.get("name") == status_name), None)
+        if not option_id:
+            raise GitHubApiError(f"Project Status option '{status_name}' was not found")
+
+        mutation = """
+        mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+          updateProjectV2ItemFieldValue(
+            input: {
+              projectId: $projectId
+              itemId: $itemId
+              fieldId: $fieldId
+              value: { singleSelectOptionId: $optionId }
+            }
+          ) {
+            projectV2Item {
+              id
+            }
+          }
+        }
+        """
+        self.graphql(
+            mutation,
+            {
+                "projectId": project_id,
+                "itemId": project_item_id,
+                "fieldId": status_field["id"],
+                "optionId": option_id,
+            },
         )

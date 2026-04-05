@@ -1,4 +1,4 @@
-"""Core webhook gateway logic for kickoff-trigger dispatch."""
+"""Core webhook gateway logic for orchestration dispatch."""
 
 from __future__ import annotations
 
@@ -22,6 +22,10 @@ from gateway.github_api import (
 REQUESTED_STAGE = "kickoff"
 DISPATCH_EVENT_TYPE = "orchestration-start"
 DISPATCH_RETRY_BACKOFFS = (1.0, 4.0, 16.0)
+OPERATOR_COMMANDS = {
+    "gpa:feedback": "feedback-implementation",
+    "gpa:approve": "merge",
+}
 
 
 @dataclass(frozen=True)
@@ -94,18 +98,43 @@ class GatewayService:
             )
             return GatewayResult(200, {"outcome": "accepted", "event": "ping"})
 
-        if event_name != "projects_v2_item":
-            self.logger(
-                {
-                    "delivery_id": delivery_id,
-                    "event": event_name,
-                    "actor": actor,
-                    "outcome": "skipped",
-                    "reason": "unsupported event",
-                }
+        if event_name == "projects_v2_item":
+            return self._handle_project_event(
+                delivery_id=delivery_id,
+                payload=payload,
+                actor=actor,
+                now_ms=now_ms,
             )
-            return GatewayResult(202, {"outcome": "skipped", "reason": "Only projects_v2_item events are supported"})
 
+        if event_name == "issue_comment":
+            return self._handle_issue_comment_event(
+                delivery_id=delivery_id,
+                payload=payload,
+                actor=actor,
+                now_ms=now_ms,
+            )
+
+        self.logger(
+            {
+                "delivery_id": delivery_id,
+                "event": event_name,
+                "actor": actor,
+                "outcome": "skipped",
+                "reason": "unsupported event",
+            }
+        )
+        return GatewayResult(202, {"outcome": "skipped", "reason": "Only projects_v2_item and issue_comment events are supported"})
+
+    def _handle_project_event(
+        self,
+        *,
+        delivery_id: str,
+        payload: dict[str, Any],
+        actor: str,
+        now_ms: int,
+    ) -> GatewayResult:
+        event_name = "projects_v2_item"
+        requested_stage = REQUESTED_STAGE
         transition = self._extract_status_transition(payload)
         if transition != ("Backlog", "Ready"):
             self.logger(
@@ -129,7 +158,7 @@ class GatewayService:
         except GitHubApiError as exc:
             return GatewayResult(502, {"outcome": "error", "reason": f"Failed to resolve project item context: {exc}"})
 
-        eligibility_error = self._check_eligibility(context)
+        eligibility_error = self._check_project_item_eligibility(context, requested_stage)
         if eligibility_error:
             self.logger(
                 {
@@ -138,7 +167,7 @@ class GatewayService:
                     "actor": actor,
                     "repo": context.repository_field_repo,
                     "issue": context.issue_number,
-                    "requested_stage": REQUESTED_STAGE,
+                    "requested_stage": requested_stage,
                     "outcome": "rejected",
                     "reason": eligibility_error,
                 }
@@ -147,8 +176,8 @@ class GatewayService:
 
         repo_full_name = context.repository_field_repo or ""
         issue_number = int(context.issue_number or 0)
-        run_key = f"{repo_full_name}/{issue_number}/{REQUESTED_STAGE}/{now_ms}"
-        prefix = f"{repo_full_name}/{issue_number}/{REQUESTED_STAGE}"
+        run_key = f"{repo_full_name}/{issue_number}/{requested_stage}/{now_ms}"
+        prefix = f"{repo_full_name}/{issue_number}/{requested_stage}"
 
         decision = self._resolve_actor_decision(payload, actor, repo_full_name)
         if decision.outcome == "denied":
@@ -158,6 +187,7 @@ class GatewayService:
                     actor=actor,
                     repo=repo_full_name,
                     issue=issue_number,
+                    requested_stage=requested_stage,
                     run_key=run_key,
                     outcome="dropped",
                     reason=decision.reason,
@@ -172,6 +202,7 @@ class GatewayService:
                     actor=actor,
                     repo=repo_full_name,
                     issue=issue_number,
+                    requested_stage=requested_stage,
                     run_key=run_key,
                     outcome="deduplicated",
                     reason="active run already exists",
@@ -186,6 +217,7 @@ class GatewayService:
                     actor=actor,
                     repo=repo_full_name,
                     issue=issue_number,
+                    requested_stage=requested_stage,
                     run_key=run_key,
                     outcome="deduplicated",
                     reason="recent run completed inside dedup window",
@@ -198,7 +230,7 @@ class GatewayService:
         client_payload = {
             "issue_number": issue_number,
             "issue_title": context.issue_title,
-            "requested_stage": REQUESTED_STAGE,
+            "requested_stage": requested_stage,
             "run_key": run_key,
             "actor": actor,
             "timestamp": timestamp,
@@ -215,6 +247,7 @@ class GatewayService:
                         actor=actor,
                         repo=repo_full_name,
                         issue=issue_number,
+                        requested_stage=requested_stage,
                         run_key=run_key,
                         outcome="pending-review",
                         reason=decision.reason,
@@ -238,6 +271,7 @@ class GatewayService:
                         actor=actor,
                         repo=repo_full_name,
                         issue=issue_number,
+                        requested_stage=requested_stage,
                         run_key=run_key,
                         outcome="dispatch-failed",
                         reason=str(last_error),
@@ -252,6 +286,7 @@ class GatewayService:
                     actor=actor,
                     repo=repo_full_name,
                     issue=issue_number,
+                    requested_stage=requested_stage,
                     run_key=run_key,
                     outcome="dispatched",
                 )
@@ -265,6 +300,161 @@ class GatewayService:
                     actor=actor,
                     repo=repo_full_name,
                     issue=issue_number,
+                    requested_stage=requested_stage,
+                    run_key=run_key,
+                    outcome="error",
+                    reason=str(exc),
+                )
+            )
+            return GatewayResult(502, {"outcome": "error", "reason": str(exc), "run_key": run_key})
+
+    def _handle_issue_comment_event(
+        self,
+        *,
+        delivery_id: str,
+        payload: dict[str, Any],
+        actor: str,
+        now_ms: int,
+    ) -> GatewayResult:
+        if payload.get("action") != "created":
+            return GatewayResult(202, {"outcome": "skipped", "reason": "Only created issue comments are supported"})
+
+        issue = payload.get("issue") or {}
+        if issue.get("pull_request") is not None:
+            return GatewayResult(202, {"outcome": "skipped", "reason": "Pull request comments do not trigger operator orchestration"})
+
+        sender = payload.get("sender") or {}
+        if sender.get("type") == "Bot":
+            return GatewayResult(202, {"outcome": "skipped", "reason": "Bot comments do not trigger operator orchestration"})
+
+        comment = payload.get("comment") or {}
+        command = self._parse_operator_command(comment.get("body") or "")
+        if command is None:
+            return GatewayResult(202, {"outcome": "skipped", "reason": "Comment is not a GPA operator command"})
+
+        requested_stage, feedback_body = command
+        if requested_stage == "feedback-implementation" and not feedback_body:
+            return GatewayResult(422, {"outcome": "rejected", "reason": "gpa:feedback requires non-empty instructions"})
+
+        repo_full_name = ((payload.get("repository") or {}).get("full_name") or issue.get("repository_url", "").removeprefix("https://api.github.com/repos/"))
+        issue_number = issue.get("number")
+        if not repo_full_name or issue_number is None:
+            return GatewayResult(400, {"outcome": "rejected", "reason": "issue_comment payload is missing repository or issue context"})
+
+        run_key = f"{repo_full_name}/{issue_number}/{requested_stage}/{now_ms}"
+        decision = self._resolve_actor_decision(payload, actor, repo_full_name)
+        if decision.outcome == "denied":
+            self.logger(
+                self._log_fields(
+                    delivery_id=delivery_id,
+                    actor=actor,
+                    repo=repo_full_name,
+                    issue=issue_number,
+                    requested_stage=requested_stage,
+                    run_key=run_key,
+                    outcome="dropped",
+                    reason=decision.reason,
+                )
+            )
+            return GatewayResult(202, {"outcome": "dropped", "reason": decision.reason, "run_key": run_key})
+
+        try:
+            context = self.github_client.get_issue_project_item_context(repo_full_name, int(issue_number))
+        except GitHubApiError as exc:
+            return GatewayResult(502, {"outcome": "error", "reason": f"Failed to resolve issue project context: {exc}"})
+
+        eligibility_error = self._check_project_item_eligibility(context, requested_stage)
+        if eligibility_error:
+            self.logger(
+                {
+                    "delivery_id": delivery_id,
+                    "event": "issue_comment",
+                    "actor": actor,
+                    "repo": repo_full_name,
+                    "issue": context.issue_number,
+                    "requested_stage": requested_stage,
+                    "outcome": "rejected",
+                    "reason": eligibility_error,
+                }
+            )
+            return GatewayResult(422, {"outcome": "rejected", "reason": eligibility_error})
+
+        client_payload = {
+            "issue_number": int(context.issue_number or issue_number),
+            "issue_title": context.issue_title,
+            "requested_stage": requested_stage,
+            "run_key": run_key,
+            "actor": actor,
+            "timestamp": str(now_ms),
+            "project_item_id": context.project_item_id,
+        }
+        if requested_stage == "feedback-implementation":
+            client_payload["feedback_source"] = "operator"
+            client_payload["feedback_body"] = feedback_body
+
+        try:
+            if decision.outcome == "record-only":
+                self.github_client.ensure_issue_label(repo_full_name, int(issue_number), "pending-review")
+                self.logger(
+                    self._log_fields(
+                        delivery_id=delivery_id,
+                        actor=actor,
+                        repo=repo_full_name,
+                        issue=int(issue_number),
+                        requested_stage=requested_stage,
+                        run_key=run_key,
+                        outcome="pending-review",
+                        reason=decision.reason,
+                    )
+                )
+                return GatewayResult(202, {"outcome": "pending-review", "reason": decision.reason, "run_key": run_key})
+
+            if requested_stage == "feedback-implementation":
+                self.github_client.update_project_item_status(context.project_item_id, "In Progress")
+
+            last_error = self._dispatch_with_retry(
+                repo_full_name,
+                client_payload,
+                delivery_id,
+                actor,
+                int(issue_number),
+                run_key,
+            )
+            if last_error is not None:
+                self.logger(
+                    self._log_fields(
+                        delivery_id=delivery_id,
+                        actor=actor,
+                        repo=repo_full_name,
+                        issue=int(issue_number),
+                        requested_stage=requested_stage,
+                        run_key=run_key,
+                        outcome="dispatch-failed",
+                        reason=str(last_error),
+                    )
+                )
+                return GatewayResult(502, {"outcome": "dispatch-failed", "reason": str(last_error), "run_key": run_key})
+
+            self.logger(
+                self._log_fields(
+                    delivery_id=delivery_id,
+                    actor=actor,
+                    repo=repo_full_name,
+                    issue=int(issue_number),
+                    requested_stage=requested_stage,
+                    run_key=run_key,
+                    outcome="dispatched",
+                )
+            )
+            return GatewayResult(200, {"outcome": "dispatched", "run_key": run_key, "payload": client_payload})
+        except GitHubApiError as exc:
+            self.logger(
+                self._log_fields(
+                    delivery_id=delivery_id,
+                    actor=actor,
+                    repo=repo_full_name,
+                    issue=int(issue_number),
+                    requested_stage=requested_stage,
                     run_key=run_key,
                     outcome="error",
                     reason=str(exc),
@@ -349,7 +539,7 @@ class GatewayService:
             return value.get("name") or value.get("value") or value.get("label")
         return None
 
-    def _check_eligibility(self, context: ProjectItemContext) -> str | None:
+    def _check_project_item_eligibility(self, context: ProjectItemContext, requested_stage: str) -> str | None:
         if context.item_type != "Issue":
             return f"Project item must resolve to an Issue, found '{context.item_type}'"
         if context.issue_number is None or not context.issue_repo:
@@ -371,10 +561,19 @@ class GatewayService:
         configured_repo = self.repo_config.get(context.repository_field_repo)
         if configured_repo is None:
             return f"Repository '{context.repository_field_repo}' is not configured in config/repos.yml"
-        if REQUESTED_STAGE not in configured_repo.enabled_stages:
-            return f"Repository '{context.repository_field_repo}' does not enable stage '{REQUESTED_STAGE}'"
-        if context.status != "Ready":
+        if requested_stage not in configured_repo.enabled_stages:
+            return f"Repository '{context.repository_field_repo}' does not enable stage '{requested_stage}'"
+        if requested_stage == REQUESTED_STAGE and context.status != "Ready":
             return f"Project Status must be 'Ready' for kickoff automation, found '{context.status or 'unset'}'"
+        return None
+
+    def _parse_operator_command(self, body: str) -> tuple[str, str] | None:
+        trimmed = body.lstrip()
+        lowered = trimmed.lower()
+        for prefix, stage in OPERATOR_COMMANDS.items():
+            if lowered.startswith(prefix):
+                feedback = trimmed[len(prefix):].strip() if stage == "feedback-implementation" else ""
+                return (stage, feedback)
         return None
 
     def _resolve_actor_decision(
@@ -421,6 +620,7 @@ class GatewayService:
         actor: str,
         repo: str,
         issue: int,
+        requested_stage: str = REQUESTED_STAGE,
         run_key: str,
         outcome: str,
         reason: str | None = None,
@@ -430,7 +630,7 @@ class GatewayService:
             "actor": actor,
             "repo": repo,
             "issue": issue,
-            "requested_stage": REQUESTED_STAGE,
+            "requested_stage": requested_stage,
             "run_key": run_key,
             "outcome": outcome,
         }

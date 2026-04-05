@@ -199,10 +199,16 @@ else
   check "handoff preserves project_item_id in repository_dispatch" "fail"
 fi
 
-if grep -Fq 'client_payload[feedback_source]=agent' "$WORKFLOW" && grep -Fq 'client_payload[feedback_source]=operator' .github/workflows/operator-review-intake.yml; then
-  check "feedback source is preserved across agent and operator loops" "pass"
+if grep -Fq 'client_payload[feedback_source]=agent' "$WORKFLOW"; then
+  check "feedback source is preserved for agent loops" "pass"
 else
-  check "feedback source is preserved across agent and operator loops" "fail"
+  check "feedback source is preserved for agent loops" "fail"
+fi
+
+if [ ! -f .github/workflows/operator-review-intake.yml ]; then
+  check "operator review intake workflow retired" "pass"
+else
+  check "operator review intake workflow retired" "fail"
 fi
 
 echo ""

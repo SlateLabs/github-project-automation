@@ -130,6 +130,7 @@ Issue [#19](https://github.com/SlateLabs/github-project-automation/issues/19) sh
 |------|---------|-------------|
 | Manual kickoff | `workflow_dispatch` in participating repo | Operator provides `issue_number` and `requested_stage`; workflow validates eligibility and gates |
 | Webhook gateway | `projects_v2_item` org event → Cloud Run → `repository_dispatch` | Automated trigger when project item `Status` changes (issue #2) |
+| Operator commands | `issue_comment` org/repo event → Cloud Run → `repository_dispatch` | Trusted operator comments `gpa:feedback ...` and `gpa:approve` enter the same orchestration lane without a separate Actions intake workflow |
 
 Both paths converge on the same orchestration workflow (`orchestration-dispatch.yml`). An input normalization step at the top of the workflow resolves inputs from either `workflow_dispatch` inputs or `repository_dispatch` client_payload, so all downstream steps (dedup, eligibility, gate checks, scaffolds, comments) execute identically regardless of trigger source.
 
@@ -268,15 +269,17 @@ Eligibility validation is shared but not yet at full parity: the manual path val
 
 ## Webhook gateway contract
 
-The gateway is the org-level listener for `projects_v2_item` events. It stays intentionally thin:
+The gateway is the org-level listener for orchestration webhook events. It stays intentionally thin:
 
 - Validate `X-GitHub-Delivery`, `X-GitHub-Event`, and `X-Hub-Signature-256`
 - Accept only `projects_v2_item` deliveries that prove a `Status` transition of `Backlog -> Ready`
+- Accept only `issue_comment` deliveries that are trusted human issue comments and begin with `gpa:feedback` or `gpa:approve`
 - Resolve the project item via GraphQL to read the linked issue, `Repository`, and `Status` field
 - Enforce kickoff eligibility (`Issue` item type, linked source issue, configured participating repo, `Status == Ready`, no `do-not-automate` label)
 - Enforce trusted-actor outcomes using `config/trust-policy.yml`
 - Deduplicate by delivery id, active run prefix, and 60-second recent-completion window
 - Dispatch `repository_dispatch` with event type `orchestration-start`, preserving the source `project_item_id`
+- Sync project `Status` to `In Progress` immediately for trusted operator feedback comments before dispatching `feedback-implementation`
 
 ### HTTP surface
 
@@ -284,6 +287,11 @@ The gateway is the org-level listener for `projects_v2_item` events. It stays in
 |--------|------|---------|
 | `GET` | `/healthz` | Liveness / readiness probe |
 | `POST` | `/github/webhook` | GitHub org-project webhook intake |
+
+The webhook must deliver both:
+
+- `projects_v2_item`
+- `issue_comment`
 
 ### Environment variables
 

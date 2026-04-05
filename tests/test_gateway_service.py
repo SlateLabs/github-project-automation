@@ -25,6 +25,18 @@ class FakeGitHubClient:
             repository_field_archived=False,
             status="Ready",
         )
+        self.issue_context = ProjectItemContext(
+            project_item_id="PVTI_123",
+            item_type="Issue",
+            issue_title="[TEST] Gateway dispatch",
+            issue_number=1,
+            issue_repo="SlateLabs/github-project-automation",
+            issue_state="OPEN",
+            issue_labels=(),
+            repository_field_repo="SlateLabs/github-project-automation",
+            repository_field_archived=False,
+            status="In Review",
+        )
         self.actor_context = {
             "trusted-user": {
                 "login": "trusted-user",
@@ -50,11 +62,17 @@ class FakeGitHubClient:
         }
         self.labels_added: list[tuple[str, int, str]] = []
         self.dispatches: list[tuple[str, str, dict[str, object]]] = []
+        self.status_updates: list[tuple[str, str]] = []
         self.dispatch_failures: int = 0
 
     def get_project_item_context(self, item_node_id: str) -> ProjectItemContext:
         assert item_node_id == "PVTI_123"
         return self.context
+
+    def get_issue_project_item_context(self, repo_full_name: str, issue_number: int) -> ProjectItemContext:
+        assert repo_full_name == "SlateLabs/github-project-automation"
+        assert issue_number == 1
+        return self.issue_context
 
     def get_actor_context(self, organization: str, repo_full_name: str, actor_login: str):
         data = self.actor_context[actor_login]
@@ -62,6 +80,9 @@ class FakeGitHubClient:
 
     def ensure_issue_label(self, repo_full_name: str, issue_number: int, label: str) -> None:
         self.labels_added.append((repo_full_name, issue_number, label))
+
+    def update_project_item_status(self, project_item_id: str, status_name: str) -> None:
+        self.status_updates.append((project_item_id, status_name))
 
     def dispatch_repository_event(
         self,
@@ -93,7 +114,7 @@ class GatewayServiceTests(unittest.TestCase):
             repo_config={
                 "SlateLabs/github-project-automation": ConfiguredRepo(
                     repo="SlateLabs/github-project-automation",
-                    enabled_stages=("kickoff", "plan"),
+                    enabled_stages=("kickoff", "design", "plan", "execution", "agent-review", "feedback-implementation", "deploy-review", "merge", "follow-up-capture", "closeout"),
                     shared_workflow_version="deadbeef",
                 )
             },
@@ -129,13 +150,46 @@ class GatewayServiceTests(unittest.TestCase):
         }
 
     def _request(self, payload: dict[str, object], delivery_id: str = "delivery-1") -> tuple[int, dict[str, object]]:
+        return self._event_request("projects_v2_item", payload, delivery_id)
+
+    def _event_request(
+        self,
+        event_name: str,
+        payload: dict[str, object],
+        delivery_id: str = "delivery-1",
+    ) -> tuple[int, dict[str, object]]:
         raw_body = json.dumps(payload).encode("utf-8")
         headers = {
             "X-GitHub-Delivery": delivery_id,
-            "X-GitHub-Event": "projects_v2_item",
+            "X-GitHub-Event": event_name,
             "X-Hub-Signature-256": signature(self.secret, raw_body),
         }
         return self.app.handle("POST", "/github/webhook", headers, raw_body)
+
+    def _issue_comment_payload(
+        self,
+        *,
+        actor: str = "trusted-user",
+        sender_type: str = "User",
+        body: str = "gpa:feedback Tighten the merge gate",
+        is_pr_comment: bool = False,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "action": "created",
+            "repository": {"full_name": "SlateLabs/github-project-automation"},
+            "issue": {
+                "number": 1,
+                "title": "[TEST] Gateway dispatch",
+            },
+            "comment": {
+                "body": body,
+                "user": {"login": actor, "type": sender_type},
+            },
+            "sender": {"login": actor, "type": sender_type},
+        }
+        if is_pr_comment:
+            payload["issue"]["pull_request"] = {"url": "https://api.github.com/repos/SlateLabs/github-project-automation/pulls/35"}
+        return payload
 
     def test_rejects_invalid_signature(self) -> None:
         payload = self._payload()
@@ -194,6 +248,106 @@ class GatewayServiceTests(unittest.TestCase):
         )
         self.assertEqual(status, 202)
         self.assertEqual(body["outcome"], "skipped")
+
+    def test_dispatches_feedback_comment_for_trusted_actor(self) -> None:
+        status, body = self._event_request("issue_comment", self._issue_comment_payload())
+        self.assertEqual(status, 200)
+        self.assertEqual(body["outcome"], "dispatched")
+        self.assertEqual(self.github.status_updates, [("PVTI_123", "In Progress")])
+        self.assertEqual(
+            self.github.dispatches[0],
+            (
+                "SlateLabs/github-project-automation",
+                "orchestration-start",
+                {
+                    "issue_number": 1,
+                    "issue_title": "[TEST] Gateway dispatch",
+                    "requested_stage": "feedback-implementation",
+                    "run_key": body["run_key"],
+                    "actor": "trusted-user",
+                    "timestamp": "1710000000000",
+                    "project_item_id": "PVTI_123",
+                    "feedback_source": "operator",
+                    "feedback_body": "Tighten the merge gate",
+                },
+            ),
+        )
+
+    def test_dispatches_approve_comment_for_trusted_actor(self) -> None:
+        status, body = self._event_request(
+            "issue_comment",
+            self._issue_comment_payload(body="gpa:approve"),
+            delivery_id="delivery-approve",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["outcome"], "dispatched")
+        self.assertEqual(self.github.status_updates, [])
+        self.assertEqual(
+            self.github.dispatches[0],
+            (
+                "SlateLabs/github-project-automation",
+                "orchestration-start",
+                {
+                    "issue_number": 1,
+                    "issue_title": "[TEST] Gateway dispatch",
+                    "requested_stage": "merge",
+                    "run_key": body["run_key"],
+                    "actor": "trusted-user",
+                    "timestamp": "1710000000000",
+                    "project_item_id": "PVTI_123",
+                },
+            ),
+        )
+
+    def test_skips_non_command_issue_comment(self) -> None:
+        status, body = self._event_request(
+            "issue_comment",
+            self._issue_comment_payload(body="looks good to me"),
+            delivery_id="delivery-comment",
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(body["outcome"], "skipped")
+        self.assertEqual(self.github.dispatches, [])
+
+    def test_skips_pull_request_comments(self) -> None:
+        status, body = self._event_request(
+            "issue_comment",
+            self._issue_comment_payload(is_pr_comment=True),
+            delivery_id="delivery-pr-comment",
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(body["outcome"], "skipped")
+        self.assertEqual(self.github.dispatches, [])
+
+    def test_skips_bot_issue_comments(self) -> None:
+        status, body = self._event_request(
+            "issue_comment",
+            self._issue_comment_payload(actor="project-automation-gateway[bot]", sender_type="Bot"),
+            delivery_id="delivery-bot-comment",
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(body["outcome"], "skipped")
+        self.assertEqual(self.github.dispatches, [])
+
+    def test_rejects_empty_feedback_body(self) -> None:
+        status, body = self._event_request(
+            "issue_comment",
+            self._issue_comment_payload(body="gpa:feedback   "),
+            delivery_id="delivery-empty-feedback",
+        )
+        self.assertEqual(status, 422)
+        self.assertEqual(body["outcome"], "rejected")
+
+    def test_record_only_actor_gets_pending_review_for_operator_comment(self) -> None:
+        status, body = self._event_request(
+            "issue_comment",
+            self._issue_comment_payload(actor="member-user"),
+            delivery_id="delivery-member-feedback",
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(body["outcome"], "pending-review")
+        self.assertEqual(self.github.dispatches, [])
+        self.assertEqual(self.github.labels_added, [("SlateLabs/github-project-automation", 1, "pending-review")])
 
     def test_rejects_missing_repository_field(self) -> None:
         self.github.context = ProjectItemContext(
