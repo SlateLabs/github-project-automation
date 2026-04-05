@@ -59,6 +59,7 @@ runs:
 
         unmet=()
         waived=()
+        requested_stage_normalized=$(printf '%s' "$REQUESTED_STAGE" | tr -d '\r' | xargs)
 
         # --- Build trusted-user list for waiver validation (§4 rule 5) ---
         trusted_users_list=""
@@ -105,7 +106,7 @@ runs:
         }
 
         # --- Gate checks by stage ---
-        case "$REQUESTED_STAGE" in
+        case "$requested_stage_normalized" in
           kickoff)
             # Gate 1→2: Backlog triage
             # Issue exists (already validated by eligibility check)
@@ -721,7 +722,7 @@ runs:
             ;;
 
           *)
-            unmet+=("Unknown stage: $REQUESTED_STAGE")
+            unmet+=("Unknown stage: $requested_stage_normalized")
             ;;
         esac
 
