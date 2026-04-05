@@ -1162,7 +1162,7 @@ jobs:
         with:
           prompt: ${{ steps.plan-review-prompt.outputs.prompt }}
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          sandbox: workspace-write
+          sandbox: danger-full-access
           model: ${{ vars.ORCHESTRATION_CODEX_MODEL }}
           effort: ${{ vars.ORCHESTRATION_CODEX_EFFORT }}
           allow-bots: true
