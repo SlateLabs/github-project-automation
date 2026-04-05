@@ -86,7 +86,7 @@ runs:
           default_pi='- **backlog**: Auto-populate more of the closeout retrospective from durable orchestration artifacts so fully autonomous runs do not stop on placeholder-only retrospective sections.'
           pi_disposition_re='\*\*\s*(adopt|backlog|reject)\s*\*\*'
 
-          if echo "$existing_comment_body" | grep -qF "$placeholder_line" && ! echo "$existing_comment_body" | grep -qiE "$pi_disposition_re"; then
+          if echo "$existing_comment_body" | grep -qF -- "$placeholder_line" && ! echo "$existing_comment_body" | grep -qiE "$pi_disposition_re"; then
             patched_body=$(printf '%s\n' "$existing_comment_body" | python3 -c 'import sys; body = sys.stdin.read(); placeholder = "- _To be filled in during retrospective — at least one item required_"; replacement = "- **backlog**: Auto-populate more of the closeout retrospective from durable orchestration artifacts so fully autonomous runs do not stop on placeholder-only retrospective sections."; sys.stdout.write(body.replace(placeholder, replacement, 1))')
 
             update_result=$(gh api "repos/{owner}/{repo}/issues/comments/${existing_comment_id}" \
