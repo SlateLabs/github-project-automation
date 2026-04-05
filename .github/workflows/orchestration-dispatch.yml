@@ -2045,6 +2045,12 @@ jobs:
             exit 1
           fi
 
+          {
+            echo "pr_number=$pr_number"
+            echo "branch_name=$branch_name"
+            echo "base_ref=$base_ref"
+          } >> "$GITHUB_OUTPUT"
+
           git config user.name "project-automation-gateway[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
@@ -2066,13 +2072,121 @@ jobs:
               echo "sync_result=unchanged" >> "$GITHUB_OUTPUT"
             fi
           else
-            git merge --abort || true
+            conflict_files=$(git diff --name-only --diff-filter=U || true)
             echo "::warning::Automatic merge sync from $base_ref into $branch_name requires manual conflict resolution"
             echo "sync_result=conflict" >> "$GITHUB_OUTPUT"
+            {
+              echo 'conflict_files<<EOF'
+              printf '%s\n' "$conflict_files"
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Post merge remediation required comment
+      - name: Validate merge conflict resolution credentials
         if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync.outputs.sync_result == 'conflict'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "$OPENAI_API_KEY" ] || { echo "::error::Merge conflict resolution requires secrets.OPENAI_API_KEY"; exit 1; }
+
+      - name: Prepare merge conflict resolution prompt
+        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync.outputs.sync_result == 'conflict'
+        id: merge-conflict-prompt
+        env:
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+          ISSUE_TITLE: ${{ needs.intake.outputs.issue_title }}
+          ISSUE_BODY: ${{ needs.intake.outputs.issue_body }}
+          PR_NUMBER: ${{ steps.merge-sync.outputs.pr_number }}
+          BRANCH_NAME: ${{ steps.merge-sync.outputs.branch_name }}
+          BASE_REF: ${{ steps.merge-sync.outputs.base_ref }}
+          CONFLICT_FILES: ${{ steps.merge-sync.outputs.conflict_files }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          prompt_file="$RUNNER_TEMP/merge-conflict-resolution-prompt.md"
+          cat > "$prompt_file" <<EOF
+          You are Codex resolving merge conflicts on branch $BRANCH_NAME for issue #$ISSUE_NUMBER and PR #$PR_NUMBER.
+
+          The workflow attempted to merge origin/$BASE_REF into the feature branch before final merge and Git reported conflicts.
+
+          Required outcome:
+          - Resolve the merge conflicts in the repository working tree.
+          - Preserve the feature intent from the branch while incorporating the latest safe changes from origin/$BASE_REF.
+          - Leave the repository in a state where there are no unmerged files and the merge can be committed.
+
+          Constraints:
+          - Focus on the conflicted files first.
+          - Do not abandon the merge or reset the branch.
+          - Do not make unrelated refactors.
+          - Keep behavior coherent with the issue and the latest main-branch contracts.
+
+          Source issue title:
+          $ISSUE_TITLE
+
+          Source issue body:
+          ---
+          $ISSUE_BODY
+          ---
+
+          Conflicted files:
+          ---
+          $CONFLICT_FILES
+          ---
+          EOF
+          echo "prompt_file=$prompt_file" >> "$GITHUB_OUTPUT"
+
+      - name: Codex resolve merge conflicts
+        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync.outputs.sync_result == 'conflict'
+        id: codex-merge-conflicts
+        uses: openai/codex-action@v1
+        with:
+          prompt-file: ${{ steps.merge-conflict-prompt.outputs.prompt_file }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          sandbox: workspace-write
+          model: ${{ vars.ORCHESTRATION_CODEX_MODEL }}
+          effort: ${{ vars.ORCHESTRATION_CODEX_EFFORT }}
+          allow-bots: true
+
+      - name: Commit and push resolved merge sync
+        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync.outputs.sync_result == 'conflict'
+        id: merge-conflict-resolution
+        env:
+          GH_TOKEN: ${{ steps.merge-sync-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          BRANCH_NAME: ${{ steps.merge-sync.outputs.branch_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          unmerged_files=$(git diff --name-only --diff-filter=U || true)
+          if [ -n "$unmerged_files" ]; then
+            {
+              echo "resolution_result=unresolved"
+              echo 'remaining_conflicts<<EOF'
+              printf '%s\n' "$unmerged_files"
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
+            echo "::warning::Merge conflicts remain after automated resolution attempt"
+            exit 0
+          fi
+
+          if ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+            echo "resolution_result=unresolved" >> "$GITHUB_OUTPUT"
+            echo "::warning::Merge conflict resolution did not leave a merge in progress"
+            exit 0
+          fi
+
+          git add -A
+          git commit --no-edit
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:${BRANCH_NAME}"
+          echo "resolution_result=resolved" >> "$GITHUB_OUTPUT"
+          echo "::notice::Automated merge conflict resolution committed and pushed"
+
+      - name: Post merge remediation required comment
+        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync.outputs.sync_result == 'conflict' && steps.merge-conflict-resolution.outputs.resolution_result != 'resolved'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
@@ -2105,7 +2219,7 @@ jobs:
           | **Result** | :warning: Automatic sync with \`main\` hit merge conflicts |
           | **Actions run** | [$RUN_ID]($RUN_URL) |
 
-          The merge lane attempted to sync the feature branch with \`main\` before final merge, but Git could not apply the merge cleanly.
+          The merge lane attempted to sync the feature branch with \`main\` before final merge, then attempted an automated conflict-resolution pass, but the branch still requires manual reconciliation.
 
           Next step:
           - re-run \`feedback-implementation\` to reconcile the branch against the latest \`main\`
@@ -2113,14 +2227,14 @@ jobs:
           )"
 
       - name: Fail on merge sync conflict
-        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync.outputs.sync_result == 'conflict'
+        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync.outputs.sync_result == 'conflict' && steps.merge-conflict-resolution.outputs.resolution_result != 'resolved'
         shell: bash
         run: |
-          echo "::error::Automatic pre-merge sync with main hit conflicts"
+          echo "::error::Automatic pre-merge sync with main still has unresolved conflicts after remediation attempt"
           exit 1
 
       - name: Merge approved PR (post-gate)
-        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync.outputs.sync_result != 'conflict'
+        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && (steps.merge-sync.outputs.sync_result != 'conflict' || steps.merge-conflict-resolution.outputs.resolution_result == 'resolved')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
