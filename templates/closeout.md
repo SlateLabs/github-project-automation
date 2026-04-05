@@ -57,7 +57,7 @@ None identified.
      - **reject**: Splitting closeout into two stages adds overhead without clear benefit
 -->
 
-- _To be filled in during retrospective — at least one item required_
+- **backlog**: Auto-populate more of the closeout retrospective from durable orchestration artifacts so fully autonomous runs do not stop on placeholder-only retrospective sections.
 
 ### Exit checklist
 
