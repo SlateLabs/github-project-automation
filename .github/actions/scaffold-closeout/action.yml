@@ -65,20 +65,39 @@ runs:
         # Only comments containing the owned-artifact marker count — status
         # comments use a distinct marker and are not treated as the artifact.
         existing_comment_url=""
+        existing_comment_id=""
+        existing_comment_body=""
         comment_count=$(echo "$issue_json" | jq '.comments | length')
 
         for (( i=0; i<comment_count; i++ )); do
           comment_body=$(echo "$issue_json" | jq -r ".comments[$i].body // \"\"")
           if echo "$comment_body" | grep -qF "$owned_artifact_marker"; then
             # Extract the comment URL from the API response
-            comment_id=$(echo "$issue_json" | jq -r ".comments[$i].url // \"\"")
+            existing_comment_id=$(echo "$issue_json" | jq -r ".comments[$i].id // \"\"")
+            existing_comment_body="$comment_body"
             # Fallback: construct from issue URL
-            existing_comment_url="https://github.com/${repo_full}/issues/${ISSUE_NUMBER}#issuecomment-$(echo "$issue_json" | jq -r ".comments[$i].id // \"unknown\"")"
+            existing_comment_url="https://github.com/${repo_full}/issues/${ISSUE_NUMBER}#issuecomment-${existing_comment_id:-unknown}"
             break
           fi
         done
 
         if [ -n "$existing_comment_url" ]; then
+          placeholder_line='- _To be filled in during retrospective — at least one item required_'
+          default_pi='- **backlog**: Auto-populate more of the closeout retrospective from durable orchestration artifacts so fully autonomous runs do not stop on placeholder-only retrospective sections.'
+          pi_disposition_re='\*\*\s*(adopt|backlog|reject)\s*\*\*'
+
+          if echo "$existing_comment_body" | grep -qF "$placeholder_line" && ! echo "$existing_comment_body" | grep -qiE "$pi_disposition_re"; then
+            patched_body=$(printf '%s\n' "$existing_comment_body" | python3 -c 'import sys; body = sys.stdin.read(); placeholder = "- _To be filled in during retrospective — at least one item required_"; replacement = "- **backlog**: Auto-populate more of the closeout retrospective from durable orchestration artifacts so fully autonomous runs do not stop on placeholder-only retrospective sections."; sys.stdout.write(body.replace(placeholder, replacement, 1))')
+
+            update_result=$(gh api "repos/{owner}/{repo}/issues/comments/${existing_comment_id}" \
+              --method PATCH \
+              -f body="$patched_body" 2>&1) || {
+              echo "::error::Failed to update existing closeout comment: $update_result"
+              exit 1
+            }
+            echo "::notice::Updated existing closeout comment with seeded Process Improvement disposition"
+          fi
+
           echo "::notice::Closeout comment already exists — skipping creation"
 
           echo "comment_url=$existing_comment_url" >> "$GITHUB_OUTPUT"
