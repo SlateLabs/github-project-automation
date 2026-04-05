@@ -205,6 +205,12 @@ else
   check "feedback source is preserved for agent loops" "fail"
 fi
 
+if grep -Fq '<!-- gpa:checkpoint ' "$WORKFLOW"; then
+  check "structured checkpoint comments are emitted" "pass"
+else
+  check "structured checkpoint comments are emitted" "fail"
+fi
+
 if [ ! -f .github/workflows/operator-review-intake.yml ]; then
   check "operator review intake workflow retired" "pass"
 else

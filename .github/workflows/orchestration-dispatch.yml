@@ -1688,9 +1688,21 @@ jobs:
         run: |
           set -euo pipefail
 
+          checkpoint=$(jq -cn \
+            --arg run_key "$RUN_KEY" \
+            --arg stage "agent-review" \
+            --arg state "completed" \
+            --arg actor "$ACTOR" \
+            --arg disposition "$DISPOSITION" \
+            --arg artifact_ref "pr:$PR_NUMBER" \
+            --arg pr_head_sha "$PR_HEAD_SHA" \
+            --arg next_stage "$([ "$DISPOSITION" = "auto-approve" ] && printf '%s' merge || [ "$DISPOSITION" = "rework-required" ] && printf '%s' feedback-implementation || printf '%s' deploy-review)" \
+            '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,disposition:$disposition,artifact_ref:$artifact_ref,pr_head_sha:$pr_head_sha,next_stage:$next_stage}')
+
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Agent review
           <!-- gpa:run-status:agent-review:completed:$RUN_KEY -->
+          <!-- gpa:checkpoint $checkpoint -->
 
           | Field | Value |
           |-------|-------|
@@ -1742,10 +1754,20 @@ jobs:
           branch_name=$(echo "$pr_json" | jq -r '.headRefName // empty')
           deployment_url=$(printf '%s' "$(echo "$pr_json" | jq -r '.body // ""')" | grep -oE 'https://[^[:space:])]+' || true)
           deployment_url=${deployment_url:-"(deployment URL not yet wired)"}
+          checkpoint=$(jq -cn \
+            --arg run_key "$RUN_KEY" \
+            --arg stage "deploy-review" \
+            --arg state "completed" \
+            --arg actor "$ACTOR" \
+            --arg artifact_ref "pr:$pr_number" \
+            --arg branch "$branch_name" \
+            --arg deployment_url "$deployment_url" \
+            '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,artifact_ref:$artifact_ref,branch:$branch,deployment_url:$deployment_url,next_stage:""}')
 
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Review-ready implementation
           <!-- gpa:run-status:deploy-review:completed:$RUN_KEY -->
+          <!-- gpa:checkpoint $checkpoint -->
 
           | Field | Value |
           |-------|-------|
@@ -1880,10 +1902,20 @@ jobs:
         run: |
           unmet_list=$(echo "$UNMET" | jq -r '.[] | "- " + .' 2>/dev/null || echo "- (none)")
           waived_list=$(echo "$WAIVED" | jq -r '.[] | "- " + .' 2>/dev/null || echo "- (none)")
+          checkpoint=$(jq -cn \
+            --arg run_key "$RUN_KEY" \
+            --arg stage "$REQUESTED_STAGE" \
+            --arg state "failed" \
+            --arg actor "$ACTOR" \
+            --arg run_url "$RUN_URL" \
+            --argjson unmet "${UNMET:-[]}" \
+            --argjson waived "${WAIVED:-[]}" \
+            '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,run_url:$run_url,unmet_conditions:$unmet,waived_conditions:$waived}')
 
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Orchestration run — gate not satisfied
           <!-- gpa:run-status:$REQUESTED_STAGE:failed:$RUN_KEY -->
+          <!-- gpa:checkpoint $checkpoint -->
 
           | Field | Value |
           |-------|-------|
@@ -2002,10 +2034,19 @@ jobs:
           **Waived conditions:**
           $waived_list"
           fi
+          checkpoint=$(jq -cn \
+            --arg run_key "$RUN_KEY" \
+            --arg stage "$REQUESTED_STAGE" \
+            --arg state "completed" \
+            --arg actor "$ACTOR" \
+            --arg run_url "$RUN_URL" \
+            --argjson waived "${WAIVED:-[]}" \
+            '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,run_url:$run_url,waived_conditions:$waived}')
 
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Orchestration run — stage transition accepted
           <!-- gpa:run-status:$REQUESTED_STAGE:completed:$RUN_KEY -->
+          <!-- gpa:checkpoint $checkpoint -->
 
           | Field | Value |
           |-------|-------|
@@ -2340,10 +2381,18 @@ jobs:
           RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
+          checkpoint=$(jq -cn \
+            --arg run_key "$NEXT_RUN_KEY" \
+            --arg stage "$NEXT_STAGE" \
+            --arg state "started" \
+            --arg actor "$ACTOR" \
+            --arg parent_run_url "$RUN_URL" \
+            '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,parent_run_url:$parent_run_url}')
 
           gh issue comment "$ISSUE_NUMBER" -R "$GITHUB_REPOSITORY" --body "$(cat <<COMMENT_EOF
           ### Orchestration run — next stage queued
           <!-- gpa:run-status:$NEXT_STAGE:started:$NEXT_RUN_KEY -->
+          <!-- gpa:checkpoint $checkpoint -->
 
           | Field | Value |
           |-------|-------|

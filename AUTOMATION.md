@@ -163,6 +163,14 @@ Each stage should emit or update a small checkpoint envelope containing only the
 
 This metadata is for orchestration control, correlation, retries, and resumability.
 
+In this repo, checkpoints are persisted on the issue as machine-readable one-line JSON comments embedded alongside the normal human-facing orchestration comments:
+
+```html
+<!-- gpa:checkpoint {"run_key":"...","stage":"agent-review","state":"completed","disposition":"auto-approve","artifact_ref":"pr:35","pr_head_sha":"...","next_stage":"merge"} -->
+```
+
+The dispatch payload is still used for immediate handoff between runs, but later gates and reruns should prefer the persisted checkpoint over reparsing markdown tables or prose.
+
 ### What stays in the artifact
 
 Substantive agent output belongs in the durable artifact itself:

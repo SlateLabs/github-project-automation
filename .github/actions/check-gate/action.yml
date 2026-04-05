@@ -566,17 +566,16 @@ runs:
             done < <(echo "$approval_comments_json" | jq -c '.' 2>/dev/null || true)
 
             agent_review_auto_approved="false"
-            agent_review_comment_body=$(gh issue view "$ISSUE_NUMBER" --comments --json comments \
+            agent_review_checkpoint_json=$(gh issue view "$ISSUE_NUMBER" --comments --json comments \
               --jq '
                 .comments
                 | map(.body // "")
-                | map(select(
-                    contains("gpa:run-status:agent-review:completed:") and
-                    contains("| **Disposition** |")
-                  ))
-                | .[-1] // ""
+                | map(select(contains("<!-- gpa:checkpoint ")))
+                | map(capture("<!-- gpa:checkpoint (?<json>\\{.*\\}) -->")?.json // empty)
+                | map(select(length > 0) | fromjson? | select(.stage == "agent-review" and .state == "completed"))
+                | .[-1] // empty
               ' 2>/dev/null || true)
-            if [ -n "$agent_review_comment_body" ] && echo "$agent_review_comment_body" | grep -Fq '| **Disposition** | `auto-approve` |'; then
+            if [ -n "$agent_review_checkpoint_json" ] && [ "$(echo "$agent_review_checkpoint_json" | jq -r '.disposition // ""' 2>/dev/null)" = "auto-approve" ]; then
               agent_review_auto_approved="true"
             fi
 
