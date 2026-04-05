@@ -73,9 +73,9 @@ runs:
           comment_body=$(echo "$issue_json" | jq -r ".comments[$i].body // \"\"")
           if echo "$comment_body" | grep -qF "$owned_artifact_marker"; then
             # Extract the comment URL from the API response
-            existing_comment_id=$(echo "$issue_json" | jq -r ".comments[$i].id // \"\"")
             existing_comment_body="$comment_body"
             # Fallback: construct from issue URL
+            existing_comment_id=$(echo "$issue_json" | jq -r ".comments[$i].url // \"\"" | sed -E 's|.*issuecomment-([0-9]+)$|\1|')
             existing_comment_url="https://github.com/${repo_full}/issues/${ISSUE_NUMBER}#issuecomment-${existing_comment_id:-unknown}"
             break
           fi
