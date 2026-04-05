@@ -150,26 +150,43 @@ This is an explicit design constraint. Gates and handoff logic should not depend
 
 ### What stays structured
 
-Each stage should emit or update a small checkpoint envelope containing only the fields needed to drive orchestration:
+Canonical contracts are defined in [`.github/schemas/orchestration-contract-v1.json`](.github/schemas/orchestration-contract-v1.json):
 
-- `run_key`
-- `lane`
-- `stage`
-- `state`
-  - `started|succeeded|failed|blocked`
-- `attempt`
-- `artifact_ref`
-- `next_stage`
+- Checkpoint envelope (`kind: checkpoint`) for orchestration state transitions.
+- Artifact payload envelope (`kind: artifact_payload`) for stage-owned machine data.
 
-This metadata is for orchestration control, correlation, retries, and resumability.
+`stage.status` values are normalized to:
 
-In this repo, checkpoints are persisted on the issue as machine-readable one-line JSON comments embedded alongside the normal human-facing orchestration comments:
+- `started`
+- `completed`
+- `failed`
+- `blocked`
+- `waiting`
+- `skipped`
+
+Checkpoint envelopes include explicit `decision.next_stage` plus `decision.reason_codes`, so handoff logic can use structured state instead of prose inference.
+
+In orchestration comments, canonical checkpoints are persisted as machine-readable JSON comments:
 
 ```html
-<!-- gpa:checkpoint {"run_key":"...","stage":"agent-review","state":"completed","disposition":"auto-approve","artifact_ref":"pr:35","pr_head_sha":"...","next_stage":"merge"} -->
+<!-- gpa:checkpoint-v1 {"kind":"checkpoint","version":"gpa.v1","run_key":"...","stage":{"name":"agent-review","status":"completed","actor":"..."},"decision":{"next_stage":"merge","reason_codes":["agent_review_auto_approve"]},"artifact":{"ref":"pr:35"},"data":{"disposition":"auto-approve","pr_head_sha":"..."}} -->
 ```
 
-The dispatch payload is still used for immediate handoff between runs, but later gates and reruns should prefer the persisted checkpoint over reparsing markdown tables or prose.
+For agent-authored stage artifacts, stage-specific machine data is persisted via artifact payload comments (with markdown retained for humans):
+
+```html
+<!-- gpa:artifact-payload:{"kind":"artifact_payload","version":"gpa.v1","stage":"agent-review","data":{"disposition":"auto-approve","decision":{"next_stage":"merge","reason_codes":["agent_review_auto_approve"]}}} -->
+```
+
+Additional migrated stages publish the same `artifact_payload` envelope shape:
+
+```html
+<!-- gpa:artifact-payload:{"kind":"artifact_payload","version":"gpa.v1","stage":"plan-review","data":{"decision":{"next_stage":"execution","reason_codes":["plan_review_published"]}}} -->
+<!-- gpa:artifact-payload:{"kind":"artifact_payload","version":"gpa.v1","stage":"follow-up-capture","data":{"markers_found":2,"issues_created":2,"skipped":0,"decision":{"next_stage":"closeout","reason_codes":["follow_up_capture_completed"]}}} -->
+<!-- gpa:artifact-payload:{"kind":"artifact_payload","version":"gpa.v1","stage":"closeout","data":{"created":true,"merged_pr_count":1,"follow_up_count":2,"decision":{"next_stage":"","reason_codes":["closeout_scaffold_created"]}}} -->
+```
+
+Legacy markers remain temporarily for compatibility, but canonical envelopes are the source of truth when present.
 
 ### What stays in the artifact
 

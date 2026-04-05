@@ -546,6 +546,7 @@ jobs:
       waived_conditions: ${{ steps.gate.outputs.waived_conditions }}
       state_valid: ${{ steps.state-check.outputs.state_valid }}
       review_disposition: ${{ steps.parse-agent-review.outputs.disposition }}
+      review_next_stage: ${{ steps.parse-agent-review.outputs.next_stage }}
       review_feedback_body: ${{ steps.parse-agent-review.outputs.feedback_body }}
       feedback_no_progress: ${{ steps.feedback-progress.outputs.no_progress }}
     steps:
@@ -1235,7 +1236,22 @@ jobs:
             exit 1
           fi
 
-          review_body="<!-- gpa:run-status:plan-review:completed:${RUN_KEY} -->"$'\n\n'"${REVIEW_BODY}"
+          artifact_payload=$(jq -cn \
+            --arg run_key "$RUN_KEY" \
+            '{
+              kind:"artifact_payload",
+              version:"gpa.v1",
+              run_key:$run_key,
+              stage:"plan-review",
+              data:{
+                decision:{
+                  next_stage:"execution",
+                  reason_codes:["plan_review_published"]
+                }
+              }
+            }')
+
+          review_body="<!-- gpa:run-status:plan-review:completed:${RUN_KEY} -->"$'\n'"<!-- gpa:artifact-payload:${artifact_payload} -->"$'\n\n'"${REVIEW_BODY}"
           gh issue comment "$ISSUE_NUMBER" --body "$review_body" >/dev/null
           echo "::notice::Posted automated plan review comment to issue #$ISSUE_NUMBER"
 
@@ -1619,11 +1635,15 @@ jobs:
           Review the proposed implementation and write markdown to the repository file `{os.environ["REVIEW_FILE"]}`.
 
           Required file structure:
-          - First line exactly: `gpa:agent-review:<disposition>`
-            where disposition is one of:
-            - `auto-approve`
-            - `rework-required`
-            - `operator-review-required`
+          - Include exactly one HTML comment line in this format:
+            `<!-- gpa:artifact-payload:<json> -->`
+          - JSON must use this envelope:
+            - `kind`: `artifact_payload`
+            - `version`: `gpa.v1`
+            - `stage`: `agent-review`
+            - `data.disposition`: one of `auto-approve`, `rework-required`, `operator-review-required`
+            - `data.decision.next_stage`: one of `merge`, `feedback-implementation`, `deploy-review`
+            - `data.decision.reason_codes`: non-empty array of machine-readable reason codes
           - Then a blank line
           - Then a section `## Summary`
           - Then a short paragraph
@@ -1634,6 +1654,10 @@ jobs:
           - Use "auto-approve" when the PR is coherent, bounded, and safe to merge without operator review.
           - Use "rework-required" when the automation should make another implementation pass on its own.
           - Use "operator-review-required" only for exceptional situations: unresolved product ambiguity, risky/destructive changes, security/permission concerns, missing deployability where user interaction is required, or changes that require a human judgment call.
+          - Keep disposition and decision.next_stage consistent:
+            - auto-approve -> merge
+            - rework-required -> feedback-implementation
+            - operator-review-required -> deploy-review
           - Default to "auto-approve" unless there is a concrete reason not to.
           - Do not ask for operator review just because the change is incomplete; prefer "rework-required" in that case.
           - Do not modify any tracked repository files other than writing `{os.environ["REVIEW_FILE"]}`.
@@ -1699,7 +1723,53 @@ jobs:
             exit 1
           fi
 
-          disposition=$(sed -n '1s/^gpa:agent-review://p' "$REVIEW_FILE" | tr -d '\r')
+          artifact_payload_json=$(python3 - "$REVIEW_FILE" <<'PY'
+          import json, re, sys
+          from pathlib import Path
+          text = Path(sys.argv[1]).read_text()
+          matches = re.findall(r'<!--\s*gpa:artifact-payload:(.*?)-->', text, flags=re.DOTALL)
+          if not matches:
+              print("")
+              raise SystemExit(0)
+          # Use the last payload if multiple are present.
+          payload = matches[-1].strip()
+          try:
+              obj = json.loads(payload)
+          except json.JSONDecodeError:
+              print("INVALID_JSON")
+              raise SystemExit(0)
+          print(json.dumps(obj, separators=(",", ":")))
+          PY
+          )
+
+          if [ "$artifact_payload_json" = "INVALID_JSON" ]; then
+            echo "::error::Invalid JSON in gpa:artifact-payload envelope"
+            exit 1
+          fi
+
+          if [ -n "$artifact_payload_json" ]; then
+            payload_kind=$(echo "$artifact_payload_json" | jq -r '.kind // ""')
+            payload_version=$(echo "$artifact_payload_json" | jq -r '.version // ""')
+            payload_stage=$(echo "$artifact_payload_json" | jq -r '.stage // ""')
+            disposition=$(echo "$artifact_payload_json" | jq -r '.data.disposition // ""')
+            next_stage=$(echo "$artifact_payload_json" | jq -r '.data.decision.next_stage // ""')
+            reason_codes_json=$(echo "$artifact_payload_json" | jq -c '.data.decision.reason_codes // []')
+
+            if [ "$payload_kind" != "artifact_payload" ] || [ "$payload_version" != "gpa.v1" ] || [ "$payload_stage" != "agent-review" ]; then
+              echo "::error::Invalid gpa:artifact-payload envelope identity (kind/version/stage)"
+              exit 1
+            fi
+            if [ "$reason_codes_json" = "[]" ]; then
+              echo "::error::gpa:artifact-payload decision.reason_codes must be non-empty"
+              exit 1
+            fi
+          else
+            echo "::warning::Legacy agent-review format detected (sentinel/heading parsing); canonical artifact payload missing"
+            disposition=$(sed -n '1s/^gpa:agent-review://p' "$REVIEW_FILE" | tr -d '\r')
+            next_stage=""
+            reason_codes_json='[]'
+          fi
+
           summary=$(awk '
             BEGIN {section=0}
             /^## Summary[[:space:]]*$/ {section=1; next}
@@ -1713,7 +1783,18 @@ jobs:
           ' "$REVIEW_FILE")
 
           case "$disposition" in
-            auto-approve|rework-required|operator-review-required) ;;
+            auto-approve)
+              default_next_stage="merge"
+              default_reason_codes='["agent_review_auto_approve"]'
+              ;;
+            rework-required)
+              default_next_stage="feedback-implementation"
+              default_reason_codes='["agent_review_rework_required"]'
+              ;;
+            operator-review-required)
+              default_next_stage="deploy-review"
+              default_reason_codes='["agent_review_operator_review_required"]'
+              ;;
             *)
               echo "::error::Invalid agent review disposition: '$disposition'"
               cat "$REVIEW_FILE"
@@ -1721,8 +1802,25 @@ jobs:
               ;;
           esac
 
+          if [ -z "${next_stage:-}" ]; then
+            next_stage="$default_next_stage"
+          fi
+          if [ "${reason_codes_json:-[]}" = "[]" ]; then
+            reason_codes_json="$default_reason_codes"
+          fi
+
+          case "$next_stage" in
+            merge|feedback-implementation|deploy-review) ;;
+            *)
+              echo "::error::Invalid next stage '$next_stage' in agent-review payload"
+              exit 1
+              ;;
+          esac
+
           {
             echo "disposition=$disposition"
+            echo "next_stage=$next_stage"
+            echo "reason_codes=$reason_codes_json"
             echo 'summary<<EOF'
             printf '%s\n' "$summary"
             echo 'EOF'
@@ -1742,23 +1840,18 @@ jobs:
           PR_URL: ${{ steps.agent-review-context.outputs.pr_url }}
           PR_HEAD_SHA: ${{ steps.agent-review-context.outputs.pr_head_sha }}
           DISPOSITION: ${{ steps.parse-agent-review.outputs.disposition }}
+          NEXT_STAGE: ${{ steps.parse-agent-review.outputs.next_stage }}
+          REASON_CODES: ${{ steps.parse-agent-review.outputs.reason_codes }}
           SUMMARY: ${{ steps.parse-agent-review.outputs.summary }}
           FEEDBACK_BODY: ${{ steps.parse-agent-review.outputs.feedback_body }}
         shell: bash
         run: |
           set -euo pipefail
 
-          case "$DISPOSITION" in
-            auto-approve)
-              next_stage="merge"
-              ;;
-            rework-required)
-              next_stage="feedback-implementation"
-              ;;
-            *)
-              next_stage="deploy-review"
-              ;;
-          esac
+          if [ -z "${NEXT_STAGE:-}" ]; then
+            echo "::error::Missing NEXT_STAGE from parsed agent review result"
+            exit 1
+          fi
 
           checkpoint=$(jq -cn \
             --arg run_key "$RUN_KEY" \
@@ -1768,12 +1861,31 @@ jobs:
             --arg disposition "$DISPOSITION" \
             --arg artifact_ref "pr:$PR_NUMBER" \
             --arg pr_head_sha "$PR_HEAD_SHA" \
-            --arg next_stage "$next_stage" \
+            --arg next_stage "$NEXT_STAGE" \
             '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,disposition:$disposition,artifact_ref:$artifact_ref,pr_head_sha:$pr_head_sha,next_stage:$next_stage}')
+
+          canonical_checkpoint=$(jq -cn \
+            --arg run_key "$RUN_KEY" \
+            --arg actor "$ACTOR" \
+            --arg disposition "$DISPOSITION" \
+            --arg artifact_ref "pr:$PR_NUMBER" \
+            --arg pr_head_sha "$PR_HEAD_SHA" \
+            --arg next_stage "$NEXT_STAGE" \
+            --argjson reason_codes "${REASON_CODES:-[]}" \
+            '{
+              kind:"checkpoint",
+              version:"gpa.v1",
+              run_key:$run_key,
+              stage:{name:"agent-review",status:"completed",actor:$actor},
+              decision:{next_stage:$next_stage,reason_codes:$reason_codes},
+              artifact:{ref:$artifact_ref},
+              data:{disposition:$disposition,pr_head_sha:$pr_head_sha}
+            }')
 
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Agent review
           <!-- gpa:run-status:agent-review:completed:$RUN_KEY -->
+          <!-- gpa:checkpoint-v1 $canonical_checkpoint -->
           <!-- gpa:checkpoint $checkpoint -->
 
           | Field | Value |
@@ -1804,7 +1916,7 @@ jobs:
       - name: Clean up agent review artifact
         if: needs.intake.outputs.requested_stage == 'agent-review'
         shell: bash
-        run: rm -f .gpa-agent-review.json
+        run: rm -f .gpa-agent-review.md
 
       - name: Publish review-ready summary
         if: needs.intake.outputs.requested_stage == 'deploy-review'
@@ -2337,25 +2449,69 @@ jobs:
           fi
 
           checkpoint_line=""
+          canonical_checkpoint_line=""
           case "$REQUESTED_STAGE" in
             agent-review|deploy-review)
               ;;
             *)
+              next_stage=""
+              case "$REQUESTED_STAGE" in
+                kickoff) next_stage="clarification" ;;
+                clarification) next_stage="design" ;;
+                design) next_stage="plan" ;;
+                plan) next_stage="execution" ;;
+                execution) next_stage="agent-review" ;;
+                feedback-implementation)
+                  # feedback-implementation can fan out based on the source/progress;
+                  # leave next_stage unresolved here and let handoff decide.
+                  next_stage=""
+                  ;;
+                merge) next_stage="follow-up-capture" ;;
+                follow-up-capture) next_stage="closeout" ;;
+                closeout) next_stage="" ;;
+              esac
+
+              reason_codes='["stage_gate_passed"]'
+              if [ -n "$next_stage" ]; then
+                reason_codes='["stage_gate_passed","stage_handoff_queued"]'
+              fi
+
               checkpoint=$(jq -cn \
                 --arg run_key "$RUN_KEY" \
                 --arg stage "$REQUESTED_STAGE" \
                 --arg state "completed" \
                 --arg actor "$ACTOR" \
                 --arg run_url "$RUN_URL" \
+                --arg next_stage "$next_stage" \
                 --argjson waived "${WAIVED:-[]}" \
-                '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,run_url:$run_url,waived_conditions:$waived}')
+                '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,run_url:$run_url,next_stage:$next_stage,waived_conditions:$waived}')
+
+              canonical_checkpoint=$(jq -cn \
+                --arg run_key "$RUN_KEY" \
+                --arg stage "$REQUESTED_STAGE" \
+                --arg actor "$ACTOR" \
+                --arg run_url "$RUN_URL" \
+                --arg next_stage "$next_stage" \
+                --argjson reason_codes "$reason_codes" \
+                --argjson waived "${WAIVED:-[]}" \
+                '{
+                  kind:"checkpoint",
+                  version:"gpa.v1",
+                  run_key:$run_key,
+                  stage:{name:$stage,status:"completed",actor:$actor},
+                  decision:{next_stage:$next_stage,reason_codes:$reason_codes},
+                  data:{run_url:$run_url,waived_conditions:$waived}
+                }')
+
               checkpoint_line="<!-- gpa:checkpoint $checkpoint -->"
+              canonical_checkpoint_line="<!-- gpa:checkpoint-v1 $canonical_checkpoint -->"
               ;;
           esac
 
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Orchestration run — stage transition accepted
           <!-- gpa:run-status:$REQUESTED_STAGE:completed:$RUN_KEY -->
+          $canonical_checkpoint_line
           $checkpoint_line
 
           | Field | Value |
@@ -2413,6 +2569,7 @@ jobs:
         env:
           REQUESTED_STAGE: ${{ needs.intake.outputs.requested_stage }}
           REVIEW_DISPOSITION: ${{ needs.gate.outputs.review_disposition }}
+          REVIEW_NEXT_STAGE: ${{ needs.gate.outputs.review_next_stage }}
           FEEDBACK_SOURCE: ${{ needs.intake.outputs.feedback_source }}
           FEEDBACK_NO_PROGRESS: ${{ needs.gate.outputs.feedback_no_progress }}
         run: |
@@ -2438,24 +2595,41 @@ jobs:
               target_status="In Progress"
               ;;
             agent-review)
-              case "$REVIEW_DISPOSITION" in
-                auto-approve)
-                  next_stage="merge"
-                  target_status="In Progress"
-                  ;;
-                rework-required)
-                  next_stage="feedback-implementation"
-                  target_status="In Progress"
-                  ;;
-                operator-review-required)
-                  next_stage="deploy-review"
-                  target_status="In Review"
-                  ;;
-                *)
-                  echo "::error::Unknown or missing review disposition '$REVIEW_DISPOSITION' for agent-review"
-                  exit 1
-                  ;;
-              esac
+              if [ -n "${REVIEW_NEXT_STAGE:-}" ]; then
+                next_stage="$REVIEW_NEXT_STAGE"
+                case "$next_stage" in
+                  merge|feedback-implementation)
+                    target_status="In Progress"
+                    ;;
+                  deploy-review)
+                    target_status="In Review"
+                    ;;
+                  *)
+                    echo "::error::Unknown review_next_stage '$next_stage' for agent-review"
+                    exit 1
+                    ;;
+                esac
+              else
+                echo "::warning::Missing canonical review next-stage; falling back to disposition mapping"
+                case "$REVIEW_DISPOSITION" in
+                  auto-approve)
+                    next_stage="merge"
+                    target_status="In Progress"
+                    ;;
+                  rework-required)
+                    next_stage="feedback-implementation"
+                    target_status="In Progress"
+                    ;;
+                  operator-review-required)
+                    next_stage="deploy-review"
+                    target_status="In Review"
+                    ;;
+                  *)
+                    echo "::error::Unknown or missing review disposition '$REVIEW_DISPOSITION' for agent-review"
+                    exit 1
+                    ;;
+                esac
+              fi
               ;;
             deploy-review)
               next_stage=""

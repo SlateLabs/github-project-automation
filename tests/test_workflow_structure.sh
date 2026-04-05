@@ -9,6 +9,8 @@
 set -euo pipefail
 
 WORKFLOW=".github/workflows/orchestration-dispatch.yml"
+FOLLOW_UP_ACTION=".github/actions/capture-follow-ups/action.yml"
+CLOSEOUT_ACTION=".github/actions/scaffold-closeout/action.yml"
 cd "$(git rev-parse --show-toplevel)"
 
 PASS=0
@@ -186,7 +188,7 @@ fi
 if grep -A3 'kickoff)' "$WORKFLOW" | grep -q 'next_stage="clarification"' && \
    grep -A3 'design)' "$WORKFLOW" | grep -q 'next_stage="plan"' && \
    grep -A3 'execution)' "$WORKFLOW" | grep -q 'next_stage="agent-review"' && \
-   grep -A15 'agent-review)' "$WORKFLOW" | grep -q 'next_stage="merge"' && \
+   grep -A60 'agent-review)' "$WORKFLOW" | grep -q 'next_stage="merge"' && \
    grep -A3 'merge)' "$WORKFLOW" | grep -q 'next_stage="follow-up-capture"'; then
   check "stage handoff map includes key transitions" "pass"
 else
@@ -209,6 +211,43 @@ if grep -Fq '<!-- gpa:checkpoint ' "$WORKFLOW"; then
   check "structured checkpoint comments are emitted" "pass"
 else
   check "structured checkpoint comments are emitted" "fail"
+fi
+
+if grep -Fq '<!-- gpa:checkpoint-v1 ' "$WORKFLOW"; then
+  check "canonical checkpoint-v1 comments are emitted" "pass"
+else
+  check "canonical checkpoint-v1 comments are emitted" "fail"
+fi
+
+if grep -Fq 'gpa:artifact-payload:' "$WORKFLOW"; then
+  check "agent-review artifact payload marker is parsed" "pass"
+else
+  check "agent-review artifact payload marker is parsed" "fail"
+fi
+
+if grep -Fq 'stage:"plan-review"' "$WORKFLOW" && grep -Fq '<!-- gpa:artifact-payload:${artifact_payload} -->' "$WORKFLOW"; then
+  check "plan review emits canonical artifact payload" "pass"
+else
+  check "plan review emits canonical artifact payload" "fail"
+fi
+
+if grep -Fq 'stage:"follow-up-capture"' "$FOLLOW_UP_ACTION" && grep -Fq '<!-- gpa:artifact-payload:${capture_payload} -->' "$FOLLOW_UP_ACTION"; then
+  check "follow-up capture emits canonical artifact payload" "pass"
+else
+  check "follow-up capture emits canonical artifact payload" "fail"
+fi
+
+if grep -Fq 'stage:"closeout"' "$CLOSEOUT_ACTION" && grep -Fq '<!-- gpa:artifact-payload:${created_payload} -->' "$CLOSEOUT_ACTION"; then
+  check "closeout scaffold emits canonical artifact payload" "pass"
+else
+  check "closeout scaffold emits canonical artifact payload" "fail"
+fi
+
+if grep -q 'REVIEW_NEXT_STAGE: .*needs.gate.outputs.review_next_stage' "$WORKFLOW" && \
+   grep -q 'Missing canonical review next-stage; falling back to disposition mapping' "$WORKFLOW"; then
+  check "handoff resolves next stage from canonical review payload with fallback" "pass"
+else
+  check "handoff resolves next stage from canonical review payload with fallback" "fail"
 fi
 
 if [ ! -f .github/workflows/operator-review-intake.yml ]; then
