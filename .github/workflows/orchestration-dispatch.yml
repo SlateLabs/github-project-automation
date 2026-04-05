@@ -2686,6 +2686,26 @@ jobs:
           issue_number: ${{ needs.intake.outputs.issue_number }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Load summary PR context
+        id: summary-pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pr_json=$(gh pr list --state all --json number,url,headRefName,updatedAt --limit 100 \
+            --jq "[.[] | select(.headRefName | test(\"^${ISSUE_NUMBER}[-/]\"))] | sort_by(.updatedAt) | reverse | .[0]" 2>/dev/null || echo '')
+          pr_number=$(echo "$pr_json" | jq -r '.number // empty' 2>/dev/null || true)
+          pr_url=$(echo "$pr_json" | jq -r '.url // empty' 2>/dev/null || true)
+          pr_branch=$(echo "$pr_json" | jq -r '.headRefName // empty' 2>/dev/null || true)
+          {
+            echo "pr_number=$pr_number"
+            echo "pr_url=$pr_url"
+            echo "pr_branch=$pr_branch"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Job summary
         env:
           RUN_KEY: ${{ needs.intake.outputs.run_key }}
@@ -2703,6 +2723,9 @@ jobs:
           STATUS_UPDATED: ${{ needs.handoff.outputs.status_updated }}
           HANDOFF_DISPATCHED: ${{ needs.handoff.outputs.dispatched }}
           NEXT_RUN_KEY: ${{ needs.handoff.outputs.next_run_key }}
+          PR_NUMBER: ${{ steps.summary-pr.outputs.pr_number }}
+          PR_URL: ${{ steps.summary-pr.outputs.pr_url }}
+          PR_BRANCH: ${{ steps.summary-pr.outputs.pr_branch }}
         shell: bash
         run: |
           # Determine next-step hint based on the requested stage
@@ -2737,6 +2760,15 @@ jobs:
               ;;
           esac
 
+          pr_value="n/a"
+          branch_value="n/a"
+          if [ -n "${PR_NUMBER:-}" ] && [ -n "${PR_URL:-}" ]; then
+            pr_value="[#${PR_NUMBER}](${PR_URL})"
+          fi
+          if [ -n "${PR_BRANCH:-}" ]; then
+            branch_value="\`${PR_BRANCH}\`"
+          fi
+
           previous_run_key=$(echo "${RUN_HISTORY:-[]}" | jq -r --arg current_run_key "$RUN_KEY" 'map(select(.run_key != $current_run_key)) | .[0].run_key // ""')
           previous_run_url=$(echo "${RUN_HISTORY:-[]}" | jq -r --arg current_run_key "$RUN_KEY" 'map(select(.run_key != $current_run_key)) | .[0].comment_url // ""')
           if [ -n "$previous_run_key" ] && [ -n "$previous_run_url" ]; then
@@ -2759,6 +2791,8 @@ jobs:
             echo "| Duplicate | ${DUPLICATE:-false} |"
             echo "| Eligible | ${ELIGIBLE:-n/a} |"
             echo "| Gate passed | ${GATE_PASSED:-n/a} |"
+            echo "| PR | $pr_value |"
+            echo "| Branch | $branch_value |"
             echo "| Project Status target | ${TARGET_STATUS:-n/a} |"
             echo "| Project Status updated | ${STATUS_UPDATED:-false} |"
             echo "| Next stage | ${NEXT_STAGE:-n/a} |"
@@ -2767,6 +2801,9 @@ jobs:
             echo "### Next steps"
             echo ""
             echo "- $next_step"
+            if [ "$REQUESTED_STAGE" = "merge" ] && [ "${GATE_PASSED:-false}" = "true" ] && [ "${HANDOFF_DISPATCHED:-false}" != "true" ] && [ -n "${PR_URL:-}" ]; then
+              echo "- Review merge conflicts on $pr_value and reconcile branch $branch_value against \`main\`"
+            fi
             if [ -n "${NEXT_STAGE:-}" ] && [ -n "${NEXT_RUN_KEY:-}" ]; then
               echo "- Auto-handoff dispatched \`${NEXT_STAGE}\` with run key \`${NEXT_RUN_KEY}\`"
             fi
