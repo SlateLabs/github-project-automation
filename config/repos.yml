@@ -14,8 +14,11 @@ repos:
       - design
       - plan
       - execution
-      - review
+      - agent-review
+      - feedback-implementation
+      - deploy-review
       - merge
+      - follow-up-capture
       - closeout
     # Pin to a release tag or SHA — never a mutable branch (see discussion #3 §2)
     shared_workflow_version: 08cf90ef668d27986151c19194f7632e210d1820
