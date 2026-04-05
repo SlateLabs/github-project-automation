@@ -2785,40 +2785,12 @@ jobs:
           PR_NUMBER: ${{ steps.summary-pr.outputs.pr_number }}
           PR_URL: ${{ steps.summary-pr.outputs.pr_url }}
           PR_BRANCH: ${{ steps.summary-pr.outputs.pr_branch }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ISSUE_URL: ${{ github.server_url }}/${{ github.repository }}/issues/${{ needs.intake.outputs.issue_number }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
         shell: bash
         run: |
-          # Determine next-step hint based on the requested stage
-          next_step=""
-          case "$REQUESTED_STAGE" in
-            design)
-              next_step="Fill in the design discussion, resolve open questions, then re-trigger with \`requested_stage: design\`"
-              ;;
-            plan)
-              next_step="Fill in the implementation plan with substantive content, then re-trigger with \`requested_stage: plan\`"
-              ;;
-            execution)
-              next_step="Execution should auto-queue \`agent-review\` once the PR is ready"
-              ;;
-            agent-review)
-              next_step="Agent review should auto-route to \`merge\`, \`feedback-implementation\`, or \`deploy-review\` based on its disposition"
-              ;;
-            deploy-review)
-              next_step="Wait for operator review. Use \`gpa:feedback ...\` to request changes or \`gpa:approve\` to continue"
-              ;;
-            feedback-implementation)
-              next_step="Address feedback on the branch, then auto-return to \`agent-review\` or \`deploy-review\` depending on the feedback source"
-              ;;
-            follow-up-capture)
-              next_step="Review created follow-up issues, then proceed to closeout with \`requested_stage: closeout\`"
-              ;;
-            closeout)
-              next_step="Complete the retrospective sections and exit checklist, then close the issue"
-              ;;
-            *)
-              next_step="Check issue [#$ISSUE_NUMBER](https://github.com/$REPO/issues/$ISSUE_NUMBER) for current status"
-              ;;
-          esac
-
           pr_value="n/a"
           branch_value="n/a"
           if [ -n "${PR_NUMBER:-}" ] && [ -n "${PR_URL:-}" ]; then
@@ -2836,34 +2808,11 @@ jobs:
             previous_run_value="n/a"
           fi
 
-          {
-            echo "## Orchestration Dispatch Summary"
-            echo ""
-            echo "| Field | Value |"
-            echo "|-------|-------|"
-            echo "| Run key | \`$RUN_KEY\` |"
-            echo "| Issue | [#$ISSUE_NUMBER](https://github.com/$REPO/issues/$ISSUE_NUMBER) |"
-            echo "| Previous run | $previous_run_value |"
-            echo "| Trigger | \`$TRIGGER\` |"
-            echo "| Stage | \`$REQUESTED_STAGE\` |"
-            echo "| Actor | $ACTOR |"
-            echo "| Duplicate | ${DUPLICATE:-false} |"
-            echo "| Eligible | ${ELIGIBLE:-n/a} |"
-            echo "| Gate passed | ${GATE_PASSED:-n/a} |"
-            echo "| PR | $pr_value |"
-            echo "| Branch | $branch_value |"
-            echo "| Project Status target | ${TARGET_STATUS:-n/a} |"
-            echo "| Project Status updated | ${STATUS_UPDATED:-false} |"
-            echo "| Next stage | ${NEXT_STAGE:-n/a} |"
-            echo "| Next stage queued | ${HANDOFF_DISPATCHED:-false} |"
-            echo ""
-            echo "### Next steps"
-            echo ""
-            echo "- $next_step"
-            if [ "$REQUESTED_STAGE" = "merge" ] && [ "${GATE_PASSED:-false}" = "true" ] && [ "${HANDOFF_DISPATCHED:-false}" != "true" ] && [ -n "${PR_URL:-}" ]; then
-              echo "- Review merge conflicts on $pr_value and reconcile branch $branch_value against \`main\`"
-            fi
-            if [ -n "${NEXT_STAGE:-}" ] && [ -n "${NEXT_RUN_KEY:-}" ]; then
-              echo "- Auto-handoff dispatched \`${NEXT_STAGE}\` with run key \`${NEXT_RUN_KEY}\`"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+          export PR_VALUE="$pr_value"
+          export BRANCH_VALUE="$branch_value"
+          export PREVIOUS_RUN_KEY="$previous_run_key"
+          export PREVIOUS_RUN_URL="$previous_run_url"
+          export PREVIOUS_RUN_VALUE="$previous_run_value"
+          export CURRENT_STAGE="$REQUESTED_STAGE"
+
+          scripts/render_orchestration_summary.sh >> "$GITHUB_STEP_SUMMARY"

@@ -47,6 +47,9 @@ jobs:
       - name: Validate dispatch normalization
         run: bash tests/test_dispatch_normalization.sh
 
+      - name: Validate orchestration summary rendering
+        run: bash tests/test_orchestration_summary_rendering.sh
+
       - name: Validate config
         run: python scripts/validate-config.py
 
