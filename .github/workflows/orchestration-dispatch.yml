@@ -1859,7 +1859,7 @@ jobs:
         uses: ./.github/actions/check-gate
         with:
           issue_number: ${{ needs.intake.outputs.issue_number }}
-          requested_stage: ${{ needs.intake.outputs.requested_stage }}
+          requested_stage: ${{ needs.intake.outputs.requested_stage == 'feedback-implementation' && 'execution' || needs.intake.outputs.requested_stage }}
           issue_body: ${{ steps.issue-body.outputs.body }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           trust_policy_path: config/trust-policy.yml
