@@ -1207,6 +1207,20 @@ jobs:
           set -euo pipefail
           [ -n "$OPENAI_API_KEY" ] || { echo "::error::Execution authoring requires secrets.OPENAI_API_KEY"; exit 1; }
 
+      - name: Create orchestration app token (execution)
+        if: (needs.intake.outputs.requested_stage == 'execution' || needs.intake.outputs.requested_stage == 'feedback-implementation') && vars.ORCHESTRATION_APP_ID != ''
+        id: execution-app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.ORCHESTRATION_APP_ID }}
+          private-key: ${{ secrets.ORCHESTRATION_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+          permission-workflows: write
+
       - name: Validate agent review credentials
         if: needs.intake.outputs.requested_stage == 'agent-review'
         env:
@@ -1222,7 +1236,7 @@ jobs:
         uses: ./.github/actions/scaffold-execution
         with:
           issue_number: ${{ needs.intake.outputs.issue_number }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ steps.execution-app-token.outputs.token || secrets.GITHUB_TOKEN }}
           run_key: ${{ needs.intake.outputs.run_key }}
           actor: ${{ needs.intake.outputs.actor }}
           create_pr: 'false'
@@ -1231,7 +1245,7 @@ jobs:
         if: needs.intake.outputs.requested_stage == 'feedback-implementation'
         id: feedback-loop-context
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.execution-app-token.outputs.token || secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
         shell: bash
         run: |
@@ -1296,11 +1310,12 @@ jobs:
         if: needs.intake.outputs.requested_stage == 'execution' || needs.intake.outputs.requested_stage == 'feedback-implementation'
         env:
           BRANCH_NAME: ${{ steps.scaffold-execution.outputs.branch_name }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.execution-app-token.outputs.token || secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
 
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           default_branch=$(gh repo view "${GITHUB_REPOSITORY}" --json defaultBranchRef --jq '.defaultBranchRef.name')
           if git ls-remote --exit-code --heads origin "$BRANCH_NAME" >/dev/null 2>&1; then
             git fetch origin "$BRANCH_NAME"
@@ -1413,7 +1428,7 @@ jobs:
         uses: ./.github/actions/scaffold-execution
         with:
           issue_number: ${{ needs.intake.outputs.issue_number }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ steps.execution-app-token.outputs.token || secrets.GITHUB_TOKEN }}
           run_key: ${{ needs.intake.outputs.run_key }}
           actor: ${{ needs.intake.outputs.actor }}
           create_pr: 'true'
@@ -1421,7 +1436,7 @@ jobs:
       - name: Mark PR ready for review
         if: (needs.intake.outputs.requested_stage == 'execution' || needs.intake.outputs.requested_stage == 'feedback-implementation') && steps.execution-pr.outputs.pr_number != ''
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.execution-app-token.outputs.token || secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.execution-pr.outputs.pr_number }}
         shell: bash
         run: |
@@ -1438,7 +1453,7 @@ jobs:
         if: needs.intake.outputs.requested_stage == 'execution' || needs.intake.outputs.requested_stage == 'feedback-implementation'
         id: post-execution-pr-state
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.execution-app-token.outputs.token || secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
         shell: bash
         run: |
