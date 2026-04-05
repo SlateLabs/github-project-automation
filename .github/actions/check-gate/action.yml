@@ -625,8 +625,7 @@ runs:
 
             # 2. Check source branch is deleted (§4 Gate 8→done check 2)
             if [ -n "$closeout_merged_branch" ]; then
-              branch_still_exists=$(gh api "repos/{owner}/{repo}/branches/${closeout_merged_branch}" --jq '.name' 2>/dev/null || true)
-              if [ -n "$branch_still_exists" ]; then
+              if gh api "repos/{owner}/{repo}/branches/${closeout_merged_branch}" --silent >/dev/null 2>&1; then
                 if ! check_waiver "closeout-branch-deleted"; then
                   unmet+=("Source branch '${closeout_merged_branch}' from merged PR #${closeout_merged_pr} still exists — delete it before closeout")
                 fi
