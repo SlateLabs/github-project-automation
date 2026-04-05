@@ -186,7 +186,7 @@ fi
 if grep -A3 'kickoff)' "$WORKFLOW" | grep -q 'next_stage="clarification"' && \
    grep -A3 'design)' "$WORKFLOW" | grep -q 'next_stage="plan"' && \
    grep -A3 'execution)' "$WORKFLOW" | grep -q 'next_stage="agent-review"' && \
-   grep -A15 'agent-review)' "$WORKFLOW" | grep -q 'next_stage="merge"' && \
+   grep -A60 'agent-review)' "$WORKFLOW" | grep -q 'next_stage="merge"' && \
    grep -A3 'merge)' "$WORKFLOW" | grep -q 'next_stage="follow-up-capture"'; then
   check "stage handoff map includes key transitions" "pass"
 else
@@ -209,6 +209,25 @@ if grep -Fq '<!-- gpa:checkpoint ' "$WORKFLOW"; then
   check "structured checkpoint comments are emitted" "pass"
 else
   check "structured checkpoint comments are emitted" "fail"
+fi
+
+if grep -Fq '<!-- gpa:checkpoint-v1 ' "$WORKFLOW"; then
+  check "canonical checkpoint-v1 comments are emitted" "pass"
+else
+  check "canonical checkpoint-v1 comments are emitted" "fail"
+fi
+
+if grep -Fq 'gpa:artifact-payload:' "$WORKFLOW"; then
+  check "agent-review artifact payload marker is parsed" "pass"
+else
+  check "agent-review artifact payload marker is parsed" "fail"
+fi
+
+if grep -q 'REVIEW_NEXT_STAGE: .*needs.gate.outputs.review_next_stage' "$WORKFLOW" && \
+   grep -q 'Missing canonical review next-stage; falling back to disposition mapping' "$WORKFLOW"; then
+  check "handoff resolves next stage from canonical review payload with fallback" "pass"
+else
+  check "handoff resolves next stage from canonical review payload with fallback" "fail"
 fi
 
 if [ ! -f .github/workflows/operator-review-intake.yml ]; then

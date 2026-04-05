@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/SlateLabs/github-project-automation/.github/schemas/orchestration-contract-v1.json",
+  "title": "GPA Orchestration Contract v1",
+  "description": "Canonical machine-readable envelopes for orchestration checkpoints and stage artifact payloads.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/checkpointEnvelope"
+    },
+    {
+      "$ref": "#/$defs/artifactPayloadEnvelope"
+    }
+  ],
+  "$defs": {
+    "stageStatus": {
+      "type": "string",
+      "enum": [
+        "started",
+        "completed",
+        "failed",
+        "blocked",
+        "waiting",
+        "skipped"
+      ]
+    },
+    "checkpointEnvelope": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "kind",
+        "version",
+        "run_key",
+        "stage",
+        "decision"
+      ],
+      "properties": {
+        "kind": {
+          "const": "checkpoint"
+        },
+        "version": {
+          "const": "gpa.v1"
+        },
+        "run_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stage": {
+          "type": "object",
+          "required": [
+            "name",
+            "status",
+            "actor"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "status": {
+              "$ref": "#/$defs/stageStatus"
+            },
+            "actor": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "decision": {
+          "type": "object",
+          "required": [
+            "next_stage",
+            "reason_codes"
+          ],
+          "properties": {
+            "next_stage": {
+              "type": "string"
+            },
+            "reason_codes": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "artifact": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "artifactPayloadEnvelope": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "kind",
+        "version",
+        "stage",
+        "data"
+      ],
+      "properties": {
+        "kind": {
+          "const": "artifact_payload"
+        },
+        "version": {
+          "const": "gpa.v1"
+        },
+        "run_key": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string",
+          "minLength": 1
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "decision"
+          ],
+          "properties": {
+            "decision": {
+              "type": "object",
+              "required": [
+                "next_stage",
+                "reason_codes"
+              ],
+              "properties": {
+                "next_stage": {
+                  "type": "string"
+                },
+                "reason_codes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "minItems": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
