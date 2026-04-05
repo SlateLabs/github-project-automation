@@ -1678,6 +1678,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
           RUN_KEY: ${{ needs.intake.outputs.run_key }}
+          ACTOR: ${{ needs.intake.outputs.actor }}
           PR_NUMBER: ${{ steps.agent-review-context.outputs.pr_number }}
           PR_URL: ${{ steps.agent-review-context.outputs.pr_url }}
           PR_HEAD_SHA: ${{ steps.agent-review-context.outputs.pr_head_sha }}
