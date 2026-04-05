@@ -2028,6 +2028,8 @@ jobs:
           RUN_ID: ${{ github.run_id }}
         shell: bash
         run: |
+          set -euo pipefail
+
           waived_list=$(echo "$WAIVED" | jq -r '.[] | "- " + .' 2>/dev/null || echo "")
           waived_section=""
           if [ -n "$waived_list" ]; then
@@ -2035,19 +2037,28 @@ jobs:
           **Waived conditions:**
           $waived_list"
           fi
-          checkpoint=$(jq -cn \
-            --arg run_key "$RUN_KEY" \
-            --arg stage "$REQUESTED_STAGE" \
-            --arg state "completed" \
-            --arg actor "$ACTOR" \
-            --arg run_url "$RUN_URL" \
-            --argjson waived "${WAIVED:-[]}" \
-            '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,run_url:$run_url,waived_conditions:$waived}')
+
+          checkpoint_line=""
+          case "$REQUESTED_STAGE" in
+            agent-review|deploy-review)
+              ;;
+            *)
+              checkpoint=$(jq -cn \
+                --arg run_key "$RUN_KEY" \
+                --arg stage "$REQUESTED_STAGE" \
+                --arg state "completed" \
+                --arg actor "$ACTOR" \
+                --arg run_url "$RUN_URL" \
+                --argjson waived "${WAIVED:-[]}" \
+                '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,run_url:$run_url,waived_conditions:$waived}')
+              checkpoint_line="<!-- gpa:checkpoint $checkpoint -->"
+              ;;
+          esac
 
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Orchestration run — stage transition accepted
           <!-- gpa:run-status:$REQUESTED_STAGE:completed:$RUN_KEY -->
-          <!-- gpa:checkpoint $checkpoint -->
+          $checkpoint_line
 
           | Field | Value |
           |-------|-------|
