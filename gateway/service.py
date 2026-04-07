@@ -23,7 +23,7 @@ REQUESTED_STAGE = "kickoff"
 DISPATCH_EVENT_TYPE = "orchestration-start"
 DISPATCH_RETRY_BACKOFFS = (1.0, 4.0, 16.0)
 OPERATOR_COMMANDS = {
-    "gpa:feedback": "feedback-implementation",
+    "gpa:feedback": "execution",
     "gpa:approve": "merge",
 }
 
@@ -333,7 +333,7 @@ class GatewayService:
             return GatewayResult(202, {"outcome": "skipped", "reason": "Comment is not a GPA operator command"})
 
         requested_stage, feedback_body = command
-        if requested_stage == "feedback-implementation" and not feedback_body:
+        if requested_stage == "execution" and comment.get("body", "").lstrip().lower().startswith("gpa:feedback") and not feedback_body:
             return GatewayResult(422, {"outcome": "rejected", "reason": "gpa:feedback requires non-empty instructions"})
 
         repo_full_name = ((payload.get("repository") or {}).get("full_name") or issue.get("repository_url", "").removeprefix("https://api.github.com/repos/"))
@@ -388,7 +388,7 @@ class GatewayService:
             "timestamp": str(now_ms),
             "project_item_id": context.project_item_id,
         }
-        if requested_stage == "feedback-implementation":
+        if requested_stage == "execution" and feedback_body:
             client_payload["feedback_source"] = "operator"
             client_payload["feedback_body"] = feedback_body
 
@@ -409,7 +409,7 @@ class GatewayService:
                 )
                 return GatewayResult(202, {"outcome": "pending-review", "reason": decision.reason, "run_key": run_key})
 
-            if requested_stage == "feedback-implementation":
+            if requested_stage == "execution" and feedback_body:
                 self.github_client.update_project_item_status(context.project_item_id, "In Progress")
 
             last_error = self._dispatch_with_retry(
@@ -572,7 +572,7 @@ class GatewayService:
         lowered = trimmed.lower()
         for prefix, stage in OPERATOR_COMMANDS.items():
             if lowered.startswith(prefix):
-                feedback = trimmed[len(prefix):].strip() if stage == "feedback-implementation" else ""
+                feedback = trimmed[len(prefix):].strip() if stage == "execution" else ""
                 return (stage, feedback)
         return None
 

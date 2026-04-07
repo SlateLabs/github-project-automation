@@ -14,6 +14,7 @@ CLOSEOUT_ACTION=".github/actions/scaffold-closeout/action.yml"
 DISPATCH_ACTION=".github/actions/dispatch-orchestration/action.yml"
 DESIGN_STAGE_WORKFLOW=".github/workflows/run-design-stage.yml"
 PLAN_STAGE_WORKFLOW=".github/workflows/run-plan-stage.yml"
+AGENT_REVIEW_STAGE_WORKFLOW=".github/workflows/run-agent-review-stage.yml"
 cd "$(git rev-parse --show-toplevel)"
 
 PASS=0
@@ -223,7 +224,7 @@ else
   check "canonical checkpoint-v1 comments are emitted" "fail"
 fi
 
-if grep -Fq 'gpa:artifact-payload:' "$WORKFLOW"; then
+if grep -Fq 'gpa:artifact-payload:' "$AGENT_REVIEW_STAGE_WORKFLOW"; then
   check "agent-review artifact payload marker is parsed" "pass"
 else
   check "agent-review artifact payload marker is parsed" "fail"
@@ -247,7 +248,7 @@ else
   check "closeout scaffold emits canonical artifact payload" "fail"
 fi
 
-if grep -q 'REVIEW_NEXT_STAGE: .*needs.gate.outputs.review_next_stage' "$WORKFLOW" && \
+if grep -q 'REVIEW_NEXT_STAGE: .*needs.stage_agent_review.outputs.next_stage' "$WORKFLOW" && \
    grep -q 'Missing canonical review next-stage; falling back to disposition mapping' "$WORKFLOW"; then
   check "handoff resolves next stage from canonical review payload with fallback" "pass"
 else

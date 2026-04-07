@@ -15,8 +15,6 @@ repos:
       - plan
       - execution
       - agent-review
-      - feedback-implementation
-      - deploy-review
       - merge
       - follow-up-capture
       - closeout

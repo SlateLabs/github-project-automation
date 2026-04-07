@@ -82,9 +82,9 @@ def state_mismatch() -> str:
 """
 
 
-def deploy_review_ready() -> str:
+def operator_review_ready() -> str:
     return f"""### Review-ready implementation
-<!-- gpa:run-status:deploy-review:completed:{e("RUN_KEY")} -->
+<!-- gpa:run-status:agent-review:waiting:{e("RUN_KEY")} -->
 <!-- gpa:checkpoint {e("CHECKPOINT")} -->
 
 | Field | Value |
@@ -121,7 +121,7 @@ def merge_remediation() -> str:
 The merge lane attempted to sync the feature branch with `main` before final merge, then attempted an automated conflict-resolution pass, but the branch still requires manual reconciliation.
 
 Next step:
-- re-run `feedback-implementation` to reconcile the branch against the latest `main`
+- re-run `execution` to reconcile the branch against the latest `main`
 """
 
 
@@ -163,7 +163,7 @@ The next stage was dispatched automatically after the current stage passed.
 
 
 TEMPLATES = {
-    "deploy-review-ready": deploy_review_ready,
+    "operator-review-ready": operator_review_ready,
     "duplicate": duplicate,
     "gate-failed": gate_failed,
     "ineligible": ineligible,

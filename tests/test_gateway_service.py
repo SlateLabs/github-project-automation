@@ -114,7 +114,7 @@ class GatewayServiceTests(unittest.TestCase):
             repo_config={
                 "SlateLabs/github-project-automation": ConfiguredRepo(
                     repo="SlateLabs/github-project-automation",
-                    enabled_stages=("kickoff", "design", "plan", "execution", "agent-review", "feedback-implementation", "deploy-review", "merge", "follow-up-capture", "closeout"),
+                    enabled_stages=("kickoff", "design", "plan", "execution", "agent-review", "merge", "follow-up-capture", "closeout"),
                     shared_workflow_version="deadbeef",
                 )
             },
@@ -262,7 +262,7 @@ class GatewayServiceTests(unittest.TestCase):
                 {
                     "issue_number": 1,
                     "issue_title": "[TEST] Gateway dispatch",
-                    "requested_stage": "feedback-implementation",
+                    "requested_stage": "execution",
                     "run_key": body["run_key"],
                     "actor": "trusted-user",
                     "timestamp": "1710000000000",

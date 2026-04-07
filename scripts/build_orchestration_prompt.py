@@ -222,7 +222,7 @@ Required file structure:
   - `version`: `gpa.v1`
   - `stage`: `agent-review`
   - `data.disposition`: one of `auto-approve`, `rework-required`, `operator-review-required`
-  - `data.decision.next_stage`: one of `merge`, `feedback-implementation`, `deploy-review`
+  - `data.decision.next_stage`: one of `merge`, `execution`, or empty string
   - `data.decision.reason_codes`: non-empty array of machine-readable reason codes
 - Then a blank line
 - Then a section `## Summary`
@@ -236,8 +236,8 @@ Decision rules:
 - Use "operator-review-required" only for exceptional situations: unresolved product ambiguity, risky/destructive changes, security/permission concerns, missing deployability where user interaction is required, or changes that require a human judgment call.
 - Keep disposition and decision.next_stage consistent:
   - auto-approve -> merge
-  - rework-required -> feedback-implementation
-  - operator-review-required -> deploy-review
+  - rework-required -> execution
+  - operator-review-required -> empty string
 - Default to "auto-approve" unless there is a concrete reason not to.
 - Do not ask for operator review just because the change is incomplete; prefer "rework-required" in that case.
 - Do not modify any tracked repository files other than writing `{env("REVIEW_FILE")}`.

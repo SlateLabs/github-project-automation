@@ -48,7 +48,7 @@ if [ -z "${STATUS_CLASS:-}" ]; then
     STATUS_CLASS="failure"
   elif [ -n "${NEXT_STAGE:-}" ]; then
     STATUS_CLASS="success"
-  elif [ "$CURRENT_STAGE" = "deploy-review" ]; then
+  elif [ -z "${NEXT_STAGE:-}" ] && [ "${TARGET_STATUS:-}" = "In Review" ]; then
     STATUS_CLASS="waiting"
   elif [ "$CURRENT_STAGE" = "merge" ]; then
     STATUS_CLASS="blocked"
@@ -82,8 +82,8 @@ fi
 if [ -z "${NEXT_STAGE_OR_WAIT_STATE:-}" ]; then
   if [ -n "${NEXT_STAGE:-}" ]; then
     NEXT_STAGE_OR_WAIT_STATE="Next expected stage: \`${NEXT_STAGE}\`."
-  elif [ "$STATUS_CLASS" = "waiting" ] && [ "$CURRENT_STAGE" = "deploy-review" ]; then
-    NEXT_STAGE_OR_WAIT_STATE="Waiting for operator review input; control resumes at \`deploy-review\` once approved/updated."
+  elif [ "$STATUS_CLASS" = "waiting" ] && [ "${TARGET_STATUS:-}" = "In Review" ]; then
+    NEXT_STAGE_OR_WAIT_STATE="Waiting for operator review input; automation will resume after approval or new feedback."
   elif [ "$STATUS_CLASS" = "waiting" ] && [ "$(bool_normalize "${DUPLICATE:-false}")" = "true" ]; then
     NEXT_STAGE_OR_WAIT_STATE="Waiting for dedup window expiry before rerun."
   elif [ "$STATUS_CLASS" = "blocked" ]; then
@@ -97,7 +97,7 @@ if [ -z "${OPERATOR_INTERVENTION_REQUIRED:-}" ]; then
   case "$STATUS_CLASS" in
     failure|blocked) OPERATOR_INTERVENTION_REQUIRED="true" ;;
     waiting)
-      if [ "$CURRENT_STAGE" = "deploy-review" ]; then
+      if [ "${TARGET_STATUS:-}" = "In Review" ]; then
         OPERATOR_INTERVENTION_REQUIRED="true"
       else
         OPERATOR_INTERVENTION_REQUIRED="false"
@@ -109,8 +109,8 @@ fi
 
 if [ -z "${OPERATOR_NEXT_ACTION:-}" ] && [ "$(bool_normalize "$OPERATOR_INTERVENTION_REQUIRED")" = "true" ]; then
   if [ "$STATUS_CLASS" = "blocked" ] && [ "$CURRENT_STAGE" = "merge" ]; then
-    OPERATOR_NEXT_ACTION="Resolve conflicts on the PR branch, then re-trigger \`feedback-implementation\` or \`merge\`."
-  elif [ "$STATUS_CLASS" = "waiting" ] && [ "$CURRENT_STAGE" = "deploy-review" ]; then
+    OPERATOR_NEXT_ACTION="Resolve conflicts on the PR branch, then re-trigger \`execution\` or \`merge\`."
+  elif [ "$STATUS_CLASS" = "waiting" ] && [ "${TARGET_STATUS:-}" = "In Review" ]; then
     OPERATOR_NEXT_ACTION="Post \`gpa:approve\` to continue, or \`gpa:feedback ...\` to request changes."
   elif [ "${ELIGIBLE:-true}" != "true" ]; then
     OPERATOR_NEXT_ACTION="Update issue eligibility requirements, then re-trigger \`${CURRENT_STAGE}\`."

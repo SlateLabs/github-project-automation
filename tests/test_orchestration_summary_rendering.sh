@@ -157,9 +157,10 @@ assert_contains "merge PR link present" '- PR: \[PR #456\]\(https://github.com/S
 
 echo ""
 echo "6. Waiting state includes awaited condition and resume point"
-REQUESTED_STAGE="deploy-review"
+REQUESTED_STAGE="agent-review"
 reset_fixture_env
 STATUS_CLASS=""
+TARGET_STATUS="In Review"
 PR_NUMBER=""
 PR_URL=""
 PR_BRANCH=""
@@ -168,7 +169,7 @@ GATE_PASSED="true"
 NEXT_STAGE=""
 out_waiting="$(render_summary)"
 assert_contains "waiting outcome shown" '^Outcome: ⏳ Waiting$' "$out_waiting"
-assert_contains "waiting condition shown" 'Waiting state: Waiting for operator review input; control resumes at `deploy-review` once approved/updated\.' "$out_waiting"
+assert_contains "waiting condition shown" 'Waiting state: Waiting for operator review input; automation will resume after approval or new feedback\.' "$out_waiting"
 assert_contains "waiting next action shown" 'Operator next action: Post `gpa:approve` to continue, or `gpa:feedback \.\.\.` to request changes\.' "$out_waiting"
 
 echo ""

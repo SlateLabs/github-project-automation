@@ -1,0 +1,283 @@
+name: Run Agent Review Stage
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        required: true
+        type: string
+      issue_title:
+        required: true
+        type: string
+      issue_body:
+        required: true
+        type: string
+      run_key:
+        required: true
+        type: string
+      actor:
+        required: true
+        type: string
+    secrets:
+      github_token:
+        required: true
+      openai_api_key:
+        required: true
+    outputs:
+      disposition:
+        value: ${{ jobs.review.outputs.disposition }}
+      next_stage:
+        value: ${{ jobs.review.outputs.next_stage }}
+      reason_codes:
+        value: ${{ jobs.review.outputs.reason_codes }}
+      feedback_body:
+        value: ${{ jobs.review.outputs.feedback_body }}
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    outputs:
+      disposition: ${{ steps.parse-agent-review.outputs.disposition }}
+      next_stage: ${{ steps.parse-agent-review.outputs.next_stage }}
+      reason_codes: ${{ steps.parse-agent-review.outputs.reason_codes }}
+      feedback_body: ${{ steps.parse-agent-review.outputs.feedback_body }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate agent review credentials
+        env:
+          OPENAI_API_KEY: ${{ secrets.openai_api_key }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "$OPENAI_API_KEY" ] || { echo "::error::Agent review requires OPENAI_API_KEY"; exit 1; }
+
+      - name: Load agent review PR context
+        id: agent-review-context
+        env:
+          GH_TOKEN: ${{ secrets.github_token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_json=$(python3 scripts/github_orchestration_context.py latest-pr --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --state open)
+          pr_number=$(echo "$pr_json" | jq -r '.number // empty')
+          if [ -z "$pr_number" ]; then
+            echo "::error::No open PR found for issue #$ISSUE_NUMBER to review"
+            exit 1
+          fi
+          diff_file="$RUNNER_TEMP/agent-review-truncated.diff"
+          python3 scripts/github_orchestration_context.py truncate-diff --repo "$GITHUB_REPOSITORY" --pr-number "$pr_number" --output-path "$diff_file"
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+          {
+            echo 'pr_body<<EOF'
+            echo "$pr_json" | jq -r '.body // ""'
+            echo 'EOF'
+            echo 'pr_url<<EOF'
+            echo "$pr_json" | jq -r '.url // ""'
+            echo 'EOF'
+            echo 'pr_title<<EOF'
+            echo "$pr_json" | jq -r '.title // ""'
+            echo 'EOF'
+            echo 'pr_head_sha<<EOF'
+            echo "$pr_json" | jq -r '.headRefOid // ""'
+            echo 'EOF'
+            echo 'branch_name<<EOF'
+            echo "$pr_json" | jq -r '.headRefName // ""'
+            echo 'EOF'
+            echo 'files_summary<<EOF'
+            printf '%s\n' "$(gh pr view "$pr_number" --repo "$GITHUB_REPOSITORY" --json files --jq '.files[]?.path // ""')"
+            echo 'EOF'
+            echo 'diff_file<<EOF'
+            printf '%s\n' "$diff_file"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Codex agent review prompt
+        id: agent-review-prompt
+        env:
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_TITLE: ${{ inputs.issue_title }}
+          ISSUE_BODY: ${{ inputs.issue_body }}
+          PR_NUMBER: ${{ steps.agent-review-context.outputs.pr_number }}
+          PR_TITLE: ${{ steps.agent-review-context.outputs.pr_title }}
+          PR_URL: ${{ steps.agent-review-context.outputs.pr_url }}
+          PR_BODY: ${{ steps.agent-review-context.outputs.pr_body }}
+          FILES_SUMMARY: ${{ steps.agent-review-context.outputs.files_summary }}
+          DIFF_FILE: ${{ steps.agent-review-context.outputs.diff_file }}
+          REVIEW_FILE: .gpa-agent-review.md
+        shell: bash
+        run: |
+          set -euo pipefail
+          prompt_file="$RUNNER_TEMP/agent-review-prompt.md"
+          python3 scripts/build_orchestration_prompt.py agent-review --output "$prompt_file"
+          {
+            echo 'prompt<<EOF'
+            cat "$prompt_file"
+            echo
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run Codex agent review
+        uses: openai/codex-action@v1
+        with:
+          prompt: ${{ steps.agent-review-prompt.outputs.prompt }}
+          openai-api-key: ${{ secrets.openai_api_key }}
+          sandbox: workspace-write
+          model: ${{ vars.ORCHESTRATION_CODEX_MODEL }}
+          effort: ${{ vars.ORCHESTRATION_CODEX_EFFORT }}
+          allow-bots: true
+
+      - name: Parse agent review result
+        id: parse-agent-review
+        env:
+          REVIEW_FILE: .gpa-agent-review.md
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "$REVIEW_FILE" ]; then
+            echo "::error::Agent review did not produce $REVIEW_FILE"
+            exit 1
+          fi
+          artifact_payload_json=$(python3 - "$REVIEW_FILE" <<'PY'
+          import json, re, sys
+          from pathlib import Path
+          text = Path(sys.argv[1]).read_text()
+          matches = re.findall(r'<!--\s*gpa:artifact-payload:(.*?)-->', text, flags=re.DOTALL)
+          if not matches:
+              print("")
+              raise SystemExit(0)
+          payload = matches[-1].strip()
+          try:
+              obj = json.loads(payload)
+          except json.JSONDecodeError:
+              print("INVALID_JSON")
+              raise SystemExit(0)
+          print(json.dumps(obj, separators=(",", ":")))
+          PY
+          )
+          if [ "$artifact_payload_json" = "INVALID_JSON" ]; then
+            echo "::error::Invalid JSON in gpa:artifact-payload envelope"
+            exit 1
+          fi
+          disposition=$(echo "$artifact_payload_json" | jq -r '.data.disposition // ""')
+          next_stage=$(echo "$artifact_payload_json" | jq -r '.data.decision.next_stage // ""')
+          reason_codes_json=$(echo "$artifact_payload_json" | jq -c '.data.decision.reason_codes // []')
+          case "$disposition" in
+            auto-approve)
+              [ -n "$next_stage" ] || next_stage="merge"
+              default_reason_codes='["agent_review_auto_approve"]'
+              ;;
+            rework-required)
+              [ -n "$next_stage" ] || next_stage="execution"
+              default_reason_codes='["agent_review_rework_required"]'
+              ;;
+            operator-review-required)
+              next_stage=""
+              default_reason_codes='["agent_review_operator_review_required"]'
+              ;;
+            *)
+              echo "::error::Invalid agent review disposition: '$disposition'"
+              exit 1
+              ;;
+          esac
+          if [ "${reason_codes_json:-[]}" = "[]" ]; then
+            reason_codes_json="$default_reason_codes"
+          fi
+          case "$next_stage" in
+            ""|merge|execution) ;;
+            *) echo "::error::Invalid next stage '$next_stage' in agent-review payload"; exit 1 ;;
+          esac
+          summary=$(awk 'BEGIN {section=0} /^## Summary[[:space:]]*$/ {section=1; next} /^## Feedback[[:space:]]*$/ {section=0; exit} section==1 {print}' "$REVIEW_FILE")
+          feedback_markdown=$(awk 'BEGIN {section=0} /^## Feedback[[:space:]]*$/ {section=1; next} section==1 {print}' "$REVIEW_FILE")
+          {
+            echo "disposition=$disposition"
+            echo "next_stage=$next_stage"
+            echo "reason_codes=$reason_codes_json"
+            echo 'summary<<EOF'
+            printf '%s\n' "$summary"
+            echo 'EOF'
+            echo 'feedback_body<<EOF'
+            printf '%s\n' "$feedback_markdown"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish agent review summary
+        env:
+          GH_TOKEN: ${{ secrets.github_token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUN_KEY: ${{ inputs.run_key }}
+          ACTOR: ${{ inputs.actor }}
+          PR_NUMBER: ${{ steps.agent-review-context.outputs.pr_number }}
+          PR_URL: ${{ steps.agent-review-context.outputs.pr_url }}
+          PR_HEAD_SHA: ${{ steps.agent-review-context.outputs.pr_head_sha }}
+          DISPOSITION: ${{ steps.parse-agent-review.outputs.disposition }}
+          NEXT_STAGE: ${{ steps.parse-agent-review.outputs.next_stage }}
+          REASON_CODES: ${{ steps.parse-agent-review.outputs.reason_codes }}
+          SUMMARY: ${{ steps.parse-agent-review.outputs.summary }}
+          FEEDBACK_BODY: ${{ steps.parse-agent-review.outputs.feedback_body }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          checkpoint=$(jq -cn --arg run_key "$RUN_KEY" --arg stage "agent-review" --arg state "completed" --arg actor "$ACTOR" --arg disposition "$DISPOSITION" --arg artifact_ref "pr:$PR_NUMBER" --arg pr_head_sha "$PR_HEAD_SHA" --arg next_stage "$NEXT_STAGE" '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,disposition:$disposition,artifact_ref:$artifact_ref,pr_head_sha:$pr_head_sha,next_stage:$next_stage}')
+          canonical_checkpoint=$(jq -cn --arg run_key "$RUN_KEY" --arg actor "$ACTOR" --arg disposition "$DISPOSITION" --arg artifact_ref "pr:$PR_NUMBER" --arg pr_head_sha "$PR_HEAD_SHA" --arg next_stage "$NEXT_STAGE" --argjson reason_codes "${REASON_CODES:-[]}" '{kind:"checkpoint",version:"gpa.v1",run_key:$run_key,stage:{name:"agent-review",status:"completed",actor:$actor},decision:{next_stage:$next_stage,reason_codes:$reason_codes},artifact:{ref:$artifact_ref},data:{disposition:$disposition,pr_head_sha:$pr_head_sha}}')
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+          ### Agent review
+          <!-- gpa:run-status:agent-review:completed:$RUN_KEY -->
+          <!-- gpa:checkpoint-v1 $canonical_checkpoint -->
+          <!-- gpa:checkpoint $checkpoint -->
+
+          | Field | Value |
+          |-------|-------|
+          | **Run key** | \`$RUN_KEY\` |
+          | **PR** | $PR_URL |
+          | **PR head SHA** | \`$PR_HEAD_SHA\` |
+          | **Disposition** | \`$DISPOSITION\` |
+
+          $SUMMARY
+
+          $FEEDBACK_BODY
+          COMMENT_EOF
+          )"
+
+      - name: Publish review-ready summary
+        if: steps.parse-agent-review.outputs.disposition == 'operator-review-required'
+        env:
+          GH_TOKEN: ${{ secrets.github_token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUN_KEY: ${{ inputs.run_key }}
+          ACTOR: ${{ inputs.actor }}
+          PR_URL: ${{ steps.agent-review-context.outputs.pr_url }}
+          BRANCH_NAME: ${{ steps.agent-review-context.outputs.branch_name }}
+          PR_BODY: ${{ steps.agent-review-context.outputs.pr_body }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          checkpoint=$(jq -cn --arg run_key "$RUN_KEY" --arg stage "agent-review" --arg state "waiting" --arg actor "$ACTOR" '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,next_stage:""}')
+          deployment_url=$(printf '%s' "$PR_BODY" | grep -oE 'https://[^[:space:])]+' || true)
+          export DEPLOYMENT_URL="${deployment_url:-"(deployment URL not yet wired)"}"
+          export CHECKPOINT="$checkpoint"
+          gh issue comment "$ISSUE_NUMBER" --body "$(python3 scripts/render_orchestration_comment.py operator-review-ready)"
+
+      - name: Auto-approve PR review
+        if: steps.parse-agent-review.outputs.disposition == 'auto-approve'
+        env:
+          GH_TOKEN: ${{ secrets.github_token }}
+          PR_NUMBER: ${{ steps.agent-review-context.outputs.pr_number }}
+          SUMMARY: ${{ steps.parse-agent-review.outputs.summary }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh pr review "$PR_NUMBER" --approve -b "Automated agent review: $SUMMARY" || true
+
+      - name: Clean up agent review artifact
+        shell: bash
+        run: rm -f .gpa-agent-review.md
