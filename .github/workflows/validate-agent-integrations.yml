@@ -1,5 +1,5 @@
-name: Validate Agent Credentials
-run-name: validate-agent-credentials
+name: Validate Agent Integrations
+run-name: validate-agent-integrations
 
 on:
   workflow_dispatch:
@@ -26,7 +26,6 @@ jobs:
           [ -n "$ANTHROPIC_API_KEY" ] || { echo "::error::Missing ANTHROPIC_API_KEY"; exit 1; }
 
       - name: Codex API key healthcheck
-        id: codex-check
         uses: openai/codex-action@v1
         with:
           prompt: >-
@@ -46,9 +45,9 @@ jobs:
           }
 
       - name: Claude API key healthcheck
+        shell: bash
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        shell: bash
         run: |
           set -euo pipefail
 
@@ -69,3 +68,31 @@ jobs:
             echo "::error::Unexpected Anthropic response: $text"
             exit 1
           }
+
+      - name: Invoke Claude Code with trivial prompt
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            Reply with exactly the word Hi.
+          show_full_output: ${{ vars.ORCHESTRATION_CLAUDE_SHOW_FULL_OUTPUT == 'true' }}
+          claude_args: >-
+            --max-turns 1
+
+      - name: Summarize outputs
+        shell: bash
+        env:
+          STRUCTURED_OUTPUT: ${{ steps.claude.outputs.structured_output }}
+          SESSION_ID: ${{ steps.claude.outputs.session_id }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Agent Integration Validation"
+            echo ""
+            echo "- Codex key check: \`passed\`"
+            echo "- Anthropic API check: \`passed\`"
+            echo "- Claude Code Action session ID: \`${SESSION_ID:-<none>}\`"
+            echo "- Claude structured output present: \`${STRUCTURED_OUTPUT:+yes}${STRUCTURED_OUTPUT:-no}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
