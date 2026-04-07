@@ -1,0 +1,97 @@
+name: 'Dispatch Orchestration'
+description: >
+  Dispatches the canonical orchestration workflow via repository_dispatch using
+  the standard orchestration-start payload shape. Optional fields are included
+  only when non-empty so callers can reuse the same action for retry and
+  next-stage handoff paths.
+
+inputs:
+  github_token:
+    description: 'Token used to call the GitHub dispatch API'
+    required: true
+  issue_number:
+    description: 'Issue number to dispatch'
+    required: true
+  requested_stage:
+    description: 'Canonical orchestration requested_stage'
+    required: true
+  run_key:
+    description: 'Run key to preserve across the dispatch'
+    required: true
+  actor:
+    description: 'Actor to attribute in the dispatch payload'
+    required: true
+  timestamp:
+    description: 'Timestamp segment corresponding to the run key'
+    required: true
+  issue_title:
+    description: 'Optional issue title for run naming'
+    required: false
+    default: ''
+  project_item_id:
+    description: 'Optional project item id for closed-loop handoff'
+    required: false
+    default: ''
+  feedback_source:
+    description: 'Optional feedback source'
+    required: false
+    default: ''
+  feedback_body:
+    description: 'Optional feedback body'
+    required: false
+    default: ''
+
+outputs:
+  dispatched:
+    description: '"true" when repository_dispatch succeeds'
+    value: ${{ steps.dispatch.outputs.dispatched }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Dispatch orchestration-start event
+      id: dispatch
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        ISSUE_NUMBER: ${{ inputs.issue_number }}
+        REQUESTED_STAGE: ${{ inputs.requested_stage }}
+        RUN_KEY: ${{ inputs.run_key }}
+        ACTOR: ${{ inputs.actor }}
+        TIMESTAMP: ${{ inputs.timestamp }}
+        ISSUE_TITLE: ${{ inputs.issue_title }}
+        PROJECT_ITEM_ID: ${{ inputs.project_item_id }}
+        FEEDBACK_SOURCE: ${{ inputs.feedback_source }}
+        FEEDBACK_BODY: ${{ inputs.feedback_body }}
+      run: |
+        set -euo pipefail
+
+        args=(
+          "repos/${GITHUB_REPOSITORY}/dispatches"
+          -f "event_type=orchestration-start"
+          -F "client_payload[issue_number]=$ISSUE_NUMBER"
+          -f "client_payload[requested_stage]=$REQUESTED_STAGE"
+          -f "client_payload[run_key]=$RUN_KEY"
+          -f "client_payload[actor]=$ACTOR"
+          -f "client_payload[timestamp]=$TIMESTAMP"
+        )
+
+        if [ -n "${ISSUE_TITLE:-}" ]; then
+          args+=(-f "client_payload[issue_title]=$ISSUE_TITLE")
+        fi
+
+        if [ -n "${PROJECT_ITEM_ID:-}" ]; then
+          args+=(-f "client_payload[project_item_id]=$PROJECT_ITEM_ID")
+        fi
+
+        if [ -n "${FEEDBACK_SOURCE:-}" ]; then
+          args+=(-f "client_payload[feedback_source]=$FEEDBACK_SOURCE")
+        fi
+
+        if [ -n "${FEEDBACK_BODY:-}" ]; then
+          args+=(-f "client_payload[feedback_body]=$FEEDBACK_BODY")
+        fi
+
+        gh api "${args[@]}" >/dev/null
+
+        echo "dispatched=true" >> "$GITHUB_OUTPUT"

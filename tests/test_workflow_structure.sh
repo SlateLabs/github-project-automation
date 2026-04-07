@@ -11,6 +11,7 @@ set -euo pipefail
 WORKFLOW=".github/workflows/orchestration-dispatch.yml"
 FOLLOW_UP_ACTION=".github/actions/capture-follow-ups/action.yml"
 CLOSEOUT_ACTION=".github/actions/scaffold-closeout/action.yml"
+DISPATCH_ACTION=".github/actions/dispatch-orchestration/action.yml"
 cd "$(git rev-parse --show-toplevel)"
 
 PASS=0
@@ -179,7 +180,8 @@ else
   check "next-stage resolution step present" "fail"
 fi
 
-if grep -q 'repos/${GITHUB_REPOSITORY}/dispatches' "$WORKFLOW"; then
+if grep -q 'uses: \./\.github/actions/dispatch-orchestration' "$WORKFLOW" && \
+   grep -q 'repos/${GITHUB_REPOSITORY}/dispatches' "$DISPATCH_ACTION"; then
   check "next-stage repository_dispatch present" "pass"
 else
   check "next-stage repository_dispatch present" "fail"
@@ -195,13 +197,13 @@ else
   check "stage handoff map includes key transitions" "fail"
 fi
 
-if grep -Fq 'client_payload[project_item_id]' "$WORKFLOW"; then
+if grep -Fq 'client_payload[project_item_id]' "$DISPATCH_ACTION"; then
   check "handoff preserves project_item_id in repository_dispatch" "pass"
 else
   check "handoff preserves project_item_id in repository_dispatch" "fail"
 fi
 
-if grep -Fq 'client_payload[feedback_source]=agent' "$WORKFLOW"; then
+if grep -Fq 'client_payload[feedback_source]' "$DISPATCH_ACTION"; then
   check "feedback source is preserved for agent loops" "pass"
 else
   check "feedback source is preserved for agent loops" "fail"

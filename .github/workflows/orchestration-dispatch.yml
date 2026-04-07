@@ -2803,55 +2803,18 @@ jobs:
       - name: Dispatch next stage
         if: steps.resolve.outputs.next_stage != '' && needs.intake.outputs.project_item_id != '' && steps.app-token.outcome == 'success'
         id: dispatch
-        shell: bash
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
-          ACTOR: ${{ needs.intake.outputs.actor }}
-          NEXT_STAGE: ${{ steps.resolve.outputs.next_stage }}
-          NEXT_RUN_KEY: ${{ steps.next-run-key.outputs.run_key }}
-          NEXT_TIMESTAMP: ${{ steps.next-run-key.outputs.timestamp }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          RUN_ID: ${{ github.run_id }}
-          PROJECT_ITEM_ID: ${{ needs.intake.outputs.project_item_id }}
-          ISSUE_TITLE: ${{ needs.intake.outputs.issue_title }}
-          REVIEW_DISPOSITION: ${{ needs.gate.outputs.review_disposition }}
-          REVIEW_FEEDBACK_BODY: ${{ needs.gate.outputs.review_feedback_body }}
-          FEEDBACK_BODY: ${{ needs.intake.outputs.feedback_body }}
-          FEEDBACK_SOURCE: ${{ needs.intake.outputs.feedback_source }}
-        run: |
-          set -euo pipefail
-
-          args=(
-            "repos/${GITHUB_REPOSITORY}/dispatches"
-            -f event_type=orchestration-start
-            -F "client_payload[issue_number]=$ISSUE_NUMBER"
-            -f "client_payload[issue_title]=$ISSUE_TITLE"
-            -f "client_payload[requested_stage]=$NEXT_STAGE"
-            -f "client_payload[run_key]=$NEXT_RUN_KEY"
-            -f "client_payload[actor]=$ACTOR"
-            -f "client_payload[timestamp]=$NEXT_TIMESTAMP"
-            -f "client_payload[project_item_id]=$PROJECT_ITEM_ID"
-          )
-
-          if [ "$NEXT_STAGE" = "feedback-implementation" ]; then
-            args+=(
-              -f "client_payload[feedback_source]=agent"
-            )
-            if [ -n "${REVIEW_FEEDBACK_BODY:-}" ]; then
-              args+=(-f "client_payload[feedback_body]=$REVIEW_FEEDBACK_BODY")
-            fi
-          elif [ -n "${FEEDBACK_SOURCE:-}" ]; then
-            args+=(-f "client_payload[feedback_source]=$FEEDBACK_SOURCE")
-            if [ -n "${FEEDBACK_BODY:-}" ]; then
-              args+=(-f "client_payload[feedback_body]=$FEEDBACK_BODY")
-            fi
-          fi
-
-          gh api "${args[@]}" \
-            >/dev/null
-
-          echo "dispatched=true" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/dispatch-orchestration
+        with:
+          github_token: ${{ steps.app-token.outputs.token }}
+          issue_number: ${{ needs.intake.outputs.issue_number }}
+          requested_stage: ${{ steps.resolve.outputs.next_stage }}
+          run_key: ${{ steps.next-run-key.outputs.run_key }}
+          actor: ${{ needs.intake.outputs.actor }}
+          timestamp: ${{ steps.next-run-key.outputs.timestamp }}
+          issue_title: ${{ needs.intake.outputs.issue_title }}
+          project_item_id: ${{ needs.intake.outputs.project_item_id }}
+          feedback_source: ${{ steps.resolve.outputs.next_stage == 'feedback-implementation' && 'agent' || needs.intake.outputs.feedback_source }}
+          feedback_body: ${{ steps.resolve.outputs.next_stage == 'feedback-implementation' && needs.gate.outputs.review_feedback_body || needs.intake.outputs.feedback_body }}
 
       - name: Post next-stage queued comment
         if: steps.dispatch.outputs.dispatched == 'true'

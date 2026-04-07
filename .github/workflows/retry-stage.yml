@@ -88,24 +88,13 @@ jobs:
           echo "::error::Issue is not eligible for retry: $REASON"
           exit 1
 
-      - name: Dispatch canonical orchestrator
+      - name: Map retry target to canonical stage
         if: steps.eligibility.outputs.eligible == 'true'
-        id: dispatch
+        id: map-stage
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          ISSUE_NUMBER: ${{ inputs.issue_number }}
           TARGET_STAGE: ${{ inputs.target_stage }}
-          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          ACTOR: ${{ github.actor }}
-          RUN_ID: ${{ github.run_id }}
         shell: bash
         run: |
-          set -euo pipefail
-
-          # Map target_stage to the canonical orchestration requested_stage.
           case "$TARGET_STAGE" in
             design)
               requested_stage="design"
@@ -127,22 +116,33 @@ jobs:
               exit 1
               ;;
           esac
+          echo "requested_stage=$requested_stage" >> "$GITHUB_OUTPUT"
 
-          timestamp=$(printf '%s' "$RUN_KEY" | rev | cut -d/ -f1 | rev)
-          echo "::notice::Dispatching orchestration-dispatch.yml for issue #$ISSUE_NUMBER (stage: $requested_stage, run key: $RUN_KEY)"
+      - name: Dispatch canonical orchestrator
+        if: steps.eligibility.outputs.eligible == 'true'
+        id: dispatch
+        uses: ./.github/actions/dispatch-orchestration
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          issue_number: ${{ inputs.issue_number }}
+          requested_stage: ${{ steps.map-stage.outputs.requested_stage }}
+          run_key: ${{ steps.run-key.outputs.run_key }}
+          actor: ${{ github.actor }}
+          timestamp: ${{ steps.run-key.outputs.timestamp }}
 
-          gh api \
-            --method POST \
-            "repos/${GITHUB_REPOSITORY}/dispatches" \
-            -f "event_type=orchestration-start" \
-            -F "client_payload[issue_number]=$ISSUE_NUMBER" \
-            -f "client_payload[requested_stage]=$requested_stage" \
-            -f "client_payload[run_key]=$RUN_KEY" \
-            -f "client_payload[actor]=$ACTOR" \
-            -f "client_payload[timestamp]=$timestamp" 2>&1 || {
-            echo "::error::Failed to dispatch orchestration-dispatch.yml"
-
-            gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
+      - name: Post retry dispatch failure
+        if: failure() && steps.eligibility.outputs.eligible == 'true' && steps.dispatch.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          TARGET_STAGE: ${{ inputs.target_stage }}
+          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ACTOR: ${{ github.actor }}
+          RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Retry stage — dispatch failed
           <!-- gpa:run-status:$TARGET_STAGE:failed:$RUN_KEY -->
 
@@ -155,14 +155,21 @@ jobs:
           | **Result** | :x: Failed to dispatch orchestrator |
           | **Actions run** | [$RUN_ID]($RUN_URL) |
           COMMENT_EOF
-            )"
-            exit 1
-          }
+          )"
 
-          echo "workflow_file=orchestration-dispatch.yml" >> "$GITHUB_OUTPUT"
-          echo "requested_stage=$requested_stage" >> "$GITHUB_OUTPUT"
-
-          # Post retry dispatched comment
+      - name: Post retry dispatched comment
+        if: steps.dispatch.outputs.dispatched == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          TARGET_STAGE: ${{ inputs.target_stage }}
+          REQUESTED_STAGE: ${{ steps.map-stage.outputs.requested_stage }}
+          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ACTOR: ${{ github.actor }}
+          RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Retry stage — dispatched
           <!-- gpa:run-status:$TARGET_STAGE:started:$RUN_KEY -->
@@ -176,7 +183,7 @@ jobs:
           | **Result** | :arrows_counterclockwise: Retry dispatched |
           | **Actions run** | [$RUN_ID]($RUN_URL) |
 
-          The canonical orchestrator has been dispatched for issue #$ISSUE_NUMBER with \`requested_stage: $requested_stage\`.
+          The canonical orchestrator has been dispatched for issue #$ISSUE_NUMBER with \`requested_stage: $REQUESTED_STAGE\`.
           Check the Actions tab for the dispatched run status.
           COMMENT_EOF
           )"
@@ -196,7 +203,7 @@ jobs:
           ELIGIBLE: ${{ steps.eligibility.outputs.eligible }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           TARGET_STAGE: ${{ inputs.target_stage }}
-          WORKFLOW_FILE: ${{ steps.dispatch.outputs.workflow_file }}
+          WORKFLOW_FILE: orchestration-dispatch.yml
           ACTOR: ${{ github.actor }}
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -222,7 +229,7 @@ jobs:
             echo "| Target stage | \`$TARGET_STAGE\` |"
             echo "| Actor | $ACTOR |"
             echo "| Eligible | $ELIGIBLE |"
-            echo "| Dispatched workflow | ${WORKFLOW_FILE:-n/a} |"
+            echo "| Dispatched workflow | $WORKFLOW_FILE |"
             echo ""
             echo "### Next steps"
             echo ""
