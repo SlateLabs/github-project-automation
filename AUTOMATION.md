@@ -135,6 +135,8 @@ Issue [#19](https://github.com/SlateLabs/github-project-automation/issues/19) sh
 
 Both paths converge on the same orchestration workflow (`orchestration-dispatch.yml`). An input normalization step at the top of the workflow resolves inputs from either `workflow_dispatch` inputs or `repository_dispatch` client_payload, so all downstream steps (dedup, eligibility, gate checks, scaffolds, comments) execute identically regardless of trigger source.
 
+The manual `workflow_dispatch` entrypoint intentionally exposes a smaller public stage vocabulary: `kickoff`, `clarification`, `design`, `plan`, `execution`, `agent-review`, `follow-up-capture`, `merge`, and `closeout`. Internal recovery/holding stages such as `feedback-implementation` and `deploy-review` are still accepted on the `repository_dispatch` lane for automated handoff, but they are no longer first-class manual options.
+
 ## Artifact-first contract
 
 The orchestration system uses a deliberately small machine contract:
@@ -249,7 +251,7 @@ The orchestration workflow accepts `repository_dispatch` events with `event_type
 |-------|------|------------|
 | `issue_number` | integer | Positive integer (`>= 1`) |
 | `issue_title` | string | Optional; used for workflow run naming when present |
-| `requested_stage` | string | One of: `kickoff`, `clarification`, `design`, `plan`, `execution`, `follow-up-capture`, `review`, `merge`, `closeout` |
+| `requested_stage` | string | One of: `kickoff`, `clarification`, `design`, `plan`, `execution`, `agent-review`, `feedback-implementation`, `deploy-review`, `follow-up-capture`, `merge`, `closeout` |
 | `run_key` | string | Canonical format `<owner>/<repo>/<number>/<stage>/<timestamp>` — must be payload-consistent (see below) |
 | `actor` | string | Non-empty |
 | `timestamp` | string | Non-empty |
@@ -858,7 +860,7 @@ All three gates support `GATE-WAIVER` override by trusted actors (per `config/tr
 |--------|-----|
 | View run status | Check automation comment on the issue, or Actions run |
 | Query run history | Use the `query-run-history` action (see [Run history](#query-run-history) below) |
-| Run a stage manually | `gh workflow run orchestration-dispatch.yml -f issue_number=<N> -f requested_stage=<stage>` |
+| Run a stage manually | `gh workflow run orchestration-dispatch.yml -f issue_number=<N> -f requested_stage=<stage>` using the public manual stages: `kickoff`, `clarification`, `design`, `plan`, `execution`, `agent-review`, `follow-up-capture`, `merge`, `closeout` |
 | Retry failed run | `gh workflow run retry-stage.yml -f issue_number=<N> -f target_stage=<stage>` |
 | Waive a gate | Post `GATE-WAIVER: <gate-name> — <reason>` on the issue/PR |
 | Block automation | Add `do-not-automate` label to the issue |

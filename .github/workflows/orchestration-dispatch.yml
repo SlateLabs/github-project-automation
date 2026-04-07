@@ -27,8 +27,6 @@ on:
           - plan
           - execution
           - agent-review
-          - deploy-review
-          - feedback-implementation
           - follow-up-capture
           - merge
           - closeout
@@ -339,39 +337,7 @@ jobs:
             echo "::notice::No GitHub App token available for project item recovery"
             exit 0
           fi
-
-          owner="${GITHUB_REPOSITORY_OWNER}"
-          repo="${GITHUB_REPOSITORY#*/}"
-          query=$(cat <<'GRAPHQL'
-          query($owner: String!, $repo: String!, $number: Int!) {
-            repository(owner: $owner, name: $repo) {
-              issue(number: $number) {
-                projectItems(first: 20) {
-                  nodes {
-                    id
-                    project {
-                      ... on ProjectV2 {
-                        id
-                        title
-                        closed
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-          GRAPHQL
-          )
-
-          payload=$(gh api graphql -f query="$query" -f owner="$owner" -f repo="$repo" -F number="$ISSUE_NUMBER")
-          recovered_id=$(echo "$payload" | jq -r '
-            .data.repository.issue.projectItems.nodes
-            | map(select(.project.closed == false))
-            | (map(select(.project.title == "Workflow Orchestration")) + .)
-            | map(.id)
-            | .[0] // ""
-          ')
+          recovered_id=$(python3 scripts/recover_project_item.py --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER")
 
           echo "project_item_id=$recovered_id" >> "$GITHUB_OUTPUT"
           if [ -n "$recovered_id" ]; then
@@ -469,22 +435,7 @@ jobs:
 
           if [ "$duplicate" = "true" ]; then
             echo "::warning::Skipping: a recent run for this issue/stage completed within the ${DEDUP_WINDOW_SECONDS}s dedup window"
-            gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-          ### Orchestration run — skipped (duplicate)
-          <!-- gpa:run-status:$REQUESTED_STAGE:skipped:$RUN_KEY -->
-
-          | Field | Value |
-          |-------|-------|
-          | **Run key** | \`$RUN_KEY\` |
-          | **Requested stage** | \`$REQUESTED_STAGE\` |
-          | **Actor** | @$ACTOR |
-          | **Result** | :fast_forward: Skipped — recent run detected |
-          | **Actions run** | [$RUN_ID]($RUN_URL) |
-
-          A successful run for this issue/stage completed within the last ${DEDUP_WINDOW_SECONDS}s.
-          Re-trigger after the dedup window expires, or post \`GATE-WAIVER: dedup — <reason>\` to force.
-          COMMENT_EOF
-            )"
+            gh issue comment "$ISSUE_NUMBER" --body "$(python3 scripts/render_orchestration_comment.py duplicate)"
           fi
 
       - name: Validate eligibility
@@ -510,20 +461,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
         shell: bash
         run: |
-          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-          ### Orchestration run — ineligible
-          <!-- gpa:run-status:$REQUESTED_STAGE:failed:$RUN_KEY -->
-
-          | Field | Value |
-          |-------|-------|
-          | **Run key** | \`$RUN_KEY\` |
-          | **Requested stage** | \`$REQUESTED_STAGE\` |
-          | **Actor** | @$ACTOR |
-          | **Result** | :x: Ineligible |
-          | **Reason** | $REASON |
-          | **Actions run** | [$RUN_ID]($RUN_URL) |
-          COMMENT_EOF
-          )"
+          gh issue comment "$ISSUE_NUMBER" --body "$(python3 scripts/render_orchestration_comment.py ineligible)"
 
       - name: Fail on ineligible
         if: steps.dedup.outputs.duplicate != 'true' && steps.eligibility.outputs.eligible != 'true'
@@ -534,10 +472,41 @@ jobs:
           echo "::error::Issue is not eligible: $REASON"
           exit 1
 
+  stage_design:
+    needs: intake
+    if: needs.intake.outputs.duplicate != 'true' && needs.intake.outputs.requested_stage == 'design'
+    uses: ./.github/workflows/run-design-stage.yml
+    with:
+      issue_number: ${{ needs.intake.outputs.issue_number }}
+      issue_title: ${{ needs.intake.outputs.issue_title }}
+      issue_body: ${{ needs.intake.outputs.issue_body }}
+      run_key: ${{ needs.intake.outputs.run_key }}
+      actor: ${{ needs.intake.outputs.actor }}
+      orchestration_app_id: ${{ vars.ORCHESTRATION_APP_ID }}
+    secrets:
+      github_token: ${{ secrets.GITHUB_TOKEN }}
+      openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+      orchestration_app_private_key: ${{ secrets.ORCHESTRATION_APP_PRIVATE_KEY }}
+
+  stage_plan:
+    needs: intake
+    if: needs.intake.outputs.duplicate != 'true' && needs.intake.outputs.requested_stage == 'plan'
+    uses: ./.github/workflows/run-plan-stage.yml
+    with:
+      issue_number: ${{ needs.intake.outputs.issue_number }}
+      issue_title: ${{ needs.intake.outputs.issue_title }}
+      issue_body: ${{ needs.intake.outputs.issue_body }}
+      run_key: ${{ needs.intake.outputs.run_key }}
+      actor: ${{ needs.intake.outputs.actor }}
+    secrets:
+      github_token: ${{ secrets.GITHUB_TOKEN }}
+      openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+
   # ── gate ────────────────────────────────────────────────────────────
   # Create artifacts, evaluate gates, and record stage advancement.
   gate:
-    needs: intake
+    needs: [intake, stage_design, stage_plan]
     if: needs.intake.outputs.duplicate != 'true'
     runs-on: ubuntu-latest
     outputs:
@@ -552,31 +521,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Validate stage agent credentials
-        if: needs.intake.outputs.requested_stage == 'design' || needs.intake.outputs.requested_stage == 'plan'
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ORCHESTRATION_APP_ID: ${{ vars.ORCHESTRATION_APP_ID }}
-          ORCHESTRATION_APP_PRIVATE_KEY: ${{ secrets.ORCHESTRATION_APP_PRIVATE_KEY }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          [ -n "$OPENAI_API_KEY" ] || { echo "::error::Agent authoring requires secrets.OPENAI_API_KEY"; exit 1; }
-          [ -n "$ANTHROPIC_API_KEY" ] || { echo "::error::Agent review requires secrets.ANTHROPIC_API_KEY"; exit 1; }
-          [ -n "$ORCHESTRATION_APP_ID" ] || { echo "::error::Agent review publishing requires vars.ORCHESTRATION_APP_ID"; exit 1; }
-          [ -n "$ORCHESTRATION_APP_PRIVATE_KEY" ] || { echo "::error::Agent review publishing requires secrets.ORCHESTRATION_APP_PRIVATE_KEY"; exit 1; }
-
-      - name: Create orchestration app token (design review)
-        if: needs.intake.outputs.requested_stage == 'design' && vars.ORCHESTRATION_APP_ID != ''
-        id: design-app-token
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ vars.ORCHESTRATION_APP_ID }}
-          private-key: ${{ secrets.ORCHESTRATION_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
 
       - name: Scaffold clarification issue body (pre-gate)
         if: needs.intake.outputs.requested_stage == 'clarification'
@@ -612,648 +556,6 @@ jobs:
           else
             echo "::notice::Issue body already satisfies clarification scaffold defaults"
           fi
-
-      # For the design stage, scaffold the discussion BEFORE the gate check.
-      # The gate validates discussion quality (headings, open questions, review)
-      # against the existing or just-created discussion.
-      - name: Scaffold design discussion (pre-gate)
-        if: needs.intake.outputs.requested_stage == 'design'
-        id: scaffold-discussion
-        uses: ./.github/actions/scaffold-design-discussion
-        with:
-          issue_number: ${{ needs.intake.outputs.issue_number }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          run_key: ${{ needs.intake.outputs.run_key }}
-          actor: ${{ needs.intake.outputs.actor }}
-
-      - name: Load design discussion context
-        if: needs.intake.outputs.requested_stage == 'design'
-        id: design-context
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DISCUSSION_NUMBER: ${{ steps.scaffold-discussion.outputs.discussion_number }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          discussion_query=$(cat <<'GRAPHQL'
-          query($owner: String!, $name: String!, $number: Int!) {
-            repository(owner: $owner, name: $name) {
-              discussion(number: $number) {
-                id
-                body
-              }
-            }
-          }
-          GRAPHQL
-          )
-
-          owner="${GITHUB_REPOSITORY_OWNER}"
-          repo="${GITHUB_REPOSITORY#*/}"
-          discussion_json=$(gh api graphql -f query="$discussion_query" -f owner="$owner" -f name="$repo" -F number="$DISCUSSION_NUMBER")
-          discussion_id=$(echo "$discussion_json" | jq -r '.data.repository.discussion.id // empty')
-          current_body=$(echo "$discussion_json" | jq -r '.data.repository.discussion.body // ""')
-
-          if [ -z "$discussion_id" ]; then
-            echo "::error::Could not resolve discussion #$DISCUSSION_NUMBER for design hydration"
-            exit 1
-          fi
-
-          {
-            echo "discussion_id=$discussion_id"
-            echo 'discussion_body<<EOF'
-            printf '%s\n' "$current_body"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Prepare Codex design prompt
-        if: needs.intake.outputs.requested_stage == 'design'
-        id: design-author-prompt
-        env:
-          ISSUE_TITLE: ${{ needs.intake.outputs.issue_title }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
-          ISSUE_BODY: ${{ needs.intake.outputs.issue_body }}
-          DISCUSSION_BODY: ${{ steps.design-context.outputs.discussion_body }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          prompt_file="$RUNNER_TEMP/design-author-prompt.md"
-          cat > "$prompt_file" <<EOF
-          You are Codex acting as the design author for a GitHub workflow orchestration system.
-
-          Task:
-          - Produce a complete replacement body for the GitHub discussion associated with issue #$ISSUE_NUMBER.
-          - The output must be valid Markdown only. Do not wrap it in code fences.
-          - Keep the owned-artifact marker and source-issue lines.
-          - Replace placeholder text with substantive content derived from the issue.
-          - Resolve every open question by either answering it directly in the proposal or marking it \`DEFERRED-TO-PLAN\`.
-          - Make the design specific enough that the next \`plan\` stage can proceed without operator clarification.
-          - Do not invent unrelated scope or infrastructure not implied by the issue.
-
-          Required structure:
-          - # Design Discussion: <issue title>
-          - owned-artifact marker comment
-          - source issue lines
-          - ## Summary
-          - ## Problem
-          - ## Goals
-          - ## Non-goals
-          - ## Proposed Approach
-          - ## Open Questions
-          - ## Exit Criteria
-
-          Guidance:
-          - The proposal should preserve the issue's intent and acceptance criteria.
-          - Prefer concrete workflow/state-machine changes over abstract architecture prose.
-          - For open questions that are better answered later, mark them \`DEFERRED-TO-PLAN\`.
-          - The exit criteria checklist should be marked complete if the generated body itself satisfies the design gate.
-
-          Source issue title:
-          $ISSUE_TITLE
-
-          Source issue body:
-          ---
-          $ISSUE_BODY
-          ---
-
-          Existing discussion body:
-          ---
-          $DISCUSSION_BODY
-          ---
-          EOF
-          echo "prompt_file=$prompt_file" >> "$GITHUB_OUTPUT"
-
-      - name: Codex author design proposal
-        if: needs.intake.outputs.requested_stage == 'design'
-        id: codex-design
-        uses: openai/codex-action@v1
-        with:
-          prompt-file: ${{ steps.design-author-prompt.outputs.prompt_file }}
-          output-file: ${{ runner.temp }}/design-discussion.md
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          sandbox: workspace-write
-          model: ${{ vars.ORCHESTRATION_CODEX_MODEL }}
-          effort: ${{ vars.ORCHESTRATION_CODEX_EFFORT }}
-          allow-bots: true
-
-      - name: Normalize design open questions
-        if: needs.intake.outputs.requested_stage == 'design'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          draft_file="$RUNNER_TEMP/design-discussion.md"
-          [ -s "$draft_file" ] || { echo "::error::Codex did not produce a design discussion draft"; exit 1; }
-
-          python3 scripts/normalize_design_open_questions.py < "$draft_file" > "$draft_file.normalized"
-          mv "$draft_file.normalized" "$draft_file"
-
-      - name: Apply Codex design draft
-        if: needs.intake.outputs.requested_stage == 'design'
-        env:
-          GH_TOKEN: ${{ steps.design-app-token.outputs.token }}
-          DISCUSSION_ID: ${{ steps.design-context.outputs.discussion_id }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          draft_file="$RUNNER_TEMP/design-discussion.md"
-          [ -s "$draft_file" ] || { echo "::error::Codex did not produce a design discussion draft"; exit 1; }
-          new_body="$(cat "$draft_file")"
-
-          mutation=$(cat <<'GRAPHQL'
-          mutation($discussionId: ID!, $body: String!) {
-            updateDiscussion(input: {discussionId: $discussionId, body: $body}) {
-              discussion {
-                id
-              }
-            }
-          }
-          GRAPHQL
-          )
-
-          gh api graphql -f query="$mutation" -F discussionId="$DISCUSSION_ID" -f body="$new_body" >/dev/null
-          echo "::notice::Codex authored design discussion draft"
-
-      - name: Prepare Claude design review prompt
-        if: needs.intake.outputs.requested_stage == 'design'
-        id: design-review-prompt
-        env:
-          ISSUE_TITLE: ${{ needs.intake.outputs.issue_title }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
-          ISSUE_BODY: ${{ needs.intake.outputs.issue_body }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-
-          discussion_body = Path(os.environ["RUNNER_TEMP"], "design-discussion.md").read_text()
-          prompt = f"""Review the following design discussion for issue #{os.environ["ISSUE_NUMBER"]} and produce structured JSON only.
-
-          Review goals:
-          - Check whether the design is coherent, specific, and aligned to the source issue.
-          - Prefer actionable critique over generic praise.
-          - If the design is good enough for planning, say so clearly.
-          - The review comment should read like a concise review from a second agent, not an approval checkbox dump.
-          - Do not ask the operator to do work unless absolutely necessary.
-          - Reply with markdown only. Do not wrap the response in JSON, YAML, or code fences.
-          - Start the comment with `gpa:design-review:auto`.
-
-          Source issue title:
-          {os.environ["ISSUE_TITLE"]}
-
-          Source issue body:
-          ---
-          {os.environ["ISSUE_BODY"]}
-          ---
-
-          Proposed design discussion:
-          ---
-          {discussion_body}
-          ---
-          """
-
-          github_output = Path(os.environ["GITHUB_OUTPUT"])
-          with github_output.open("a") as fh:
-              fh.write("prompt<<EOF\n")
-              fh.write(prompt)
-              if not prompt.endswith("\n"):
-                  fh.write("\n")
-              fh.write("EOF\n")
-          PY
-
-      - name: Post automated design review comment (pre-gate)
-        if: needs.intake.outputs.requested_stage == 'design' && steps.design-app-token.outcome == 'success'
-        id: claude-design-review
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          prompt: ${{ steps.design-review-prompt.outputs.prompt }}
-          show_full_output: ${{ vars.ORCHESTRATION_CLAUDE_SHOW_FULL_OUTPUT == 'true' }}
-          claude_args: >-
-            --max-turns 1
-          allowed_bots: "*"
-
-      - name: Publish Claude design review comment (pre-gate)
-        if: needs.intake.outputs.requested_stage == 'design' && steps.design-app-token.outcome == 'success'
-        env:
-          GH_TOKEN: ${{ steps.design-app-token.outputs.token }}
-          DISCUSSION_NUMBER: ${{ steps.scaffold-discussion.outputs.discussion_number }}
-          REVIEW_EXECUTION_FILE: ${{ steps.claude-design-review.outputs.execution_file }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          query=$(cat <<'GRAPHQL'
-          query($owner: String!, $name: String!, $number: Int!) {
-            repository(owner: $owner, name: $name) {
-              discussion(number: $number) {
-                id
-                comments(first: 20) {
-                  nodes {
-                    body
-                  }
-                }
-              }
-            }
-          }
-          GRAPHQL
-          )
-
-          owner="${GITHUB_REPOSITORY_OWNER}"
-          repo="${GITHUB_REPOSITORY#*/}"
-          discussion_json=$(gh api graphql -f query="$query" -f owner="$owner" -f name="$repo" -F number="$DISCUSSION_NUMBER")
-          discussion_id=$(echo "$discussion_json" | jq -r '.data.repository.discussion.id // empty')
-
-          existing_review=$(echo "$discussion_json" | jq -r '.data.repository.discussion.comments.nodes[].body // ""' | grep -F 'gpa:design-review:auto' || true)
-          if [ -n "$existing_review" ]; then
-            echo "::notice::Automated design review comment already exists; skipping"
-            exit 0
-          fi
-
-          if [ -z "${REVIEW_EXECUTION_FILE:-}" ] || [ ! -f "$REVIEW_EXECUTION_FILE" ]; then
-            echo "::error::Claude design review did not produce an execution file"
-            exit 1
-          fi
-
-          review_body=$(
-            jq -rs -r '
-              map(if type == "array" then .[] else . end)
-              | map(select(.type == "result" and .subtype == "success"))[-1].result // ""
-            ' "$REVIEW_EXECUTION_FILE"
-          )
-          review_body=$(printf '%s' "$review_body" | perl -0pe 's/\A```[a-zA-Z0-9_-]*\n//; s/\n```\s*\z/\n/s')
-          if [ -z "$review_body" ]; then
-            echo "::error::Claude design review did not produce a comment body"
-            exit 1
-          fi
-
-          mutation=$(cat <<'GRAPHQL'
-          mutation($discussionId: ID!, $body: String!) {
-            addDiscussionComment(input: {discussionId: $discussionId, body: $body}) {
-              comment {
-                id
-              }
-            }
-          }
-          GRAPHQL
-          )
-
-          gh api graphql -f query="$mutation" -F discussionId="$discussion_id" -f body="$review_body" >/dev/null
-          echo "::notice::Posted automated design review comment to discussion #$DISCUSSION_NUMBER"
-
-      # For the plan stage, scaffold the plan comment BEFORE the gate check.
-      # The gate validates plan structure (headings, checklists, review expectations)
-      # against the existing or just-created plan comment.
-      - name: Scaffold implementation plan (pre-gate)
-        if: needs.intake.outputs.requested_stage == 'plan'
-        id: scaffold-plan
-        uses: ./.github/actions/scaffold-impl-plan
-        with:
-          issue_number: ${{ needs.intake.outputs.issue_number }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          run_key: ${{ needs.intake.outputs.run_key }}
-          actor: ${{ needs.intake.outputs.actor }}
-
-      - name: Load implementation plan context
-        if: needs.intake.outputs.requested_stage == 'plan'
-        id: plan-context
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          comments_json=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments?per_page=100")
-          repo_full="${GITHUB_REPOSITORY}"
-          owned_artifact_marker="gpa:owned-artifact:impl-plan:${repo_full}#${ISSUE_NUMBER}"
-
-          comment_id=$(echo "$comments_json" | jq -r --arg marker "$owned_artifact_marker" '
-            (map(select(.body | contains($marker))) + map(select(.body | test("(^|\\n)#{1,2}\\s+Implementation Plan"))))
-            | .[0].id // empty
-          ')
-          comment_body=$(echo "$comments_json" | jq -r --arg marker "$owned_artifact_marker" '
-            (map(select(.body | contains($marker))) + map(select(.body | test("(^|\\n)#{1,2}\\s+Implementation Plan"))))
-            | .[0].body // ""
-          ')
-
-          if [ -z "$comment_id" ]; then
-            echo "::error::Could not resolve implementation plan comment for issue #$ISSUE_NUMBER"
-            exit 1
-          fi
-
-          {
-            echo "comment_id=$comment_id"
-            echo 'comment_body<<EOF'
-            printf '%s\n' "$comment_body"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Load design discussion source for plan
-        if: needs.intake.outputs.requested_stage == 'plan'
-        id: plan-design-source
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          discussion_url=$(gh issue view "$ISSUE_NUMBER" --comments --json comments --jq '
-            .comments[]
-            | select(.body | contains("gpa:design-discussion:#'"$ISSUE_NUMBER"'"))
-            | .body
-          ' | grep -oE 'https://github\.com/[^/]+/[^/]+/discussions/[0-9]+' | head -1 || true)
-
-          if [ -z "$discussion_url" ]; then
-            {
-              echo "discussion_number="
-              echo 'discussion_body<<EOF'
-              echo
-              echo 'EOF'
-            } >> "$GITHUB_OUTPUT"
-            echo "::notice::No linked design discussion found for plan authoring context"
-            exit 0
-          fi
-
-          discussion_number=$(echo "$discussion_url" | grep -oE '[0-9]+$')
-          owner="${GITHUB_REPOSITORY_OWNER}"
-          repo="${GITHUB_REPOSITORY#*/}"
-          discussion_query=$(cat <<'GRAPHQL'
-          query($owner: String!, $name: String!, $number: Int!) {
-            repository(owner: $owner, name: $name) {
-              discussion(number: $number) {
-                body
-              }
-            }
-          }
-          GRAPHQL
-          )
-          discussion_json=$(gh api graphql -f query="$discussion_query" -f owner="$owner" -f name="$repo" -F number="$discussion_number")
-          discussion_body=$(echo "$discussion_json" | jq -r '.data.repository.discussion.body // ""')
-
-          {
-            echo "discussion_number=$discussion_number"
-            echo 'discussion_body<<EOF'
-            printf '%s\n' "$discussion_body"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Prepare Codex implementation plan prompt
-        if: needs.intake.outputs.requested_stage == 'plan'
-        id: plan-author-prompt
-        env:
-          ISSUE_TITLE: ${{ needs.intake.outputs.issue_title }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
-          ISSUE_BODY: ${{ needs.intake.outputs.issue_body }}
-          PLAN_BODY: ${{ steps.plan-context.outputs.comment_body }}
-          DESIGN_BODY: ${{ steps.plan-design-source.outputs.discussion_body }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          prompt_file="$RUNNER_TEMP/plan-author-prompt.md"
-          cat > "$prompt_file" <<EOF
-          You are Codex acting as the implementation planner for issue #$ISSUE_NUMBER.
-
-          Task:
-          - Produce a complete replacement body for the GitHub issue comment that holds the implementation plan.
-          - Output valid Markdown only. Do not wrap it in code fences.
-          - Preserve the owned-artifact marker and source issue lines.
-          - Replace placeholder text with substantive content derived from the issue and design discussion.
-          - Make the plan concrete enough that the execution stage can proceed autonomously with minimal operator input.
-          - Keep the work bounded; do not invent unrelated scope.
-
-          Required structure:
-          - # Implementation Plan: <issue title>
-          - owned-artifact marker comment
-          - source issue lines
-          - ## Implementation Plan
-          - ## Acceptance Criteria
-          - ## Verification Plan
-          - ## Review Expectations
-          - ## Slices
-          - ## Exit Criteria
-
-          Hard requirements:
-          - Acceptance Criteria must contain checklist items.
-          - Verification Plan must contain checklist items.
-          - Review Expectations must include explicit dispositions for Accessibility, Usability/content, Documentation, and Hygiene.
-          - Slices must be numbered and specific enough to execute in order.
-          - Exit Criteria may mark items complete when the generated plan itself satisfies them.
-
-          Source issue title:
-          $ISSUE_TITLE
-
-          Source issue body:
-          ---
-          $ISSUE_BODY
-          ---
-
-          Design discussion:
-          ---
-          $DESIGN_BODY
-          ---
-
-          Existing plan comment:
-          ---
-          $PLAN_BODY
-          ---
-          EOF
-          echo "prompt_file=$prompt_file" >> "$GITHUB_OUTPUT"
-
-      - name: Codex author implementation plan
-        if: needs.intake.outputs.requested_stage == 'plan'
-        id: codex-plan
-        uses: openai/codex-action@v1
-        with:
-          prompt-file: ${{ steps.plan-author-prompt.outputs.prompt_file }}
-          output-file: ${{ runner.temp }}/implementation-plan.md
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          sandbox: workspace-write
-          model: ${{ vars.ORCHESTRATION_CODEX_MODEL }}
-          effort: ${{ vars.ORCHESTRATION_CODEX_EFFORT }}
-          allow-bots: true
-
-      - name: Apply Codex implementation plan
-        if: needs.intake.outputs.requested_stage == 'plan'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          COMMENT_ID: ${{ steps.plan-context.outputs.comment_id }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          draft_file="$RUNNER_TEMP/implementation-plan.md"
-          [ -s "$draft_file" ] || { echo "::error::Codex did not produce an implementation plan draft"; exit 1; }
-          new_body="$(cat "$draft_file")"
-
-          gh api "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}" \
-            -X PATCH -f "body=${new_body}" >/dev/null
-          echo "::notice::Codex authored implementation plan comment"
-
-      - name: Prepare implementation plan review prompt
-        if: needs.intake.outputs.requested_stage == 'plan'
-        id: plan-review-prompt
-        env:
-          ISSUE_TITLE: ${{ needs.intake.outputs.issue_title }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
-          ISSUE_BODY: ${{ needs.intake.outputs.issue_body }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-
-          plan_body = Path(os.environ["RUNNER_TEMP"], "implementation-plan.md").read_text()
-          prompt = f"""Review the following implementation plan for issue #{os.environ["ISSUE_NUMBER"]}.
-
-          Review goals:
-          - Check whether the plan is bounded, executable, and aligned to the issue and design.
-          - Prefer actionable critique over generic praise.
-          - If the plan is good enough for execution, say so clearly.
-          - Reply with markdown only. Do not wrap the response in JSON, YAML, or code fences.
-          - Start the comment with `gpa:plan-review:auto`.
-          - Keep the review concise and execution-oriented.
-
-          Source issue title:
-          {os.environ["ISSUE_TITLE"]}
-
-          Source issue body:
-          ---
-          {os.environ["ISSUE_BODY"]}
-          ---
-
-          Proposed implementation plan:
-          ---
-          {plan_body}
-          ---
-          """
-
-          github_output = Path(os.environ["GITHUB_OUTPUT"])
-          with github_output.open("a") as fh:
-            fh.write("prompt<<EOF\n")
-            fh.write(prompt)
-            if not prompt.endswith("\n"):
-              fh.write("\n")
-            fh.write("EOF\n")
-          PY
-
-      - name: Call OpenAI implementation plan review
-        if: needs.intake.outputs.requested_stage == 'plan'
-        id: openai-plan-review
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          PLAN_REVIEW_PROMPT: ${{ steps.plan-review-prompt.outputs.prompt }}
-          OPENAI_MODEL: ${{ vars.ORCHESTRATION_CODEX_MODEL }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          [ -n "${OPENAI_API_KEY:-}" ] || { echo "::error::Missing OPENAI_API_KEY"; exit 1; }
-          model="${OPENAI_MODEL:-gpt-5}"
-          payload=$(jq -cn \
-            --arg model "$model" \
-            --arg input "$PLAN_REVIEW_PROMPT" \
-            '{model:$model,input:$input}')
-
-          response_file="$RUNNER_TEMP/plan-review-response.json"
-          http_code=$(curl -sS -o "$response_file" -w '%{http_code}' https://api.openai.com/v1/responses \
-            -H "Authorization: Bearer ${OPENAI_API_KEY}" \
-            -H 'Content-Type: application/json' \
-            -d "$payload")
-          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
-            echo "::error::OpenAI implementation plan review failed with HTTP $http_code"
-            cat "$response_file"
-            exit 1
-          fi
-
-          review_markdown=$(
-            jq -r '
-              [
-                .output[]
-                | select(.type == "message")
-                | .content[]
-                | select(.type == "output_text")
-                | .text
-              ] | join("\n")
-            ' "$response_file"
-          )
-
-          if [ -z "$review_markdown" ] || [ "$review_markdown" = "null" ]; then
-            echo "::error::OpenAI implementation plan review returned no output_text"
-            cat "$response_file"
-            exit 1
-          fi
-
-          review_markdown=$(printf '%s' "$review_markdown" | perl -0pe 's/\A```[a-zA-Z0-9_-]*\n//; s/\n```\s*\z/\n/s')
-
-          case "$review_markdown" in
-            gpa:plan-review:auto*) ;;
-            *)
-              echo "::error::Implementation plan review must start with gpa:plan-review:auto"
-              printf '%s\n' "$review_markdown"
-              exit 1
-              ;;
-          esac
-
-          {
-            echo 'review_body<<EOF'
-            printf '%s\n' "$review_markdown"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Publish implementation plan review comment (pre-gate)
-        if: needs.intake.outputs.requested_stage == 'plan'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
-          RUN_KEY: ${{ needs.intake.outputs.run_key }}
-          REVIEW_BODY: ${{ steps.openai-plan-review.outputs.review_body }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          comments_json=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments?per_page=100")
-          existing_review=$(echo "$comments_json" | jq -r --arg run_key "$RUN_KEY" '
-            .[] | select(.body | contains("gpa:plan-review:auto") and contains($run_key)) | .body
-          ')
-          if [ -n "$existing_review" ]; then
-            echo "::notice::Automated plan review comment already exists for this run; skipping"
-            exit 0
-          fi
-
-          if [ -z "${REVIEW_BODY:-}" ]; then
-            echo "::error::Implementation plan review did not produce a comment body"
-            exit 1
-          fi
-
-          artifact_payload=$(jq -cn \
-            --arg run_key "$RUN_KEY" \
-            '{
-              kind:"artifact_payload",
-              version:"gpa.v1",
-              run_key:$run_key,
-              stage:"plan-review",
-              data:{
-                decision:{
-                  next_stage:"execution",
-                  reason_codes:["plan_review_published"]
-                }
-              }
-            }')
-
-          review_body="<!-- gpa:run-status:plan-review:completed:${RUN_KEY} -->"$'\n'"<!-- gpa:artifact-payload:${artifact_payload} -->"$'\n\n'"${REVIEW_BODY}"
-          gh issue comment "$ISSUE_NUMBER" --body "$review_body" >/dev/null
-          echo "::notice::Posted automated plan review comment to issue #$ISSUE_NUMBER"
 
       - name: Validate execution agent credentials
         if: needs.intake.outputs.requested_stage == 'execution' || needs.intake.outputs.requested_stage == 'feedback-implementation'
@@ -1407,45 +709,7 @@ jobs:
           set -euo pipefail
 
           prompt_file="$RUNNER_TEMP/execution-author-prompt.md"
-          cat > "$prompt_file" <<EOF
-          You are Codex acting as the execution agent for issue #$ISSUE_NUMBER on branch $BRANCH_NAME.
-
-          Task:
-          - Implement the smallest coherent slice of the approved implementation plan directly in this repository.
-          - Make real code and/or workflow changes; do not stop at comments or placeholder files.
-          - Keep the change bounded to the issue and implementation plan.
-          - Update any repository files necessary for the change to be reviewable.
-          - Do not merge or open the PR yourself; the workflow will handle that.
-
-          Required outcomes:
-          - Leave the workspace with concrete file changes suitable for a review-ready PR.
-          - Prefer a thin but functional vertical slice over a broad partial rewrite.
-          - If the plan implies a new contract or docs that must change with code, update them now.
-
-          Stage:
-          $REQUESTED_STAGE
-
-          Source issue title:
-          $ISSUE_TITLE
-
-          Source issue body:
-          ---
-          $ISSUE_BODY
-          ---
-
-          Implementation plan:
-          ---
-          $PLAN_BODY
-          ---
-
-          Operator feedback to address (if any):
-          ---
-          $FEEDBACK_BODY
-          ---
-
-          Feedback source:
-          $FEEDBACK_SOURCE
-          EOF
+          python3 scripts/build_orchestration_prompt.py execution-author --output "$prompt_file"
           echo "prompt_file=$prompt_file" >> "$GITHUB_OUTPUT"
 
       - name: Codex implement execution slice
@@ -1624,78 +888,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          from pathlib import Path
-          import os
-
-          diff_text = Path(os.environ["DIFF_FILE"]).read_text()
-          prompt = f"""You are the autonomous agent reviewer for issue #{os.environ["ISSUE_NUMBER"]}.
-
-          Review the proposed implementation and write markdown to the repository file `{os.environ["REVIEW_FILE"]}`.
-
-          Required file structure:
-          - Include exactly one HTML comment line in this format:
-            `<!-- gpa:artifact-payload:<json> -->`
-          - JSON must use this envelope:
-            - `kind`: `artifact_payload`
-            - `version`: `gpa.v1`
-            - `stage`: `agent-review`
-            - `data.disposition`: one of `auto-approve`, `rework-required`, `operator-review-required`
-            - `data.decision.next_stage`: one of `merge`, `feedback-implementation`, `deploy-review`
-            - `data.decision.reason_codes`: non-empty array of machine-readable reason codes
-          - Then a blank line
-          - Then a section `## Summary`
-          - Then a short paragraph
-          - Then a section `## Feedback`
-          - Then markdown bullets or short paragraphs for the next actor
-
-          Decision rules:
-          - Use "auto-approve" when the PR is coherent, bounded, and safe to merge without operator review.
-          - Use "rework-required" when the automation should make another implementation pass on its own.
-          - Use "operator-review-required" only for exceptional situations: unresolved product ambiguity, risky/destructive changes, security/permission concerns, missing deployability where user interaction is required, or changes that require a human judgment call.
-          - Keep disposition and decision.next_stage consistent:
-            - auto-approve -> merge
-            - rework-required -> feedback-implementation
-            - operator-review-required -> deploy-review
-          - Default to "auto-approve" unless there is a concrete reason not to.
-          - Do not ask for operator review just because the change is incomplete; prefer "rework-required" in that case.
-          - Do not modify any tracked repository files other than writing `{os.environ["REVIEW_FILE"]}`.
-          - Do not print the review in prose; write the file directly.
-
-          Issue title:
-          {os.environ["ISSUE_TITLE"]}
-
-          Issue body:
-          ---
-          {os.environ["ISSUE_BODY"]}
-          ---
-
-          PR title:
-          {os.environ["PR_TITLE"]}
-
-          PR URL:
-          {os.environ["PR_URL"]}
-
-          PR body:
-          ---
-          {os.environ["PR_BODY"]}
-          ---
-
-          Changed files:
-          ---
-          {os.environ["FILES_SUMMARY"]}
-          ---
-
-          Diff excerpt:
-          ---
-          {diff_text}
-          ---
-          """
-          print("prompt<<EOF")
-          print(prompt)
-          print("EOF")
-          PY
+          prompt_file="$RUNNER_TEMP/agent-review-prompt.md"
+          python3 scripts/build_orchestration_prompt.py agent-review --output "$prompt_file"
+          {
+            echo 'prompt<<EOF'
+            cat "$prompt_file"
+            echo
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Run Codex agent review
         if: needs.intake.outputs.requested_stage == 'agent-review'
@@ -1947,30 +1147,11 @@ jobs:
             --arg branch "$branch_name" \
             --arg deployment_url "$deployment_url" \
             '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,artifact_ref:$artifact_ref,branch:$branch,deployment_url:$deployment_url,next_stage:""}')
-
-          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-          ### Review-ready implementation
-          <!-- gpa:run-status:deploy-review:completed:$RUN_KEY -->
-          <!-- gpa:checkpoint $checkpoint -->
-
-          | Field | Value |
-          |-------|-------|
-          | **Run key** | \`$RUN_KEY\` |
-          | **Actor** | @$ACTOR |
-          | **PR** | $pr_url |
-          | **Branch** | \`$branch_name\` |
-          | **Deployment URL** | $deployment_url |
-          | **Actions run** | [$RUN_ID]($RUN_URL) |
-
-          The implementation is ready for operator review.
-
-          To request changes, comment on this issue with:
-          \`gpa:feedback <what should change>\`
-
-          To approve and continue to merge/finalize, comment on this issue with:
-          \`gpa:approve\`
-          COMMENT_EOF
-          )"
+          export PR_URL="$pr_url"
+          export BRANCH_NAME="$branch_name"
+          export DEPLOYMENT_URL="$deployment_url"
+          export CHECKPOINT="$checkpoint"
+          gh issue comment "$ISSUE_NUMBER" --body "$(python3 scripts/render_orchestration_comment.py deploy-review-ready)"
 
       # For the closeout stage, enforce pre-scaffold prerequisites BEFORE
       # scaffolding. This preserves the same pre-scaffold/full-gate sequence that
@@ -2096,29 +1277,10 @@ jobs:
             --argjson unmet "${UNMET:-[]}" \
             --argjson waived "${WAIVED:-[]}" \
             '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,run_url:$run_url,unmet_conditions:$unmet,waived_conditions:$waived}')
-
-          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-          ### Orchestration run — gate not satisfied
-          <!-- gpa:run-status:$REQUESTED_STAGE:failed:$RUN_KEY -->
-          <!-- gpa:checkpoint $checkpoint -->
-
-          | Field | Value |
-          |-------|-------|
-          | **Run key** | \`$RUN_KEY\` |
-          | **Requested stage** | \`$REQUESTED_STAGE\` |
-          | **Actor** | @$ACTOR |
-          | **Result** | :warning: Gate conditions not met |
-          | **Actions run** | [$RUN_ID]($RUN_URL) |
-
-          **Unmet conditions:**
-          $unmet_list
-
-          **Waived conditions:**
-          $waived_list
-
-          To override, post a comment: \`GATE-WAIVER: <condition> — <reason>\` and re-trigger.
-          COMMENT_EOF
-          )"
+          export UNMET_LIST="$unmet_list"
+          export WAIVED_LIST="$waived_list"
+          export CHECKPOINT="$checkpoint"
+          gh issue comment "$ISSUE_NUMBER" --body "$(python3 scripts/render_orchestration_comment.py gate-failed)"
 
       - name: Fail on gate not passed
         if: steps.gate.outputs.gate_passed != 'true'
@@ -2158,20 +1320,8 @@ jobs:
 
           if [ -n "$mismatch" ]; then
             echo "::error::$mismatch"
-            gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-          ### Orchestration run — superseded (state mismatch)
-          <!-- gpa:run-status:$REQUESTED_STAGE:failed:$RUN_KEY -->
-
-          | Field | Value |
-          |-------|-------|
-          | **Run key** | \`$RUN_KEY\` |
-          | **Requested stage** | \`$REQUESTED_STAGE\` |
-          | **Actor** | @$ACTOR |
-          | **Result** | :stop_sign: Superseded — state changed during run |
-          | **Reason** | $mismatch |
-          | **Actions run** | [$RUN_ID]($RUN_URL) |
-          COMMENT_EOF
-            )"
+            export REASON="$mismatch"
+            gh issue comment "$ISSUE_NUMBER" --body "$(python3 scripts/render_orchestration_comment.py state-mismatch)"
             echo "state_valid=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
@@ -2277,35 +1427,7 @@ jobs:
           set -euo pipefail
 
           prompt_file="$RUNNER_TEMP/merge-conflict-resolution-prompt.md"
-          cat > "$prompt_file" <<EOF
-          You are Codex resolving merge conflicts on branch $BRANCH_NAME for issue #$ISSUE_NUMBER and PR #$PR_NUMBER.
-
-          The workflow attempted to merge origin/$BASE_REF into the feature branch before final merge and Git reported conflicts.
-
-          Required outcome:
-          - Resolve the merge conflicts in the repository working tree.
-          - Preserve the feature intent from the branch while incorporating the latest safe changes from origin/$BASE_REF.
-          - Leave the repository in a state where there are no unmerged files and the merge can be committed.
-
-          Constraints:
-          - Focus on the conflicted files first.
-          - Do not abandon the merge or reset the branch.
-          - Do not make unrelated refactors.
-          - Keep behavior coherent with the issue and the latest main-branch contracts.
-
-          Source issue title:
-          $ISSUE_TITLE
-
-          Source issue body:
-          ---
-          $ISSUE_BODY
-          ---
-
-          Conflicted files:
-          ---
-          $CONFLICT_FILES
-          ---
-          EOF
+          python3 scripts/build_orchestration_prompt.py merge-conflict --output "$prompt_file"
           echo "prompt_file=$prompt_file" >> "$GITHUB_OUTPUT"
 
       - name: Codex resolve merge conflicts
@@ -2378,25 +1500,8 @@ jobs:
             --arg reason "merge-sync-conflict" \
             --arg run_url "$RUN_URL" \
             '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,reason:$reason,run_url:$run_url,next_stage:"deploy-review"}')
-
-          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-          ### Merge requires conflict resolution
-          <!-- gpa:run-status:merge:failed:$RUN_KEY -->
-          <!-- gpa:checkpoint $checkpoint -->
-
-          | Field | Value |
-          |-------|-------|
-          | **Run key** | \`$RUN_KEY\` |
-          | **Actor** | @$ACTOR |
-          | **Result** | :warning: Automatic sync with \`main\` hit merge conflicts |
-          | **Actions run** | [$RUN_ID]($RUN_URL) |
-
-          The merge lane attempted to sync the feature branch with \`main\` before final merge, then attempted an automated conflict-resolution pass, but the branch still requires manual reconciliation.
-
-          Next step:
-          - re-run \`feedback-implementation\` to reconcile the branch against the latest \`main\`
-          COMMENT_EOF
-          )"
+          export CHECKPOINT="$checkpoint"
+          gh issue comment "$ISSUE_NUMBER" --body "$(python3 scripts/render_orchestration_comment.py merge-remediation)"
 
       - name: Fail on merge sync conflict
         if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync.outputs.sync_result == 'conflict' && steps.merge-conflict-resolution.outputs.resolution_result != 'resolved'
@@ -2508,23 +1613,10 @@ jobs:
               canonical_checkpoint_line="<!-- gpa:checkpoint-v1 $canonical_checkpoint -->"
               ;;
           esac
-
-          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-          ### Orchestration run — stage transition accepted
-          <!-- gpa:run-status:$REQUESTED_STAGE:completed:$RUN_KEY -->
-          $canonical_checkpoint_line
-          $checkpoint_line
-
-          | Field | Value |
-          |-------|-------|
-          | **Run key** | \`$RUN_KEY\` |
-          | **Requested stage** | \`$REQUESTED_STAGE\` |
-          | **Actor** | @$ACTOR |
-          | **Result** | :white_check_mark: Eligible and gate passed |
-          | **Actions run** | [$RUN_ID]($RUN_URL) |
-          $waived_section
-          COMMENT_EOF
-          )"
+          export CANONICAL_CHECKPOINT_LINE="$canonical_checkpoint_line"
+          export CHECKPOINT_LINE="$checkpoint_line"
+          export WAIVED_SECTION="$waived_section"
+          gh issue comment "$ISSUE_NUMBER" --body "$(python3 scripts/render_orchestration_comment.py stage-transition)"
 
       # Post-gate action: capture follow-ups after gate confirms markers exist
       # and execution is complete. Unlike pre-gate scaffolds, this runs AFTER
@@ -2679,92 +1771,15 @@ jobs:
           TARGET_STATUS: ${{ steps.resolve.outputs.target_status }}
         run: |
           set -euo pipefail
-
-          metadata_query=$(cat <<'GRAPHQL'
-          query($itemId: ID!) {
-            node(id: $itemId) {
-              ... on ProjectV2Item {
-                id
-                fieldValues(first: 20) {
-                  nodes {
-                    ... on ProjectV2ItemFieldSingleSelectValue {
-                      name
-                      field {
-                        ... on ProjectV2FieldCommon {
-                          name
-                        }
-                      }
-                    }
-                  }
-                }
-                project {
-                  ... on ProjectV2 {
-                    id
-                    fields(first: 20) {
-                      nodes {
-                        ... on ProjectV2SingleSelectField {
-                          id
-                          name
-                          options {
-                            id
-                            name
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-          GRAPHQL
-          )
-
-          metadata=$(gh api graphql -f query="$metadata_query" -F itemId="$PROJECT_ITEM_ID")
-
-          project_id=$(echo "$metadata" | jq -r '.data.node.project.id // empty')
-          status_field_id=$(echo "$metadata" | jq -r '.data.node.project.fields.nodes[] | select(.name == "Status") | .id' | head -1)
-          status_option_id=$(echo "$metadata" | jq -r --arg target "$TARGET_STATUS" '.data.node.project.fields.nodes[] | select(.name == "Status") | .options[] | select(.name == $target) | .id' | head -1)
-          current_status=$(echo "$metadata" | jq -r '.data.node.fieldValues.nodes[] | select(.field.name == "Status") | .name // empty' | head -1)
-
-          if [ -z "$project_id" ] || [ -z "$status_field_id" ] || [ -z "$status_option_id" ]; then
-            echo "::error::Could not resolve project metadata for Status synchronization"
-            exit 1
+          sync_result=$(python3 scripts/sync_project_status.py --item-id "$PROJECT_ITEM_ID" --target-status "$TARGET_STATUS")
+          updated=$(echo "$sync_result" | jq -r '.updated')
+          current_status=$(echo "$sync_result" | jq -r '.current_status // ""')
+          if [ "$updated" = "true" ]; then
+            echo "::notice::Updated project Status to '$TARGET_STATUS'"
+          else
+            echo "::notice::Project Status already '$TARGET_STATUS' (current: '${current_status:-}')"
           fi
-
-          if [ "$current_status" = "$TARGET_STATUS" ]; then
-            echo "::notice::Project Status already '$TARGET_STATUS'"
-            echo "updated=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          mutation=$(cat <<'GRAPHQL'
-          mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
-            updateProjectV2ItemFieldValue(
-              input: {
-                projectId: $projectId
-                itemId: $itemId
-                fieldId: $fieldId
-                value: { singleSelectOptionId: $optionId }
-              }
-            ) {
-              projectV2Item {
-                id
-              }
-            }
-          }
-          GRAPHQL
-          )
-
-          gh api graphql \
-            -f query="$mutation" \
-            -F projectId="$project_id" \
-            -F itemId="$PROJECT_ITEM_ID" \
-            -F fieldId="$status_field_id" \
-            -f optionId="$status_option_id" >/dev/null
-
-          echo "::notice::Updated project Status to '$TARGET_STATUS'"
-          echo "updated=true" >> "$GITHUB_OUTPUT"
+          echo "updated=$updated" >> "$GITHUB_OUTPUT"
 
       - name: Skip project Status sync
         if: needs.intake.outputs.project_item_id == ''
@@ -2836,23 +1851,8 @@ jobs:
             --arg actor "$ACTOR" \
             --arg parent_run_url "$RUN_URL" \
             '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,parent_run_url:$parent_run_url}')
-
-          gh issue comment "$ISSUE_NUMBER" -R "$GITHUB_REPOSITORY" --body "$(cat <<COMMENT_EOF
-          ### Orchestration run — next stage queued
-          <!-- gpa:run-status:$NEXT_STAGE:started:$NEXT_RUN_KEY -->
-          <!-- gpa:checkpoint $checkpoint -->
-
-          | Field | Value |
-          |-------|-------|
-          | **Run key** | \`$NEXT_RUN_KEY\` |
-          | **Requested stage** | \`$NEXT_STAGE\` |
-          | **Actor** | @$ACTOR |
-          | **Result** | :rocket: Next stage queued automatically |
-          | **Parent run** | [$RUN_ID]($RUN_URL) |
-
-          The next stage was dispatched automatically after the current stage passed.
-          COMMENT_EOF
-          )"
+          export CHECKPOINT="$checkpoint"
+          gh issue comment "$ISSUE_NUMBER" -R "$GITHUB_REPOSITORY" --body "$(python3 scripts/render_orchestration_comment.py next-stage-queued)"
 
       - name: Skip next-stage dispatch without project item context
         if: steps.resolve.outputs.next_stage != '' && needs.intake.outputs.project_item_id == ''

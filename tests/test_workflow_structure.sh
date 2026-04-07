@@ -12,6 +12,8 @@ WORKFLOW=".github/workflows/orchestration-dispatch.yml"
 FOLLOW_UP_ACTION=".github/actions/capture-follow-ups/action.yml"
 CLOSEOUT_ACTION=".github/actions/scaffold-closeout/action.yml"
 DISPATCH_ACTION=".github/actions/dispatch-orchestration/action.yml"
+DESIGN_STAGE_WORKFLOW=".github/workflows/run-design-stage.yml"
+PLAN_STAGE_WORKFLOW=".github/workflows/run-plan-stage.yml"
 cd "$(git rev-parse --show-toplevel)"
 
 PASS=0
@@ -227,7 +229,7 @@ else
   check "agent-review artifact payload marker is parsed" "fail"
 fi
 
-if grep -Fq 'stage:"plan-review"' "$WORKFLOW" && grep -Fq '<!-- gpa:artifact-payload:${artifact_payload} -->' "$WORKFLOW"; then
+if grep -Fq 'stage:"plan-review"' "$PLAN_STAGE_WORKFLOW" && grep -Fq '<!-- gpa:artifact-payload:${artifact_payload} -->' "$PLAN_STAGE_WORKFLOW"; then
   check "plan review emits canonical artifact payload" "pass"
 else
   check "plan review emits canonical artifact payload" "fail"
@@ -261,7 +263,8 @@ fi
 echo ""
 echo "9. Project status synchronization"
 
-if grep -q 'updateProjectV2ItemFieldValue' "$WORKFLOW"; then
+if grep -q 'python3 scripts/sync_project_status.py' "$WORKFLOW" && \
+   grep -q 'updateProjectV2ItemFieldValue' scripts/sync_project_status.py; then
   check "project status mutation present" "pass"
 else
   check "project status mutation present" "fail"
@@ -276,31 +279,36 @@ fi
 echo ""
 echo "10. Agent-backed authoring stages"
 
-if grep -q 'Codex author design proposal' "$WORKFLOW" && grep -q 'openai/codex-action@v1' "$WORKFLOW"; then
+if grep -q 'uses: \./\.github/workflows/run-design-stage.yml' "$WORKFLOW" && \
+   grep -q 'Codex author design proposal' "$DESIGN_STAGE_WORKFLOW" && \
+   grep -q 'openai/codex-action@v1' "$DESIGN_STAGE_WORKFLOW"; then
   check "codex design author step present" "pass"
 else
   check "codex design author step present" "fail"
 fi
 
-if grep -q 'Publish Claude design review comment (pre-gate)' "$WORKFLOW" && grep -q 'anthropics/claude-code-action@v1' "$WORKFLOW"; then
+if grep -q 'Publish Claude design review comment (pre-gate)' "$DESIGN_STAGE_WORKFLOW" && \
+   grep -q 'anthropics/claude-code-action@v1' "$DESIGN_STAGE_WORKFLOW"; then
   check "claude design review step present" "pass"
 else
   check "claude design review step present" "fail"
 fi
 
-if grep -q 'Codex author implementation plan' "$WORKFLOW"; then
+if grep -q 'uses: \./\.github/workflows/run-plan-stage.yml' "$WORKFLOW" && \
+   grep -q 'Codex author implementation plan' "$PLAN_STAGE_WORKFLOW"; then
   check "codex plan author step present" "pass"
 else
   check "codex plan author step present" "fail"
 fi
 
-if grep -q 'Publish implementation plan review comment (pre-gate)' "$WORKFLOW"; then
+if grep -q 'Publish implementation plan review comment (pre-gate)' "$PLAN_STAGE_WORKFLOW"; then
   check "implementation plan review step present" "pass"
 else
   check "implementation plan review step present" "fail"
 fi
 
-if grep -q 'Validate stage agent credentials' "$WORKFLOW" && grep -q 'OPENAI_API_KEY' "$WORKFLOW" && grep -q 'ANTHROPIC_API_KEY' "$WORKFLOW"; then
+if grep -q 'Validate stage agent credentials' "$DESIGN_STAGE_WORKFLOW" && \
+   grep -q 'Validate stage agent credentials' "$PLAN_STAGE_WORKFLOW"; then
   check "stage agent credential validation present" "pass"
 else
   check "stage agent credential validation present" "fail"

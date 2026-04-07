@@ -1,0 +1,284 @@
+name: Run Plan Stage
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        required: true
+        type: string
+      issue_title:
+        required: true
+        type: string
+      issue_body:
+        required: true
+        type: string
+      run_key:
+        required: true
+        type: string
+      actor:
+        required: true
+        type: string
+    secrets:
+      github_token:
+        required: true
+      openai_api_key:
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate stage agent credentials
+        env:
+          OPENAI_API_KEY: ${{ secrets.openai_api_key }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "$OPENAI_API_KEY" ] || { echo "::error::Agent authoring requires OPENAI_API_KEY"; exit 1; }
+
+      - name: Scaffold implementation plan (pre-gate)
+        id: scaffold-plan
+        uses: ./.github/actions/scaffold-impl-plan
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          github_token: ${{ secrets.github_token }}
+          run_key: ${{ inputs.run_key }}
+          actor: ${{ inputs.actor }}
+
+      - name: Load implementation plan context
+        id: plan-context
+        env:
+          GH_TOKEN: ${{ secrets.github_token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          comments_json=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments?per_page=100")
+          repo_full="${GITHUB_REPOSITORY}"
+          owned_artifact_marker="gpa:owned-artifact:impl-plan:${repo_full}#${ISSUE_NUMBER}"
+
+          comment_id=$(echo "$comments_json" | jq -r --arg marker "$owned_artifact_marker" '
+            (map(select(.body | contains($marker))) + map(select(.body | test("(^|\\n)#{1,2}\\s+Implementation Plan"))))
+            | .[0].id // empty
+          ')
+          comment_body=$(echo "$comments_json" | jq -r --arg marker "$owned_artifact_marker" '
+            (map(select(.body | contains($marker))) + map(select(.body | test("(^|\\n)#{1,2}\\s+Implementation Plan"))))
+            | .[0].body // ""
+          ')
+
+          if [ -z "$comment_id" ]; then
+            echo "::error::Could not resolve implementation plan comment for issue #$ISSUE_NUMBER"
+            exit 1
+          fi
+
+          {
+            echo "comment_id=$comment_id"
+            echo 'comment_body<<EOF'
+            printf '%s\n' "$comment_body"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Load design discussion source for plan
+        id: plan-design-source
+        env:
+          GH_TOKEN: ${{ secrets.github_token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          discussion_url=$(gh issue view "$ISSUE_NUMBER" --comments --json comments --jq '
+            .comments[]
+            | select(.body | contains("gpa:design-discussion:#'"$ISSUE_NUMBER"'"))
+            | .body
+          ' | grep -oE 'https://github\.com/[^/]+/[^/]+/discussions/[0-9]+' | head -1 || true)
+
+          if [ -z "$discussion_url" ]; then
+            {
+              echo "discussion_number="
+              echo 'discussion_body<<EOF'
+              echo
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
+            echo "::notice::No linked design discussion found for plan authoring context"
+            exit 0
+          fi
+
+          discussion_number=$(echo "$discussion_url" | grep -oE '[0-9]+$')
+          discussion_json=$(python3 scripts/github_discussion.py get --repo "$GITHUB_REPOSITORY" --number "$discussion_number")
+          discussion_body=$(echo "$discussion_json" | jq -r '.body // ""')
+
+          {
+            echo "discussion_number=$discussion_number"
+            echo 'discussion_body<<EOF'
+            printf '%s\n' "$discussion_body"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Codex implementation plan prompt
+        id: plan-author-prompt
+        env:
+          ISSUE_TITLE: ${{ inputs.issue_title }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_BODY: ${{ inputs.issue_body }}
+          PLAN_BODY: ${{ steps.plan-context.outputs.comment_body }}
+          DESIGN_BODY: ${{ steps.plan-design-source.outputs.discussion_body }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          prompt_file="$RUNNER_TEMP/plan-author-prompt.md"
+          python3 scripts/build_orchestration_prompt.py plan-author --output "$prompt_file"
+          echo "prompt_file=$prompt_file" >> "$GITHUB_OUTPUT"
+
+      - name: Codex author implementation plan
+        uses: openai/codex-action@v1
+        with:
+          prompt-file: ${{ steps.plan-author-prompt.outputs.prompt_file }}
+          output-file: ${{ runner.temp }}/implementation-plan.md
+          openai-api-key: ${{ secrets.openai_api_key }}
+          sandbox: workspace-write
+          model: ${{ vars.ORCHESTRATION_CODEX_MODEL }}
+          effort: ${{ vars.ORCHESTRATION_CODEX_EFFORT }}
+          allow-bots: true
+
+      - name: Apply Codex implementation plan
+        env:
+          GH_TOKEN: ${{ secrets.github_token }}
+          COMMENT_ID: ${{ steps.plan-context.outputs.comment_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          draft_file="$RUNNER_TEMP/implementation-plan.md"
+          [ -s "$draft_file" ] || { echo "::error::Codex did not produce an implementation plan draft"; exit 1; }
+          new_body="$(cat "$draft_file")"
+
+          gh api "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}" \
+            -X PATCH -f "body=${new_body}" >/dev/null
+
+      - name: Prepare implementation plan review prompt
+        id: plan-review-prompt
+        env:
+          ISSUE_TITLE: ${{ inputs.issue_title }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_BODY: ${{ inputs.issue_body }}
+          PLAN_FILE: ${{ runner.temp }}/implementation-plan.md
+        shell: bash
+        run: |
+          set -euo pipefail
+          prompt_file="$RUNNER_TEMP/plan-review-prompt.md"
+          python3 scripts/build_orchestration_prompt.py plan-review --output "$prompt_file"
+          {
+            echo 'prompt<<EOF'
+            cat "$prompt_file"
+            echo
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Call OpenAI implementation plan review
+        id: openai-plan-review
+        env:
+          OPENAI_API_KEY: ${{ secrets.openai_api_key }}
+          PLAN_REVIEW_PROMPT: ${{ steps.plan-review-prompt.outputs.prompt }}
+          OPENAI_MODEL: ${{ vars.ORCHESTRATION_CODEX_MODEL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          model="${OPENAI_MODEL:-gpt-5}"
+          payload=$(jq -cn \
+            --arg model "$model" \
+            --arg input "$PLAN_REVIEW_PROMPT" \
+            '{model:$model,input:$input}')
+
+          response_file="$RUNNER_TEMP/plan-review-response.json"
+          http_code=$(curl -sS -o "$response_file" -w '%{http_code}' https://api.openai.com/v1/responses \
+            -H "Authorization: Bearer ${OPENAI_API_KEY}" \
+            -H 'Content-Type: application/json' \
+            -d "$payload")
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "::error::OpenAI implementation plan review failed with HTTP $http_code"
+            cat "$response_file"
+            exit 1
+          fi
+
+          review_markdown=$(
+            jq -r '
+              [
+                .output[]
+                | select(.type == "message")
+                | .content[]
+                | select(.type == "output_text")
+                | .text
+              ] | join("\n")
+            ' "$response_file"
+          )
+
+          if [ -z "$review_markdown" ] || [ "$review_markdown" = "null" ]; then
+            echo "::error::OpenAI implementation plan review returned no output_text"
+            cat "$response_file"
+            exit 1
+          fi
+
+          review_markdown=$(printf '%s' "$review_markdown" | perl -0pe 's/\A```[a-zA-Z0-9_-]*\n//; s/\n```\s*\z/\n/s')
+
+          case "$review_markdown" in
+            gpa:plan-review:auto*) ;;
+            *)
+              echo "::error::Implementation plan review must start with gpa:plan-review:auto"
+              printf '%s\n' "$review_markdown"
+              exit 1
+              ;;
+          esac
+
+          {
+            echo 'review_body<<EOF'
+            printf '%s\n' "$review_markdown"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish implementation plan review comment (pre-gate)
+        env:
+          GH_TOKEN: ${{ secrets.github_token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUN_KEY: ${{ inputs.run_key }}
+          REVIEW_BODY: ${{ steps.openai-plan-review.outputs.review_body }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          comments_json=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments?per_page=100")
+          existing_review=$(echo "$comments_json" | jq -r --arg run_key "$RUN_KEY" '
+            .[] | select(.body | contains("gpa:plan-review:auto") and contains($run_key)) | .body
+          ')
+          if [ -n "$existing_review" ]; then
+            echo "::notice::Automated plan review comment already exists for this run; skipping"
+            exit 0
+          fi
+
+          artifact_payload=$(jq -cn \
+            --arg run_key "$RUN_KEY" \
+            '{
+              kind:"artifact_payload",
+              version:"gpa.v1",
+              run_key:$run_key,
+              stage:"plan-review",
+              data:{
+                decision:{
+                  next_stage:"execution",
+                  reason_codes:["plan_review_published"]
+                }
+              }
+            }')
+
+          review_body="<!-- gpa:run-status:plan-review:completed:${RUN_KEY} -->"$'\n'"<!-- gpa:artifact-payload:${artifact_payload} -->"$'\n\n'"${REVIEW_BODY}"
+          gh issue comment "$ISSUE_NUMBER" --body "$review_body" >/dev/null
