@@ -96,7 +96,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          VALID_STAGES="kickoff clarification design plan execution agent-review follow-up-capture merge closeout"
+          VALID_STAGES="$(python3 scripts/resolve_orchestration_stage.py manual-stages | tr '\n' ' ')"
 
           if [ "$TRIGGER" = "repository_dispatch" ]; then
             # --- Validate repository_dispatch payload ---
@@ -179,7 +179,9 @@ jobs:
                 done
                 diagnostic+="\nExpected payload: \`{ issue_number, requested_stage, run_key, actor, timestamp }\`"
                 diagnostic+="\nOptional closed-loop field: \`project_item_id\`"
-                echo -e "$diagnostic" | gh issue comment "${RD_ISSUE_NUMBER}" --body-file -
+                tmp_body=$(mktemp)
+                echo -e "$diagnostic" > "$tmp_body"
+                python3 scripts/github_mutations.py issue-comment-file --repo "$CURRENT_REPO" --issue-number "${RD_ISSUE_NUMBER}" --body-file "$tmp_body"
               fi
 
               exit 1
@@ -439,7 +441,8 @@ jobs:
 
           if [ "$duplicate" = "true" ]; then
             echo "::warning::Skipping: a recent run for this issue/stage completed within the ${DEDUP_WINDOW_SECONDS}s dedup window"
-            gh issue comment "$ISSUE_NUMBER" --body "$(python3 scripts/render_orchestration_comment.py duplicate)"
+            body="$(python3 scripts/render_orchestration_comment.py duplicate)"
+            python3 scripts/github_mutations.py issue-comment --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body "$body"
           fi
 
       - name: Validate eligibility
@@ -465,7 +468,8 @@ jobs:
           RUN_ID: ${{ github.run_id }}
         shell: bash
         run: |
-          gh issue comment "$ISSUE_NUMBER" --body "$(python3 scripts/render_orchestration_comment.py ineligible)"
+          body="$(python3 scripts/render_orchestration_comment.py ineligible)"
+          python3 scripts/github_mutations.py issue-comment --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body "$body"
 
       - name: Fail on ineligible
         if: steps.dedup.outputs.duplicate != 'true' && steps.eligibility.outputs.eligible != 'true'
@@ -475,6 +479,16 @@ jobs:
         run: |
           echo "::error::Issue is not eligible: $REASON"
           exit 1
+
+  stage_clarification:
+    needs: intake
+    if: needs.intake.outputs.duplicate != 'true' && needs.intake.outputs.requested_stage == 'clarification'
+    uses: ./.github/workflows/run-clarification-stage.yml
+    with:
+      issue_number: ${{ needs.intake.outputs.issue_number }}
+      issue_body: ${{ needs.intake.outputs.issue_body }}
+    secrets:
+      github_token: ${{ secrets.GITHUB_TOKEN }}
 
   stage_design:
     needs: intake
@@ -539,10 +553,22 @@ jobs:
       github_token: ${{ secrets.GITHUB_TOKEN }}
       openai_api_key: ${{ secrets.OPENAI_API_KEY }}
 
+  stage_closeout_prepare:
+    needs: intake
+    if: needs.intake.outputs.duplicate != 'true' && needs.intake.outputs.requested_stage == 'closeout'
+    uses: ./.github/workflows/run-closeout-stage.yml
+    with:
+      issue_number: ${{ needs.intake.outputs.issue_number }}
+      issue_body: ${{ needs.intake.outputs.issue_body }}
+      run_key: ${{ needs.intake.outputs.run_key }}
+      actor: ${{ needs.intake.outputs.actor }}
+    secrets:
+      github_token: ${{ secrets.GITHUB_TOKEN }}
+
   # ── gate ────────────────────────────────────────────────────────────
   # Create artifacts, evaluate gates, and record stage advancement.
   gate:
-    needs: [intake, stage_design, stage_plan, stage_execution, stage_agent_review]
+    needs: [intake, stage_clarification, stage_design, stage_plan, stage_execution, stage_agent_review, stage_closeout_prepare]
     if: needs.intake.outputs.duplicate != 'true'
     runs-on: ubuntu-latest
     outputs:
@@ -554,119 +580,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Scaffold clarification issue body (pre-gate)
-        if: needs.intake.outputs.requested_stage == 'clarification'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
-          ISSUE_BODY: ${{ needs.intake.outputs.issue_body }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          body="$ISSUE_BODY"
-          changed="false"
-
-          if ! printf '%s\n' "$body" | grep -qE '^#{1,2}\s+Scope'; then
-            body="${body}"$'\n\n'"## Scope"$'\n'"- Initial scope to be refined by orchestration."$'\n'
-            changed="true"
-          fi
-
-          if printf '%s\n' "$body" | grep -qE '^#{1,2}\s+Open Questions'; then
-            rewritten_body="$(printf '%s' "$body" | python3 scripts/defer_open_questions.py)"
-            if [ "$rewritten_body" != "$body" ]; then
-              body="$rewritten_body"
-              changed="true"
-            fi
-          fi
-
-          if [ "$changed" = "true" ]; then
-            tmp_body=$(mktemp)
-            printf '%s\n' "$body" > "$tmp_body"
-            gh issue edit "$ISSUE_NUMBER" --body-file "$tmp_body"
-            echo "::notice::Clarification scaffold updated issue body (headings and deferred open questions)"
-          else
-            echo "::notice::Issue body already satisfies clarification scaffold defaults"
-          fi
-
-      # Execution and agent-review authoring/review now run in reusable workflows
-      # before this gate job so the orchestrator stays focused on common gate,
-      # state validation, merge, follow-up capture, and closeout behavior.
-
-      # For the closeout stage, enforce pre-scaffold prerequisites BEFORE
-      # scaffolding. This preserves the same pre-scaffold/full-gate sequence that
-      # earlier standalone closeout handling used:
-      # pre-scaffold gate (merged PR, branch deleted, follow-ups) → scaffold →
-      # full gate (content checks). Without this, the orchestration path could
-      # post a closeout retrospective on an issue that hasn't met prerequisites.
-      - name: Pre-scaffold gate check (closeout)
-        if: needs.intake.outputs.requested_stage == 'closeout'
-        id: closeout-pre-gate
-        uses: ./.github/actions/check-gate
-        with:
-          issue_number: ${{ needs.intake.outputs.issue_number }}
-          requested_stage: closeout
-          issue_body: ${{ needs.intake.outputs.issue_body }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          check_mode: pre-scaffold
-
-      - name: Post closeout pre-scaffold gate failure
-        if: steps.closeout-pre-gate.outputs.gate_passed == 'false'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
-          RUN_KEY: ${{ needs.intake.outputs.run_key }}
-          UNMET: ${{ steps.closeout-pre-gate.outputs.unmet_conditions }}
-          WAIVED: ${{ steps.closeout-pre-gate.outputs.waived_conditions }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          ACTOR: ${{ needs.intake.outputs.actor }}
-          RUN_ID: ${{ github.run_id }}
-          REQUESTED_STAGE: ${{ needs.intake.outputs.requested_stage }}
-        shell: bash
-        run: |
-          unmet_list=$(echo "$UNMET" | jq -r '.[] | "- :x: \(.)"' 2>/dev/null || echo "- (none)")
-          waived_list=$(echo "$WAIVED" | jq -r '.[] | "- :fast_forward: \(.)"' 2>/dev/null || echo "- (none)")
-
-          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-          ### Orchestration run — closeout pre-scaffold gate failed
-          <!-- gpa:run-status:$REQUESTED_STAGE:failed:$RUN_KEY -->
-
-          | Field | Value |
-          |-------|-------|
-          | **Run key** | \`$RUN_KEY\` |
-          | **Requested stage** | \`$REQUESTED_STAGE\` |
-          | **Actor** | @$ACTOR |
-          | **Result** | :x: Prerequisites not met — scaffold not posted |
-          | **Actions run** | [$RUN_ID]($RUN_URL) |
-
-          **Unmet prerequisites:**
-          $unmet_list
-
-          **Waived conditions:**
-          $waived_list
-
-          Resolve the unmet prerequisites and re-trigger.
-          COMMENT_EOF
-          )"
-
-      - name: Fail on closeout pre-scaffold gate failure
-        if: steps.closeout-pre-gate.outputs.gate_passed == 'false'
-        env:
-          UNMET: ${{ steps.closeout-pre-gate.outputs.unmet_conditions }}
-        shell: bash
-        run: |
-          echo "::error::Closeout pre-scaffold gate failed. Unmet prerequisites: $UNMET"
-          exit 1
-
-      - name: Scaffold closeout retrospective (pre-gate)
-        if: needs.intake.outputs.requested_stage == 'closeout' && steps.closeout-pre-gate.outputs.gate_passed != 'false'
-        id: scaffold-closeout
-        uses: ./.github/actions/scaffold-closeout
-        with:
-          issue_number: ${{ needs.intake.outputs.issue_number }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          run_key: ${{ needs.intake.outputs.run_key }}
-          actor: ${{ needs.intake.outputs.actor }}
+      # Clarification, closeout preparation, execution, and agent-review now run
+      # in reusable workflows before this gate job so the orchestrator stays
+      # focused on common gate, state validation, comments, status sync, and
+      # handoff behavior.
 
       - name: Refresh issue body
         id: issue-body
@@ -721,7 +638,8 @@ jobs:
           export UNMET_LIST="$unmet_list"
           export WAIVED_LIST="$waived_list"
           export CHECKPOINT="$checkpoint"
-          gh issue comment "$ISSUE_NUMBER" --body "$(python3 scripts/render_orchestration_comment.py gate-failed)"
+          body="$(python3 scripts/render_orchestration_comment.py gate-failed)"
+          python3 scripts/github_mutations.py issue-comment --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body "$body"
 
       - name: Fail on gate not passed
         if: steps.gate.outputs.gate_passed != 'true'
@@ -762,213 +680,13 @@ jobs:
           if [ -n "$mismatch" ]; then
             echo "::error::$mismatch"
             export REASON="$mismatch"
-            gh issue comment "$ISSUE_NUMBER" --body "$(python3 scripts/render_orchestration_comment.py state-mismatch)"
+            body="$(python3 scripts/render_orchestration_comment.py state-mismatch)"
+            python3 scripts/github_mutations.py issue-comment --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body "$body"
             echo "state_valid=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
           echo "state_valid=true" >> "$GITHUB_OUTPUT"
-
-      - name: Create orchestration app token (merge sync)
-        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && vars.ORCHESTRATION_APP_ID != ''
-        id: merge-sync-token
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ vars.ORCHESTRATION_APP_ID }}
-          private-key: ${{ secrets.ORCHESTRATION_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-          permission-pull-requests: write
-          permission-workflows: write
-
-      - name: Sync feature branch with main (pre-merge)
-        id: merge-sync
-        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync-token.outputs.token != ''
-        env:
-          GH_TOKEN: ${{ steps.merge-sync-token.outputs.token }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
-          REPO: ${{ github.repository }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          pr_json=$(python3 scripts/github_orchestration_context.py latest-pr --repo "$REPO" --issue-number "$ISSUE_NUMBER" --state open)
-          pr_number=$(echo "$pr_json" | jq -r '.number // empty')
-          branch_name=$(echo "$pr_json" | jq -r '.headRefName // empty')
-          base_ref=$(echo "$pr_json" | jq -r '.baseRefName // "main"')
-
-          if [ -z "$pr_number" ] || [ -z "$branch_name" ]; then
-            echo "::error::No open PR found for issue #$ISSUE_NUMBER to sync before merge"
-            exit 1
-          fi
-
-          {
-            echo "pr_number=$pr_number"
-            echo "branch_name=$branch_name"
-            echo "base_ref=$base_ref"
-          } >> "$GITHUB_OUTPUT"
-
-          git config user.name "project-automation-gateway[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
-
-          git fetch origin "$base_ref" "$branch_name"
-          git checkout -B "$branch_name" "origin/$branch_name"
-
-          if git merge --no-edit "origin/$base_ref"; then
-            rm -rf .codex || true
-            git rm -r --cached --ignore-unmatch .codex >/dev/null 2>&1 || true
-            if [ -n "$(git status --porcelain)" ]; then
-              git add -A
-              git commit --amend --no-edit
-            fi
-            if [ "$(git rev-parse HEAD)" != "$(git rev-parse "origin/$branch_name")" ]; then
-              git push origin "HEAD:$branch_name"
-              echo "::notice::Synced $branch_name with $base_ref before merge"
-              echo "sync_result=updated" >> "$GITHUB_OUTPUT"
-            else
-              echo "::notice::Branch $branch_name already included $base_ref"
-              echo "sync_result=unchanged" >> "$GITHUB_OUTPUT"
-            fi
-          else
-            conflict_files=$(git diff --name-only --diff-filter=U || true)
-            echo "::warning::Automatic merge sync from $base_ref into $branch_name requires manual conflict resolution"
-            echo "sync_result=conflict" >> "$GITHUB_OUTPUT"
-            {
-              echo 'conflict_files<<EOF'
-              printf '%s\n' "$conflict_files"
-              echo 'EOF'
-            } >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Validate merge conflict resolution credentials
-        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync.outputs.sync_result == 'conflict'
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          [ -n "$OPENAI_API_KEY" ] || { echo "::error::Merge conflict resolution requires secrets.OPENAI_API_KEY"; exit 1; }
-
-      - name: Prepare merge conflict resolution prompt
-        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync.outputs.sync_result == 'conflict'
-        id: merge-conflict-prompt
-        env:
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
-          ISSUE_TITLE: ${{ needs.intake.outputs.issue_title }}
-          ISSUE_BODY: ${{ needs.intake.outputs.issue_body }}
-          PR_NUMBER: ${{ steps.merge-sync.outputs.pr_number }}
-          BRANCH_NAME: ${{ steps.merge-sync.outputs.branch_name }}
-          BASE_REF: ${{ steps.merge-sync.outputs.base_ref }}
-          CONFLICT_FILES: ${{ steps.merge-sync.outputs.conflict_files }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          prompt_file="$RUNNER_TEMP/merge-conflict-resolution-prompt.md"
-          python3 scripts/build_orchestration_prompt.py merge-conflict --output "$prompt_file"
-          echo "prompt_file=$prompt_file" >> "$GITHUB_OUTPUT"
-
-      - name: Codex resolve merge conflicts
-        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync.outputs.sync_result == 'conflict'
-        id: codex-merge-conflicts
-        uses: openai/codex-action@v1
-        with:
-          prompt-file: ${{ steps.merge-conflict-prompt.outputs.prompt_file }}
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          sandbox: workspace-write
-          model: ${{ vars.ORCHESTRATION_CODEX_MODEL }}
-          effort: ${{ vars.ORCHESTRATION_CODEX_EFFORT }}
-          allow-bots: true
-
-      - name: Commit and push resolved merge sync
-        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync.outputs.sync_result == 'conflict'
-        id: merge-conflict-resolution
-        env:
-          GH_TOKEN: ${{ steps.merge-sync-token.outputs.token }}
-          REPO: ${{ github.repository }}
-          BRANCH_NAME: ${{ steps.merge-sync.outputs.branch_name }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          unmerged_files=$(git diff --name-only --diff-filter=U || true)
-          if [ -n "$unmerged_files" ]; then
-            {
-              echo "resolution_result=unresolved"
-              echo 'remaining_conflicts<<EOF'
-              printf '%s\n' "$unmerged_files"
-              echo 'EOF'
-            } >> "$GITHUB_OUTPUT"
-            echo "::warning::Merge conflicts remain after automated resolution attempt"
-            exit 0
-          fi
-
-          if ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
-            echo "resolution_result=unresolved" >> "$GITHUB_OUTPUT"
-            echo "::warning::Merge conflict resolution did not leave a merge in progress"
-            exit 0
-          fi
-
-          rm -rf .codex || true
-          git rm -r --cached --ignore-unmatch .codex >/dev/null 2>&1 || true
-          git add -A
-          git commit --no-edit
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:${BRANCH_NAME}"
-          echo "resolution_result=resolved" >> "$GITHUB_OUTPUT"
-          echo "::notice::Automated merge conflict resolution committed and pushed"
-
-      - name: Post merge remediation required comment
-        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync.outputs.sync_result == 'conflict' && steps.merge-conflict-resolution.outputs.resolution_result != 'resolved'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
-          RUN_KEY: ${{ needs.intake.outputs.run_key }}
-          ACTOR: ${{ needs.intake.outputs.actor }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          checkpoint=$(jq -cn \
-            --arg run_key "$RUN_KEY" \
-            --arg stage "merge" \
-            --arg state "blocked" \
-            --arg actor "$ACTOR" \
-            --arg reason "merge-sync-conflict" \
-            --arg run_url "$RUN_URL" \
-            '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,reason:$reason,run_url:$run_url,next_stage:"execution"}')
-          export CHECKPOINT="$checkpoint"
-          gh issue comment "$ISSUE_NUMBER" --body "$(python3 scripts/render_orchestration_comment.py merge-remediation)"
-
-      - name: Fail on merge sync conflict
-        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && steps.merge-sync.outputs.sync_result == 'conflict' && steps.merge-conflict-resolution.outputs.resolution_result != 'resolved'
-        shell: bash
-        run: |
-          echo "::error::Automatic pre-merge sync with main still has unresolved conflicts after remediation attempt"
-          exit 1
-
-      - name: Merge approved PR (post-gate)
-        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge' && (steps.merge-sync.outputs.sync_result != 'conflict' || steps.merge-conflict-resolution.outputs.resolution_result == 'resolved')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          pr_json=$(python3 scripts/github_orchestration_context.py latest-pr --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --state open)
-          pr_number=$(echo "$pr_json" | jq -r '.number // empty')
-
-          if [ -z "$pr_number" ]; then
-            echo "::error::No open PR found for issue #$ISSUE_NUMBER to merge"
-            exit 1
-          fi
-
-          gh pr merge "$pr_number" --squash --delete-branch
-          echo "::notice::Merged PR #$pr_number and deleted its branch"
 
       - name: Post success comment
         if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true'
@@ -999,22 +717,9 @@ jobs:
             agent-review)
               ;;
             *)
-              next_stage=""
-              case "$REQUESTED_STAGE" in
-                kickoff) next_stage="clarification" ;;
-                clarification) next_stage="design" ;;
-                design) next_stage="plan" ;;
-                plan) next_stage="execution" ;;
-                execution) next_stage="agent-review" ;;
-                merge) next_stage="follow-up-capture" ;;
-                follow-up-capture) next_stage="closeout" ;;
-                closeout) next_stage="" ;;
-              esac
-
-              reason_codes='["stage_gate_passed"]'
-              if [ -n "$next_stage" ]; then
-                reason_codes='["stage_gate_passed","stage_handoff_queued"]'
-              fi
+              resolved=$(python3 scripts/resolve_orchestration_stage.py resolve --requested-stage "$REQUESTED_STAGE")
+              next_stage=$(echo "$resolved" | jq -r '.next_stage')
+              reason_codes=$(python3 scripts/resolve_orchestration_stage.py reason-codes --next-stage "$next_stage")
 
               checkpoint=$(jq -cn \
                 --arg run_key "$RUN_KEY" \
@@ -1050,25 +755,40 @@ jobs:
           export CANONICAL_CHECKPOINT_LINE="$canonical_checkpoint_line"
           export CHECKPOINT_LINE="$checkpoint_line"
           export WAIVED_SECTION="$waived_section"
-          gh issue comment "$ISSUE_NUMBER" --body "$(python3 scripts/render_orchestration_comment.py stage-transition)"
+          body="$(python3 scripts/render_orchestration_comment.py stage-transition)"
+          python3 scripts/github_mutations.py issue-comment --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body "$body"
 
-      # Post-gate action: capture follow-ups after gate confirms markers exist
-      # and execution is complete. Unlike pre-gate scaffolds, this runs AFTER
-      # the gate passes because it creates external artifacts (new issues).
-      - name: Capture follow-ups (post-gate)
-        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'follow-up-capture'
-        id: capture-follow-ups
-        uses: ./.github/actions/capture-follow-ups
-        with:
-          issue_number: ${{ needs.intake.outputs.issue_number }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          run_key: ${{ needs.intake.outputs.run_key }}
-          actor: ${{ needs.intake.outputs.actor }}
+  stage_merge:
+    needs: [intake, gate]
+    if: needs.intake.outputs.duplicate != 'true' && needs.gate.outputs.gate_passed == 'true' && needs.gate.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'merge'
+    uses: ./.github/workflows/run-merge-stage.yml
+    with:
+      issue_number: ${{ needs.intake.outputs.issue_number }}
+      issue_title: ${{ needs.intake.outputs.issue_title }}
+      issue_body: ${{ needs.intake.outputs.issue_body }}
+      run_key: ${{ needs.intake.outputs.run_key }}
+      actor: ${{ needs.intake.outputs.actor }}
+      orchestration_app_id: ${{ vars.ORCHESTRATION_APP_ID }}
+    secrets:
+      github_token: ${{ secrets.GITHUB_TOKEN }}
+      openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+      orchestration_app_private_key: ${{ secrets.ORCHESTRATION_APP_PRIVATE_KEY }}
+
+  stage_follow_up_capture:
+    needs: [intake, gate]
+    if: needs.intake.outputs.duplicate != 'true' && needs.gate.outputs.gate_passed == 'true' && needs.gate.outputs.state_valid == 'true' && needs.intake.outputs.requested_stage == 'follow-up-capture'
+    uses: ./.github/workflows/run-follow-up-stage.yml
+    with:
+      issue_number: ${{ needs.intake.outputs.issue_number }}
+      run_key: ${{ needs.intake.outputs.run_key }}
+      actor: ${{ needs.intake.outputs.actor }}
+    secrets:
+      github_token: ${{ secrets.GITHUB_TOKEN }}
 
   # ── handoff ─────────────────────────────────────────────────────────
   # Queue the next stage when the current one completes successfully.
   handoff:
-    needs: [intake, gate]
+    needs: [intake, gate, stage_merge, stage_follow_up_capture, stage_agent_review, stage_execution]
     if: needs.intake.outputs.duplicate != 'true' && needs.gate.outputs.gate_passed == 'true' && needs.gate.outputs.state_valid == 'true'
     runs-on: ubuntu-latest
     outputs:
@@ -1100,84 +820,19 @@ jobs:
           FEEDBACK_SOURCE: ${{ needs.intake.outputs.feedback_source }}
           FEEDBACK_NO_PROGRESS: ${{ needs.stage_execution.outputs.feedback_no_progress }}
         run: |
-          case "$REQUESTED_STAGE" in
-            kickoff)
-              next_stage="clarification"
-              target_status="In Progress"
-              ;;
-            clarification)
-              next_stage="design"
-              target_status="In Progress"
-              ;;
-            design)
-              next_stage="plan"
-              target_status="In Progress"
-              ;;
-            plan)
-              next_stage="execution"
-              target_status="In Progress"
-              ;;
-            execution)
-              if [ "$FEEDBACK_SOURCE" = "operator" ] && [ "$FEEDBACK_NO_PROGRESS" = "true" ]; then
-                next_stage=""
-                target_status="In Review"
-              else
-                next_stage="agent-review"
-                target_status="In Progress"
-              fi
-              ;;
-            agent-review)
-              if [ -n "${REVIEW_NEXT_STAGE:-}" ]; then
-                next_stage="$REVIEW_NEXT_STAGE"
-                case "$next_stage" in
-                  merge|execution)
-                    target_status="In Progress"
-                    ;;
-                  *)
-                    echo "::error::Unknown review_next_stage '$next_stage' for agent-review"
-                    exit 1
-                    ;;
-                esac
-              else
-                echo "::warning::Missing canonical review next-stage; falling back to disposition mapping"
-                case "$REVIEW_DISPOSITION" in
-                  auto-approve)
-                    next_stage="merge"
-                    target_status="In Progress"
-                    ;;
-                  rework-required)
-                    next_stage="execution"
-                    target_status="In Progress"
-                    ;;
-                  operator-review-required)
-                    next_stage=""
-                    target_status="In Review"
-                    ;;
-                  *)
-                    echo "::error::Unknown or missing review disposition '$REVIEW_DISPOSITION' for agent-review"
-                    exit 1
-                    ;;
-                esac
-              fi
-              ;;
-            merge)
-              next_stage="follow-up-capture"
-              target_status="In Progress"
-              ;;
-            follow-up-capture)
-              next_stage="closeout"
-              target_status="In Progress"
-              ;;
-            closeout)
-              next_stage=""
-              target_status="Done"
-              ;;
-            *)
-              echo "::error::Unknown requested_stage '$REQUESTED_STAGE'"
-              exit 1
-              ;;
-          esac
-
+          args=(resolve --requested-stage "$REQUESTED_STAGE" --feedback-source "${FEEDBACK_SOURCE:-}")
+          if [ "${FEEDBACK_NO_PROGRESS:-false}" = "true" ]; then
+            args+=(--feedback-no-progress)
+          fi
+          if [ -n "${REVIEW_NEXT_STAGE:-}" ]; then
+            args+=(--review-next-stage "$REVIEW_NEXT_STAGE")
+          elif [ -n "${REVIEW_DISPOSITION:-}" ]; then
+            echo "::warning::Missing canonical review next-stage; falling back to disposition mapping"
+            args+=(--review-disposition "$REVIEW_DISPOSITION")
+          fi
+          resolved=$(python3 scripts/resolve_orchestration_stage.py "${args[@]}")
+          next_stage=$(echo "$resolved" | jq -r '.next_stage')
+          target_status=$(echo "$resolved" | jq -r '.target_status')
           echo "next_stage=$next_stage" >> "$GITHUB_OUTPUT"
           echo "target_status=$target_status" >> "$GITHUB_OUTPUT"
 
@@ -1222,7 +877,7 @@ jobs:
           exit 1
 
       - name: Generate next run key
-        if: steps.resolve.outputs.next_stage != '' && steps.app-token.outcome == 'success'
+        if: steps.resolve.outputs.next_stage != ''
         id: next-run-key
         shell: bash
         env:
@@ -1272,7 +927,8 @@ jobs:
             --arg parent_run_url "$RUN_URL" \
             '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,parent_run_url:$parent_run_url}')
           export CHECKPOINT="$checkpoint"
-          gh issue comment "$ISSUE_NUMBER" -R "$GITHUB_REPOSITORY" --body "$(python3 scripts/render_orchestration_comment.py next-stage-queued)"
+          body="$(python3 scripts/render_orchestration_comment.py next-stage-queued)"
+          python3 scripts/github_mutations.py issue-comment --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body "$body"
 
       - name: Skip next-stage dispatch without project item context
         if: steps.resolve.outputs.next_stage != '' && needs.intake.outputs.project_item_id == ''

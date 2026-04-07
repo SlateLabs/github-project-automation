@@ -1,0 +1,49 @@
+name: Scaffold Clarification
+description: Prepare the issue body for clarification stage progression.
+
+inputs:
+  issue_number:
+    required: true
+    description: Issue number to edit
+  issue_body:
+    required: true
+    description: Current issue body
+  github_token:
+    required: true
+    description: Token with issue edit permissions
+
+runs:
+  using: composite
+  steps:
+    - name: Rewrite clarification body
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        ISSUE_NUMBER: ${{ inputs.issue_number }}
+        ISSUE_BODY: ${{ inputs.issue_body }}
+      run: |
+        set -euo pipefail
+        body="$ISSUE_BODY"
+        changed="false"
+
+        if ! printf '%s\n' "$body" | grep -qE '^#{1,2}\s+Scope'; then
+          body="${body}"$'\n\n'"## Scope"$'\n'"- Initial scope to be refined by orchestration."$'\n'
+          changed="true"
+        fi
+
+        if printf '%s\n' "$body" | grep -qE '^#{1,2}\s+Open Questions'; then
+          rewritten_body="$(printf '%s' "$body" | python3 scripts/defer_open_questions.py)"
+          if [ "$rewritten_body" != "$body" ]; then
+            body="$rewritten_body"
+            changed="true"
+          fi
+        fi
+
+        if [ "$changed" = "true" ]; then
+          tmp_body=$(mktemp)
+          printf '%s\n' "$body" > "$tmp_body"
+          python3 scripts/github_mutations.py issue-edit-body --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body-file "$tmp_body"
+          echo "::notice::Clarification scaffold updated issue body (headings and deferred open questions)"
+        else
+          echo "::notice::Issue body already satisfies clarification scaffold defaults"
+        fi

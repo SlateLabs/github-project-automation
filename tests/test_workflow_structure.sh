@@ -190,11 +190,12 @@ else
   check "next-stage repository_dispatch present" "fail"
 fi
 
-if grep -A3 'kickoff)' "$WORKFLOW" | grep -q 'next_stage="clarification"' && \
-   grep -A3 'design)' "$WORKFLOW" | grep -q 'next_stage="plan"' && \
-   grep -A3 'execution)' "$WORKFLOW" | grep -q 'next_stage="agent-review"' && \
-   grep -A60 'agent-review)' "$WORKFLOW" | grep -q 'next_stage="merge"' && \
-   grep -A3 'merge)' "$WORKFLOW" | grep -q 'next_stage="follow-up-capture"'; then
+if grep -q 'resolve_orchestration_stage.py resolve' "$WORKFLOW" && \
+   grep -q '"kickoff"' config/orchestration-stage-map.json && \
+   grep -q '"next_stage": "clarification"' config/orchestration-stage-map.json && \
+   grep -q '"next_stage": "agent-review"' config/orchestration-stage-map.json && \
+   grep -q '"auto-approve"' config/orchestration-stage-map.json && \
+   grep -q '"next_stage": "follow-up-capture"' config/orchestration-stage-map.json; then
   check "stage handoff map includes key transitions" "pass"
 else
   check "stage handoff map includes key transitions" "fail"

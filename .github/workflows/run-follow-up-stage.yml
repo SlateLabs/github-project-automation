@@ -1,0 +1,35 @@
+name: Run Follow Up Capture Stage
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        required: true
+        type: string
+      run_key:
+        required: true
+        type: string
+      actor:
+        required: true
+        type: string
+    secrets:
+      github_token:
+        required: true
+
+permissions:
+  issues: write
+
+jobs:
+  follow_up_capture:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Capture follow-ups
+        uses: ./.github/actions/capture-follow-ups
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          github_token: ${{ secrets.github_token }}
+          run_key: ${{ inputs.run_key }}
+          actor: ${{ inputs.actor }}

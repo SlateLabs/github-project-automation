@@ -1,0 +1,77 @@
+{
+  "manual_stages": [
+    "kickoff",
+    "clarification",
+    "design",
+    "plan",
+    "execution",
+    "agent-review",
+    "follow-up-capture",
+    "merge",
+    "closeout"
+  ],
+  "auto_progression": {
+    "kickoff": {
+      "next_stage": "clarification",
+      "target_status": "In Progress"
+    },
+    "clarification": {
+      "next_stage": "design",
+      "target_status": "In Progress"
+    },
+    "design": {
+      "next_stage": "plan",
+      "target_status": "In Progress"
+    },
+    "plan": {
+      "next_stage": "execution",
+      "target_status": "In Progress"
+    },
+    "execution": {
+      "default": {
+        "next_stage": "agent-review",
+        "target_status": "In Progress"
+      },
+      "operator_feedback_no_progress": {
+        "next_stage": "",
+        "target_status": "In Review"
+      }
+    },
+    "agent-review": {
+      "default_disposition": {
+        "auto-approve": {
+          "next_stage": "merge",
+          "target_status": "In Progress"
+        },
+        "rework-required": {
+          "next_stage": "execution",
+          "target_status": "In Progress"
+        },
+        "operator-review-required": {
+          "next_stage": "",
+          "target_status": "In Review"
+        }
+      },
+      "allowed_next_stages": {
+        "merge": "In Progress",
+        "execution": "In Progress"
+      }
+    },
+    "merge": {
+      "next_stage": "follow-up-capture",
+      "target_status": "In Progress"
+    },
+    "follow-up-capture": {
+      "next_stage": "closeout",
+      "target_status": "In Progress"
+    },
+    "closeout": {
+      "next_stage": "",
+      "target_status": "Done"
+    }
+  },
+  "operator_commands": {
+    "gpa:feedback": "execution",
+    "gpa:approve": "merge"
+  }
+}

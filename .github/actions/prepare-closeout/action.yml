@@ -1,0 +1,88 @@
+name: Prepare Closeout
+description: Enforce closeout prerequisites and scaffold the retrospective artifact.
+
+inputs:
+  issue_number:
+    required: true
+    description: Issue number to process
+  issue_body:
+    required: true
+    description: Current issue body
+  github_token:
+    required: true
+    description: Token with issue permissions
+  run_key:
+    required: true
+    description: Current run key
+  actor:
+    required: true
+    description: Trigger actor
+
+outputs:
+  ready:
+    value: ${{ steps.pre-gate.outputs.gate_passed == 'true' && 'true' || 'false' }}
+    description: Whether closeout prerequisites passed and scaffold ran
+
+runs:
+  using: composite
+  steps:
+    - name: Pre-scaffold gate check
+      id: pre-gate
+      uses: ./.github/actions/check-gate
+      with:
+        issue_number: ${{ inputs.issue_number }}
+        requested_stage: closeout
+        issue_body: ${{ inputs.issue_body }}
+        github_token: ${{ inputs.github_token }}
+        check_mode: pre-scaffold
+
+    - name: Post prerequisite failure comment
+      if: steps.pre-gate.outputs.gate_passed == 'false'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        ISSUE_NUMBER: ${{ inputs.issue_number }}
+        RUN_KEY: ${{ inputs.run_key }}
+        ACTOR: ${{ inputs.actor }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        REQUESTED_STAGE: closeout
+        UNMET: ${{ steps.pre-gate.outputs.unmet_conditions }}
+        WAIVED: ${{ steps.pre-gate.outputs.waived_conditions }}
+      run: |
+        set -euo pipefail
+        unmet_list=$(echo "$UNMET" | jq -r '.[] | "- :x: \(.)"' 2>/dev/null || echo "- (none)")
+        waived_list=$(echo "$WAIVED" | jq -r '.[] | "- :fast_forward: \(.)"' 2>/dev/null || echo "- (none)")
+        body_file=$(mktemp)
+        cat > "$body_file" <<COMMENT_EOF
+        ### Orchestration run — closeout pre-scaffold gate failed
+        <!-- gpa:run-status:$REQUESTED_STAGE:failed:$RUN_KEY -->
+
+        | Field | Value |
+        |-------|-------|
+        | **Run key** | \`$RUN_KEY\` |
+        | **Requested stage** | \`$REQUESTED_STAGE\` |
+        | **Actor** | @$ACTOR |
+        | **Result** | :x: Prerequisites not met — scaffold not posted |
+        | **Actions run** | [$RUN_ID]($RUN_URL) |
+
+        **Unmet prerequisites:**
+        $unmet_list
+
+        **Waived conditions:**
+        $waived_list
+
+        Resolve the unmet prerequisites and re-trigger.
+        COMMENT_EOF
+        python3 scripts/github_mutations.py issue-comment-file --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body-file "$body_file"
+        echo "::error::Closeout pre-scaffold gate failed. Unmet prerequisites: $UNMET"
+        exit 1
+
+    - name: Scaffold closeout retrospective
+      if: steps.pre-gate.outputs.gate_passed == 'true'
+      uses: ./.github/actions/scaffold-closeout
+      with:
+        issue_number: ${{ inputs.issue_number }}
+        github_token: ${{ inputs.github_token }}
+        run_key: ${{ inputs.run_key }}
+        actor: ${{ inputs.actor }}

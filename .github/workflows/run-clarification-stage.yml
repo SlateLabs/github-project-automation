@@ -1,0 +1,31 @@
+name: Run Clarification Stage
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        required: true
+        type: string
+      issue_body:
+        required: true
+        type: string
+    secrets:
+      github_token:
+        required: true
+
+permissions:
+  issues: write
+
+jobs:
+  clarification:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Scaffold clarification
+        uses: ./.github/actions/scaffold-clarification
+        with:
+          issue_number: ${{ inputs.issue_number }}
+          issue_body: ${{ inputs.issue_body }}
+          github_token: ${{ secrets.github_token }}
