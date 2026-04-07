@@ -615,7 +615,7 @@ The stage-specific sections below still document the underlying scaffold/capture
 
 ### Design discussion scaffold
 
-**Trigger:** `workflow_dispatch` via the standalone workflow or automatically via `orchestration-dispatch` when `requested_stage: design`.
+**Trigger:** automatically via `orchestration-dispatch` when `requested_stage: design`.
 
 **What it does:**
 1. Discovers whether a discussion already exists using three-tier owned-artifact lookup:
@@ -624,11 +624,6 @@ The stage-specific sections below still document the underlying scaffold/capture
    - **Tier 3:** Orphaned discussion recovery via GraphQL search (handles partial failure where discussion was created but backlink comment was not posted)
 2. If no discussion exists: renders `templates/design-discussion.md` with issue metadata, creates a GitHub Discussion in the configured category (default: "Ideas"), and posts the discussion URL back to the issue with an owned-artifact marker
 3. If a discussion already exists: skips creation and posts an informational comment (with the marker if not already present)
-
-**Standalone usage:**
-```
-gh workflow run scaffold-design-discussion.yml -f issue_number=<N>
-```
 
 **Via orchestration:**
 ```
@@ -687,7 +682,7 @@ The design stage fails fast if any required agent secret is unavailable.
 
 ### Implementation plan scaffold
 
-**Trigger:** `workflow_dispatch` via the standalone workflow or automatically via `orchestration-dispatch` when `requested_stage: plan`.
+**Trigger:** automatically via `orchestration-dispatch` when `requested_stage: plan`.
 
 **What it does:**
 1. Discovers whether a plan comment already exists using two-tier owned-artifact lookup:
@@ -696,11 +691,6 @@ The design stage fails fast if any required agent secret is unavailable.
    - Status comments use a distinct marker (`<!-- gpa:impl-plan-status:#N -->`) and are **not** treated as the plan artifact
 2. If no plan comment exists: renders `templates/implementation-plan.md` with issue metadata and posts it as an issue comment with an owned-artifact marker
 3. If a plan comment already exists: skips creation and posts an informational status comment
-
-**Standalone usage:**
-```
-gh workflow run scaffold-impl-plan.yml -f issue_number=<N>
-```
 
 **Via orchestration:**
 ```
@@ -718,7 +708,7 @@ When triggered via orchestration, the scaffold runs **before** the plan gate che
 
 ### Execution bootstrap scaffold
 
-**Trigger:** `workflow_dispatch` via the standalone workflow or automatically via `orchestration-dispatch` when `requested_stage: execution`.
+**Trigger:** automatically via `orchestration-dispatch` when `requested_stage: execution`.
 
 **What it does:**
 1. Discovers whether an execution PR already exists using two-tier owned-artifact lookup:
@@ -727,11 +717,6 @@ When triggered via orchestration, the scaffold runs **before** the plan gate che
    - Status comments use a distinct marker (`<!-- gpa:execution-status:#N -->`) and are **not** treated as the execution artifact
 2. If no PR exists: derives a branch name from the issue title (`<issue-number>-<slug>`), creates the branch via the GitHub API, renders `templates/execution-bootstrap.md` with issue metadata, opens a draft PR, and posts a backlink comment on the source issue
 3. If a PR already exists: skips creation and posts an informational status comment
-
-**Standalone usage:**
-```
-gh workflow run scaffold-execution.yml -f issue_number=<N>
-```
 
 **Via orchestration:**
 ```
@@ -753,7 +738,7 @@ When triggered via orchestration, the scaffold runs **before** the execution gat
 
 ### Follow-up capture
 
-**Trigger:** `workflow_dispatch` via the standalone workflow or automatically via `orchestration-dispatch` when `requested_stage: follow-up-capture`.
+**Trigger:** automatically via `orchestration-dispatch` when `requested_stage: follow-up-capture`.
 
 **What it does:**
 1. Scans all comments on the source issue for structured `<!-- FOLLOW-UP: ... -->` markers
@@ -762,16 +747,11 @@ When triggered via orchestration, the scaffold runs **before** the execution gat
 4. If an existing issue already covers this marker: skips creation
 5. Posts a summary status comment on the source issue listing all created and skipped follow-up issues
 
-**Standalone usage:**
-```
-gh workflow run capture-follow-ups.yml -f issue_number=<N>
-```
-
 **Via orchestration:**
 ```
 gh workflow run orchestration-dispatch.yml -f issue_number=<N> -f requested_stage=follow-up-capture
 ```
-Both the standalone workflow and the orchestration path run the gate check **before** the capture action. The gate validates that valid FOLLOW-UP markers exist (all 5 fields present), that execution is complete (a merged PR references the issue), and that no open PRs remain (current work is finished). Once the gate passes, the capture action creates backlog issues from the markers.
+Both the orchestration path and retry-driven re-entry run the gate check **before** the capture action. The gate validates that valid FOLLOW-UP markers exist (all 5 fields present), that execution is complete (a merged PR references the issue), and that no open PRs remain (current work is finished). Once the gate passes, the capture action creates backlog issues from the markers.
 
 **Marker format:**
 ```
@@ -820,7 +800,7 @@ If a label does not exist, the action attempts to create the issue without it an
 
 ### Closeout scaffold
 
-**Trigger:** `workflow_dispatch` via the standalone workflow or automatically via `orchestration-dispatch` when `requested_stage: closeout`.
+**Trigger:** automatically via `orchestration-dispatch` when `requested_stage: closeout`.
 
 **What it does:**
 1. Discovers whether a closeout retrospective comment already exists using owned-artifact lookup:
@@ -829,16 +809,11 @@ If a label does not exist, the action attempts to create the issue without it an
 2. If no closeout comment exists: gathers merged PR list and follow-up issue counts, renders `templates/closeout.md` with issue metadata, and posts it as an issue comment with an owned-artifact marker
 3. If a closeout comment already exists: skips creation and posts an informational status comment
 
-**Standalone usage:**
-```
-gh workflow run scaffold-closeout.yml -f issue_number=<N>
-```
-
 **Via orchestration:**
 ```
 gh workflow run orchestration-dispatch.yml -f issue_number=<N> -f requested_stage=closeout
 ```
-Both entry points enforce the same closeout sequence: **pre-scaffold gate → scaffold → full gate**. The pre-scaffold gate (`check_mode: pre-scaffold`) verifies non-scaffold prerequisites (merged PR, branch deleted, follow-up evidence) before any scaffold comment is posted. If prerequisites are not met, the workflow fails without mutating any artifacts. Once the pre-scaffold gate passes, the closeout retrospective comment is created, and then the full gate validates scaffold content (headings, sections, process improvement dispositions).
+The orchestration path enforces the same closeout sequence: **pre-scaffold gate → scaffold → full gate**. The pre-scaffold gate (`check_mode: pre-scaffold`) verifies non-scaffold prerequisites (merged PR, branch deleted, follow-up evidence) before any scaffold comment is posted. If prerequisites are not met, the workflow fails without mutating any artifacts. Once the pre-scaffold gate passes, the closeout retrospective comment is created, and then the full gate validates scaffold content (headings, sections, process improvement dispositions).
 
 **Closeout template:** `templates/closeout.md` contains structured sections for the retrospective (delivery summary, what went well, what could improve, follow-up status, exit checklist) plus auto-populated merged PR list and follow-up counts.
 
@@ -877,8 +852,6 @@ These three gates complete the 8-stage model so every transition has a real mach
 
 All three gates support `GATE-WAIVER` override by trusted actors (per `config/trust-policy.yml`).
 
-**Standalone closeout workflow:** The `scaffold-closeout.yml` workflow enforces closeout prerequisites *before* scaffolding and runs the full gate *after*. The sequence is `validate-eligibility → check-gate(closeout, pre-scaffold) → scaffold-closeout → check-gate(closeout, full) → status comment`. If the pre-scaffold gate fails (merged PR, branch deleted, follow-ups), the scaffold is not posted. If the post-scaffold gate fails (content checks), the workflow posts a failure comment listing unmet conditions and exits non-zero.
-
 ## Operator actions
 
 | Action | How |
@@ -890,11 +863,9 @@ All three gates support `GATE-WAIVER` override by trusted actors (per `config/tr
 | Waive a gate | Post `GATE-WAIVER: <gate-name> — <reason>` on the issue/PR |
 | Block automation | Add `do-not-automate` label to the issue |
 
-The direct stage-specific scaffold workflows still exist in this repository during the transition, but they are maintenance-only entrypoints and should not be replicated into new participating repos.
-
 ### Query run history
 
-The `query-run-history` composite action scans issue comments for machine-readable run-status markers (`<!-- gpa:run-status:STAGE:OUTCOME:RUN_KEY -->`) and outputs structured JSON. It is read-only and makes no mutations. The standalone workflows, orchestration workflow, and retry wrapper use this history to render a best-effort `Previous run` link in their job summaries.
+The `query-run-history` composite action scans issue comments for machine-readable run-status markers (`<!-- gpa:run-status:STAGE:OUTCOME:RUN_KEY -->`) and outputs structured JSON. It is read-only and makes no mutations. The orchestration workflow and retry wrapper use this history to render a best-effort `Previous run` link in their job summaries.
 
 **Inputs:** `issue_number`, `github_token`
 
@@ -913,7 +884,7 @@ All automation comments (scaffold actions, orchestration dispatch, retry-stage) 
 
 ### Retry stage workflow
 
-The optional `retry-stage.yml` workflow provides a dedicated operator entry point for retrying a failed stage. It validates eligibility, maps the target stage to the corresponding stage implementation, and dispatches it with the same run key so the retry wrapper comment, child workflow comments, and job summaries stay correlated.
+The optional `retry-stage.yml` workflow provides a dedicated operator entry point for retrying a failed stage. It validates eligibility, maps the target stage to the corresponding orchestration stage, and dispatches `repository_dispatch` to `orchestration-dispatch.yml` with the same run key so the retry wrapper comment, orchestration comments, and job summaries stay correlated.
 
 **Usage:**
 ```bash
@@ -922,17 +893,17 @@ gh workflow run retry-stage.yml -f issue_number=<N> -f target_stage=<stage>
 
 **Valid stages:** `design`, `plan`, `execution`, `follow-up-capture`, `closeout`
 
-**Stage-to-workflow mapping:**
+**Stage mapping:**
 
-| Stage | Dispatched workflow |
-|-------|-------------------|
-| `design` | `scaffold-design-discussion.yml` |
-| `plan` | `scaffold-impl-plan.yml` |
-| `execution` | `scaffold-execution.yml` |
-| `follow-up-capture` | `capture-follow-ups.yml` |
-| `closeout` | `scaffold-closeout.yml` |
+| Retry target | Orchestration `requested_stage` |
+|-------------|--------------------------------|
+| `design` | `design` |
+| `plan` | `plan` |
+| `execution` | `execution` |
+| `follow-up-capture` | `follow-up-capture` |
+| `closeout` | `closeout` |
 
-The retry workflow validates eligibility before dispatching (issue must be open, no `do-not-automate` label, actor must be trusted). The dispatched workflow runs independently and posts its own status comment, but it reuses the retry wrapper's run key for cross-surface correlation.
+The retry workflow validates eligibility before dispatching (issue must be open, no `do-not-automate` label, actor must be trusted). The dispatched orchestration run executes independently and posts its own status comment, but it reuses the retry wrapper's run key for cross-surface correlation.
 
 ## Operator Runbook
 
@@ -970,12 +941,6 @@ gh workflow run retry-stage.yml \
   -f target_stage=design
 ```
 This validates eligibility and dispatches the correct stage implementation with a correlated run key.
-
-**Option 3 — Direct stage workflow (source-repo maintenance only):**
-```bash
-gh workflow run scaffold-design-discussion.yml -f issue_number=42
-```
-This bypasses the participating-repo contract and should be treated as a maintenance/debug path while the standalone wrappers still exist in this repository.
 
 ### Overriding a gate (GATE-WAIVER)
 

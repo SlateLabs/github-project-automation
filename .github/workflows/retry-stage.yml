@@ -19,7 +19,6 @@ on:
           - closeout
 
 permissions:
-  actions: write
   contents: read
   issues: write
 
@@ -89,11 +88,13 @@ jobs:
           echo "::error::Issue is not eligible for retry: $REASON"
           exit 1
 
-      - name: Map stage to workflow and dispatch
+      - name: Dispatch canonical orchestrator
         if: steps.eligibility.outputs.eligible == 'true'
         id: dispatch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           TARGET_STAGE: ${{ inputs.target_stage }}
           RUN_KEY: ${{ steps.run-key.outputs.run_key }}
@@ -104,22 +105,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Map target_stage to the corresponding standalone workflow filename
+          # Map target_stage to the canonical orchestration requested_stage.
           case "$TARGET_STAGE" in
             design)
-              workflow_file="scaffold-design-discussion.yml"
+              requested_stage="design"
               ;;
             plan)
-              workflow_file="scaffold-impl-plan.yml"
+              requested_stage="plan"
               ;;
             execution)
-              workflow_file="scaffold-execution.yml"
+              requested_stage="execution"
               ;;
             follow-up-capture)
-              workflow_file="capture-follow-ups.yml"
+              requested_stage="follow-up-capture"
               ;;
             closeout)
-              workflow_file="scaffold-closeout.yml"
+              requested_stage="closeout"
               ;;
             *)
               echo "::error::Unknown target stage: $TARGET_STAGE"
@@ -127,13 +128,19 @@ jobs:
               ;;
           esac
 
-          echo "::notice::Dispatching $workflow_file for issue #$ISSUE_NUMBER (stage: $TARGET_STAGE)"
+          timestamp=$(printf '%s' "$RUN_KEY" | rev | cut -d/ -f1 | rev)
+          echo "::notice::Dispatching orchestration-dispatch.yml for issue #$ISSUE_NUMBER (stage: $requested_stage, run key: $RUN_KEY)"
 
-          # Dispatch the target workflow
-          gh workflow run "$workflow_file" \
-            -f "issue_number=$ISSUE_NUMBER" \
-            -f "run_key=$RUN_KEY" 2>&1 || {
-            echo "::error::Failed to dispatch $workflow_file"
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/dispatches" \
+            -f "event_type=orchestration-start" \
+            -F "client_payload[issue_number]=$ISSUE_NUMBER" \
+            -f "client_payload[requested_stage]=$requested_stage" \
+            -f "client_payload[run_key]=$RUN_KEY" \
+            -f "client_payload[actor]=$ACTOR" \
+            -f "client_payload[timestamp]=$timestamp" 2>&1 || {
+            echo "::error::Failed to dispatch orchestration-dispatch.yml"
 
             gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
           ### Retry stage — dispatch failed
@@ -143,16 +150,17 @@ jobs:
           |-------|-------|
           | **Run key** | \`$RUN_KEY\` |
           | **Target stage** | \`$TARGET_STAGE\` |
-          | **Workflow** | \`$workflow_file\` |
+          | **Workflow** | \`orchestration-dispatch.yml\` |
           | **Actor** | @$ACTOR |
-          | **Result** | :x: Failed to dispatch workflow |
+          | **Result** | :x: Failed to dispatch orchestrator |
           | **Actions run** | [$RUN_ID]($RUN_URL) |
           COMMENT_EOF
             )"
             exit 1
           }
 
-          echo "workflow_file=$workflow_file" >> "$GITHUB_OUTPUT"
+          echo "workflow_file=orchestration-dispatch.yml" >> "$GITHUB_OUTPUT"
+          echo "requested_stage=$requested_stage" >> "$GITHUB_OUTPUT"
 
           # Post retry dispatched comment
           gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
@@ -163,12 +171,12 @@ jobs:
           |-------|-------|
           | **Run key** | \`$RUN_KEY\` |
           | **Target stage** | \`$TARGET_STAGE\` |
-          | **Workflow** | \`$workflow_file\` |
+          | **Workflow** | \`orchestration-dispatch.yml\` |
           | **Actor** | @$ACTOR |
           | **Result** | :arrows_counterclockwise: Retry dispatched |
           | **Actions run** | [$RUN_ID]($RUN_URL) |
 
-          The \`$TARGET_STAGE\` stage workflow has been dispatched for issue #$ISSUE_NUMBER.
+          The canonical orchestrator has been dispatched for issue #$ISSUE_NUMBER with \`requested_stage: $requested_stage\`.
           Check the Actions tab for the dispatched run status.
           COMMENT_EOF
           )"

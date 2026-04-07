@@ -1973,7 +1973,8 @@ jobs:
           )"
 
       # For the closeout stage, enforce pre-scaffold prerequisites BEFORE
-      # scaffolding. This matches the standalone scaffold-closeout.yml sequence:
+      # scaffolding. This preserves the same pre-scaffold/full-gate sequence that
+      # earlier standalone closeout handling used:
       # pre-scaffold gate (merged PR, branch deleted, follow-ups) → scaffold →
       # full gate (content checks). Without this, the orchestration path could
       # post a closeout retrospective on an issue that hasn't met prerequisites.
