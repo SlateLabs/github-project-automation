@@ -56,17 +56,17 @@ Anything in this section should be treated as part of the bootstrap contract for
 
 ### Required workflow entrypoints
 
-The repo should expose repo-local workflow entrypoints that call the shared workflows in this repo at a pinned SHA or release tag:
+Participating repos should expose the canonical repo-local orchestration entrypoint that calls the shared workflow in this repo at a pinned SHA or release tag:
 
 - `orchestration-dispatch.yml`
-- `retry-stage.yml`
-- `scaffold-design-discussion.yml`
-- `scaffold-impl-plan.yml`
-- `scaffold-execution.yml`
-- `capture-follow-ups.yml`
-- `scaffold-closeout.yml`
 
 These should be pinned to an immutable ref from `SlateLabs/github-project-automation`, never a mutable branch.
+
+Optional operator convenience entrypoint:
+
+- `retry-stage.yml`
+
+The stage-specific standalone scaffold/capture workflows currently remain in this repository for maintenance and migration purposes, but they are no longer part of the required bootstrap contract for `repo-template` or other participating repos.
 
 ### Required docs/bootstrap guidance
 
@@ -117,12 +117,13 @@ Issue [#19](https://github.com/SlateLabs/github-project-automation/issues/19) sh
 ## How participating repos integrate
 
 1. Create a repo from `repo-template` (or manually add the orchestration workflow)
-2. The repo-local workflow calls shared reusable workflows from this repo at a pinned ref:
+2. The required repo-local `orchestration-dispatch.yml` workflow calls the shared reusable workflow from this repo at a pinned ref:
    ```yaml
    uses: SlateLabs/github-project-automation/.github/workflows/<name>.yml@v0.1.0
    ```
-3. Pin `<ref>` to a release tag or SHA — never pin to a mutable branch
-4. Upgrade by bumping the pinned ref; release notes document breaking changes
+3. Optionally expose `retry-stage.yml` as a thin repo-local wrapper if the repo wants a dedicated operator retry entrypoint
+4. Pin `<ref>` to a release tag or SHA — never pin to a mutable branch
+5. Upgrade by bumping the pinned ref; release notes document breaking changes
 
 ## Entry points
 
@@ -608,7 +609,9 @@ This is intentionally "fail forward" for scaffold-driven stages:
   - `closeout` -> `Done`
 - Manual/retry runs without `project_item_id` still execute, but they do not mutate project state and do not auto-queue the next stage.
 
-The standalone `workflow_dispatch` wrappers remain as operator escape hatches, but they are no longer the intended happy-path glue between successful stages.
+The standalone `workflow_dispatch` wrappers remain in this repository as legacy maintenance escape hatches, but they are no longer the intended happy-path glue between successful stages and are not part of the required participating-repo contract. New repos should route operators through `orchestration-dispatch.yml`, plus `retry-stage.yml` if they want a dedicated retry affordance.
+
+The stage-specific sections below still document the underlying scaffold/capture behavior because those actions continue to be invoked by orchestration. Their standalone workflow triggers should be treated as source-repo maintenance entrypoints rather than template requirements.
 
 ### Design discussion scaffold
 
@@ -882,14 +885,12 @@ All three gates support `GATE-WAIVER` override by trusted actors (per `config/tr
 |--------|-----|
 | View run status | Check automation comment on the issue, or Actions run |
 | Query run history | Use the `query-run-history` action (see [Run history](#query-run-history) below) |
+| Run a stage manually | `gh workflow run orchestration-dispatch.yml -f issue_number=<N> -f requested_stage=<stage>` |
 | Retry failed run | `gh workflow run retry-stage.yml -f issue_number=<N> -f target_stage=<stage>` |
-| Scaffold a design discussion | `gh workflow run scaffold-design-discussion.yml -f issue_number=<N>` |
-| Scaffold an implementation plan | `gh workflow run scaffold-impl-plan.yml -f issue_number=<N>` |
-| Scaffold execution bootstrap | `gh workflow run scaffold-execution.yml -f issue_number=<N>` |
-| Capture follow-ups | `gh workflow run capture-follow-ups.yml -f issue_number=<N>` |
-| Scaffold closeout retrospective | `gh workflow run scaffold-closeout.yml -f issue_number=<N>` |
 | Waive a gate | Post `GATE-WAIVER: <gate-name> — <reason>` on the issue/PR |
 | Block automation | Add `do-not-automate` label to the issue |
+
+The direct stage-specific scaffold workflows still exist in this repository during the transition, but they are maintenance-only entrypoints and should not be replicated into new participating repos.
 
 ### Query run history
 
@@ -912,7 +913,7 @@ All automation comments (scaffold actions, orchestration dispatch, retry-stage) 
 
 ### Retry stage workflow
 
-The `retry-stage.yml` workflow provides a single entry point for retrying any failed stage. It validates eligibility, maps the target stage to the correct standalone workflow, and dispatches it with the same run key so the retry wrapper comment, child workflow comments, and job summaries stay correlated.
+The optional `retry-stage.yml` workflow provides a dedicated operator entry point for retrying a failed stage. It validates eligibility, maps the target stage to the corresponding stage implementation, and dispatches it with the same run key so the retry wrapper comment, child workflow comments, and job summaries stay correlated.
 
 **Usage:**
 ```bash
@@ -954,27 +955,27 @@ The retry workflow validates eligibility before dispatching (issue must be open,
 
 ### Retrying a failed stage
 
-**Option 1 — Retry workflow (recommended):**
-```bash
-gh workflow run retry-stage.yml \
-  -f issue_number=42 \
-  -f target_stage=design
-```
-This validates eligibility and dispatches the correct stage workflow.
-
-**Option 2 — Direct dispatch:**
-```bash
-gh workflow run scaffold-design-discussion.yml -f issue_number=42
-```
-Skip the retry wrapper and invoke the stage workflow directly. Same eligibility checks apply.
-
-**Option 3 — Orchestration dispatch:**
+**Option 1 — Orchestration dispatch (default for participating repos):**
 ```bash
 gh workflow run orchestration-dispatch.yml \
   -f issue_number=42 \
   -f requested_stage=design
 ```
-Routes through the full orchestration engine (dedup check, gate check, state verification).
+Routes through the canonical orchestration engine (dedup check, gate check, state verification).
+
+**Option 2 — Retry workflow (optional operator convenience):**
+```bash
+gh workflow run retry-stage.yml \
+  -f issue_number=42 \
+  -f target_stage=design
+```
+This validates eligibility and dispatches the correct stage implementation with a correlated run key.
+
+**Option 3 — Direct stage workflow (source-repo maintenance only):**
+```bash
+gh workflow run scaffold-design-discussion.yml -f issue_number=42
+```
+This bypasses the participating-repo contract and should be treated as a maintenance/debug path while the standalone wrappers still exist in this repository.
 
 ### Overriding a gate (GATE-WAIVER)
 
