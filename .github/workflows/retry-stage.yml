@@ -64,20 +64,8 @@ jobs:
           RUN_ID: ${{ github.run_id }}
         shell: bash
         run: |
-          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-          ### Retry stage — ineligible
-          <!-- gpa:run-status:$TARGET_STAGE:failed:$RUN_KEY -->
-
-          | Field | Value |
-          |-------|-------|
-          | **Run key** | \`$RUN_KEY\` |
-          | **Target stage** | \`$TARGET_STAGE\` |
-          | **Actor** | @$ACTOR |
-          | **Result** | :x: Ineligible for retry |
-          | **Reason** | $REASON |
-          | **Actions run** | [$RUN_ID]($RUN_URL) |
-          COMMENT_EOF
-          )"
+          body="$(python3 scripts/render_orchestration_comment.py retry-ineligible)"
+          python3 scripts/github_mutations.py issue-comment --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body "$body"
 
       - name: Fail on ineligible
         if: steps.eligibility.outputs.eligible != 'true'
@@ -142,20 +130,8 @@ jobs:
           RUN_ID: ${{ github.run_id }}
         shell: bash
         run: |
-          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-          ### Retry stage — dispatch failed
-          <!-- gpa:run-status:$TARGET_STAGE:failed:$RUN_KEY -->
-
-          | Field | Value |
-          |-------|-------|
-          | **Run key** | \`$RUN_KEY\` |
-          | **Target stage** | \`$TARGET_STAGE\` |
-          | **Workflow** | \`orchestration-dispatch.yml\` |
-          | **Actor** | @$ACTOR |
-          | **Result** | :x: Failed to dispatch orchestrator |
-          | **Actions run** | [$RUN_ID]($RUN_URL) |
-          COMMENT_EOF
-          )"
+          body="$(python3 scripts/render_orchestration_comment.py retry-dispatch-failed)"
+          python3 scripts/github_mutations.py issue-comment --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body "$body"
 
       - name: Post retry dispatched comment
         if: steps.dispatch.outputs.dispatched == 'true'
@@ -170,23 +146,8 @@ jobs:
           RUN_ID: ${{ github.run_id }}
         shell: bash
         run: |
-          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-          ### Retry stage — dispatched
-          <!-- gpa:run-status:$TARGET_STAGE:started:$RUN_KEY -->
-
-          | Field | Value |
-          |-------|-------|
-          | **Run key** | \`$RUN_KEY\` |
-          | **Target stage** | \`$TARGET_STAGE\` |
-          | **Workflow** | \`orchestration-dispatch.yml\` |
-          | **Actor** | @$ACTOR |
-          | **Result** | :arrows_counterclockwise: Retry dispatched |
-          | **Actions run** | [$RUN_ID]($RUN_URL) |
-
-          The canonical orchestrator has been dispatched for issue #$ISSUE_NUMBER with \`requested_stage: $REQUESTED_STAGE\`.
-          Check the Actions tab for the dispatched run status.
-          COMMENT_EOF
-          )"
+          body="$(python3 scripts/render_orchestration_comment.py retry-dispatched)"
+          python3 scripts/github_mutations.py issue-comment --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body "$body"
 
       - name: Query run history
         if: always()

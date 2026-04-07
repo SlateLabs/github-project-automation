@@ -157,8 +157,9 @@ runs:
               fi
 
               # Reopen the PR via API
-              reopen_result=$(gh api "repos/{owner}/{repo}/pulls/${closed_pr_number}" \
-                -X PATCH -f "state=open" 2>&1) || {
+              reopen_result=$(python3 scripts/github_mutations.py pr-reopen \
+                --repo "$GITHUB_REPOSITORY" \
+                --pr-number "$closed_pr_number" 2>&1) || {
                 echo "::error::Failed to reopen PR #${closed_pr_number}: $reopen_result"
                 exit 1
               }
@@ -211,16 +212,16 @@ runs:
         | **Discovery** | $discovery_method |
         | **Result** | :fast_forward: Skipped — PR already exists |"
 
-          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-        ### Execution bootstrap scaffold — already exists
-        <!-- $status_marker -->
-        <!-- gpa:run-status:execution:skipped:$RUN_KEY -->
-
-        $table_rows
-
-        A PR for this issue already exists. No new branch or PR was created.
-        COMMENT_EOF
-          )"
+          comment_body=$(
+            STATUS_MARKER="$status_marker" \
+            RUN_KEY="$RUN_KEY" \
+            TABLE_ROWS="$table_rows" \
+            python3 scripts/render_orchestration_comment.py execution-scaffold-exists
+          )
+          python3 scripts/github_mutations.py issue-comment \
+            --repo "$GITHUB_REPOSITORY" \
+            --issue-number "$ISSUE_NUMBER" \
+            --body "$comment_body" >/dev/null
 
           exit 0
         fi
@@ -278,9 +279,10 @@ runs:
           fi
 
           # Create branch via API
-          create_result=$(gh api "repos/{owner}/{repo}/git/refs" \
-            -f "ref=refs/heads/${branch_name}" \
-            -f "sha=${default_sha}" 2>&1) || {
+          create_result=$(python3 scripts/github_mutations.py create-ref \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "refs/heads/${branch_name}" \
+            --sha "$default_sha" 2>&1) || {
             echo "::error::Failed to create branch '$branch_name': $create_result"
             exit 1
           }
@@ -310,16 +312,16 @@ runs:
         | **Branch** | \`$branch_name\` |
         | **Result** | :white_check_mark: Execution branch prepared |"
 
-          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-        ### Execution bootstrap scaffold — branch prepared
-        <!-- $status_marker -->
-        <!-- gpa:run-status:execution:prepared:$RUN_KEY -->
-
-        $table_rows
-
-        A feature branch has been prepared for agent implementation. PR creation will occur after code changes are pushed.
-        COMMENT_EOF
-          )"
+          comment_body=$(
+            STATUS_MARKER="$status_marker" \
+            RUN_KEY="$RUN_KEY" \
+            TABLE_ROWS="$table_rows" \
+            python3 scripts/render_orchestration_comment.py execution-branch-prepared
+          )
+          python3 scripts/github_mutations.py issue-comment \
+            --repo "$GITHUB_REPOSITORY" \
+            --issue-number "$ISSUE_NUMBER" \
+            --body "$comment_body" >/dev/null
 
           exit 0
         fi
@@ -341,12 +343,12 @@ runs:
         repo_name="${GITHUB_REPOSITORY#*/}"
         repo_name="${repo_name:-github-project-automation}"
 
-        pr_result=$(gh api "repos/${repo_owner}/${repo_name}/pulls" \
-          -f "title=${pr_title}" \
-          -f "head=${branch_name}" \
-          -f "base=${default_branch}" \
-          -f "body=${rendered_body}" \
-          -F "draft=true" 2>&1) || {
+        pr_result=$(python3 scripts/github_mutations.py create-draft-pr \
+          --repo "${repo_owner}/${repo_name}" \
+          --title "$pr_title" \
+          --head "$branch_name" \
+          --base "$default_branch" \
+          --body "$rendered_body" 2>&1) || {
           echo "::error::Failed to create draft PR: $pr_result"
           exit 1
         }
@@ -382,14 +384,13 @@ runs:
         | **Branch** | \`$branch_name\` |
         | **Result** | :white_check_mark: Execution bootstrap created |"
 
-        gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-        ### Execution bootstrap scaffold — created
-        <!-- $status_marker -->
-        <!-- gpa:run-status:execution:completed:$RUN_KEY -->
-
-        $table_rows
-
-        A feature branch and draft PR have been created for this issue.
-        Fill in the PR body sections and mark the PR ready for review when implementation is complete.
-        COMMENT_EOF
-        )"
+        comment_body=$(
+          STATUS_MARKER="$status_marker" \
+          RUN_KEY="$RUN_KEY" \
+          TABLE_ROWS="$table_rows" \
+          python3 scripts/render_orchestration_comment.py execution-scaffold-created
+        )
+        python3 scripts/github_mutations.py issue-comment \
+          --repo "$GITHUB_REPOSITORY" \
+          --issue-number "$ISSUE_NUMBER" \
+          --body "$comment_body" >/dev/null

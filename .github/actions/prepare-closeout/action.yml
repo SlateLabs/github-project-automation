@@ -54,26 +54,14 @@ runs:
         unmet_list=$(echo "$UNMET" | jq -r '.[] | "- :x: \(.)"' 2>/dev/null || echo "- (none)")
         waived_list=$(echo "$WAIVED" | jq -r '.[] | "- :fast_forward: \(.)"' 2>/dev/null || echo "- (none)")
         body_file=$(mktemp)
-        cat > "$body_file" <<COMMENT_EOF
-        ### Orchestration run — closeout pre-scaffold gate failed
-        <!-- gpa:run-status:$REQUESTED_STAGE:failed:$RUN_KEY -->
-
-        | Field | Value |
-        |-------|-------|
-        | **Run key** | \`$RUN_KEY\` |
-        | **Requested stage** | \`$REQUESTED_STAGE\` |
-        | **Actor** | @$ACTOR |
-        | **Result** | :x: Prerequisites not met — scaffold not posted |
-        | **Actions run** | [$RUN_ID]($RUN_URL) |
-
-        **Unmet prerequisites:**
-        $unmet_list
-
-        **Waived conditions:**
-        $waived_list
-
-        Resolve the unmet prerequisites and re-trigger.
-        COMMENT_EOF
+        REQUESTED_STAGE="$REQUESTED_STAGE" \
+        RUN_KEY="$RUN_KEY" \
+        ACTOR="$ACTOR" \
+        RUN_ID="$RUN_ID" \
+        RUN_URL="$RUN_URL" \
+        UNMET_LIST="$unmet_list" \
+        WAIVED_LIST="$waived_list" \
+        python3 scripts/render_orchestration_comment.py closeout-pre-scaffold-failed > "$body_file"
         python3 scripts/github_mutations.py issue-comment-file --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body-file "$body_file"
         echo "::error::Closeout pre-scaffold gate failed. Unmet prerequisites: $UNMET"
         exit 1

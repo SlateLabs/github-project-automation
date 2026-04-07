@@ -281,4 +281,4 @@ jobs:
             }')
 
           review_body="<!-- gpa:run-status:plan-review:completed:${RUN_KEY} -->"$'\n'"<!-- gpa:artifact-payload:${artifact_payload} -->"$'\n\n'"${REVIEW_BODY}"
-          gh issue comment "$ISSUE_NUMBER" --body "$review_body" >/dev/null
+          python3 scripts/github_mutations.py issue-comment --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body "$review_body" >/dev/null

@@ -227,24 +227,10 @@ jobs:
           set -euo pipefail
           checkpoint=$(jq -cn --arg run_key "$RUN_KEY" --arg stage "agent-review" --arg state "completed" --arg actor "$ACTOR" --arg disposition "$DISPOSITION" --arg artifact_ref "pr:$PR_NUMBER" --arg pr_head_sha "$PR_HEAD_SHA" --arg next_stage "$NEXT_STAGE" '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,disposition:$disposition,artifact_ref:$artifact_ref,pr_head_sha:$pr_head_sha,next_stage:$next_stage}')
           canonical_checkpoint=$(jq -cn --arg run_key "$RUN_KEY" --arg actor "$ACTOR" --arg disposition "$DISPOSITION" --arg artifact_ref "pr:$PR_NUMBER" --arg pr_head_sha "$PR_HEAD_SHA" --arg next_stage "$NEXT_STAGE" --argjson reason_codes "${REASON_CODES:-[]}" '{kind:"checkpoint",version:"gpa.v1",run_key:$run_key,stage:{name:"agent-review",status:"completed",actor:$actor},decision:{next_stage:$next_stage,reason_codes:$reason_codes},artifact:{ref:$artifact_ref},data:{disposition:$disposition,pr_head_sha:$pr_head_sha}}')
-          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-          ### Agent review
-          <!-- gpa:run-status:agent-review:completed:$RUN_KEY -->
-          <!-- gpa:checkpoint-v1 $canonical_checkpoint -->
-          <!-- gpa:checkpoint $checkpoint -->
-
-          | Field | Value |
-          |-------|-------|
-          | **Run key** | \`$RUN_KEY\` |
-          | **PR** | $PR_URL |
-          | **PR head SHA** | \`$PR_HEAD_SHA\` |
-          | **Disposition** | \`$DISPOSITION\` |
-
-          $SUMMARY
-
-          $FEEDBACK_BODY
-          COMMENT_EOF
-          )"
+          export CHECKPOINT="$checkpoint"
+          export CANONICAL_CHECKPOINT="$canonical_checkpoint"
+          body="$(python3 scripts/render_orchestration_comment.py agent-review-summary)"
+          python3 scripts/github_mutations.py issue-comment --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body "$body"
 
       - name: Publish review-ready summary
         if: steps.parse-agent-review.outputs.disposition == 'operator-review-required'
@@ -265,7 +251,8 @@ jobs:
           deployment_url=$(printf '%s' "$PR_BODY" | grep -oE 'https://[^[:space:])]+' || true)
           export DEPLOYMENT_URL="${deployment_url:-"(deployment URL not yet wired)"}"
           export CHECKPOINT="$checkpoint"
-          gh issue comment "$ISSUE_NUMBER" --body "$(python3 scripts/render_orchestration_comment.py operator-review-ready)"
+          body="$(python3 scripts/render_orchestration_comment.py operator-review-ready)"
+          python3 scripts/github_mutations.py issue-comment --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body "$body"
 
       - name: Auto-approve PR review
         if: steps.parse-agent-review.outputs.disposition == 'auto-approve'

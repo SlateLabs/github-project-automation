@@ -167,16 +167,16 @@ runs:
         | **Discovery** | $discovery_method |
         | **Result** | :fast_forward: Skipped — discussion already linked |"
 
-          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-        ### Design discussion scaffold — already exists
-        <!-- $artifact_marker -->
-        <!-- gpa:run-status:design:skipped:$RUN_KEY -->
-
-        $table_rows
-
-        A design discussion is already linked to this issue. No new discussion was created.
-        COMMENT_EOF
-          )"
+          comment_body=$(
+            ARTIFACT_MARKER="$artifact_marker" \
+            RUN_KEY="$RUN_KEY" \
+            TABLE_ROWS="$table_rows" \
+            python3 scripts/render_orchestration_comment.py design-scaffold-exists
+          )
+          python3 scripts/github_mutations.py issue-comment \
+            --repo "$GITHUB_REPOSITORY" \
+            --issue-number "$ISSUE_NUMBER" \
+            --body "$comment_body" >/dev/null
 
           exit 0
         fi
@@ -251,25 +251,11 @@ runs:
         # --- 6. Create discussion via GraphQL ---
         discussion_title="Design: $issue_title"
 
-        create_result=$(gh api graphql -f query='
-          mutation($repoId: ID!, $categoryId: ID!, $title: String!, $body: String!) {
-            createDiscussion(input: {
-              repositoryId: $repoId,
-              categoryId: $categoryId,
-              title: $title,
-              body: $body
-            }) {
-              discussion {
-                id
-                number
-                url
-              }
-            }
-          }' \
-          -f repoId="$repo_id" \
-          -f categoryId="$category_id" \
-          -f title="$discussion_title" \
-          -f body="$rendered_body" 2>&1) || {
+        create_result=$(python3 scripts/github_mutations.py discussion-create \
+          --repo-id "$repo_id" \
+          --category-id "$category_id" \
+          --title "$discussion_title" \
+          --body "$rendered_body" 2>&1) || {
           echo "::error::GraphQL createDiscussion mutation failed: $create_result"
           exit 1
         }
@@ -304,14 +290,13 @@ runs:
         | **Discussion** | $new_url |
         | **Result** | :white_check_mark: Discussion created |"
 
-        gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-        ### Design discussion scaffold — created
-        <!-- gpa:design-discussion:#${ISSUE_NUMBER} -->
-        <!-- gpa:run-status:design:completed:$RUN_KEY -->
-
-        $table_rows
-
-        A design discussion has been created with all required gate headings.
-        Fill in each section, resolve open questions, and get at least one review comment to pass the design gate.
-        COMMENT_EOF
-        )"
+        comment_body=$(
+          ISSUE_NUMBER="$ISSUE_NUMBER" \
+          RUN_KEY="$RUN_KEY" \
+          TABLE_ROWS="$table_rows" \
+          python3 scripts/render_orchestration_comment.py design-scaffold-created
+        )
+        python3 scripts/github_mutations.py issue-comment \
+          --repo "$GITHUB_REPOSITORY" \
+          --issue-number "$ISSUE_NUMBER" \
+          --body "$comment_body" >/dev/null

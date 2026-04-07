@@ -237,13 +237,17 @@ else
   check "plan review emits canonical artifact payload" "fail"
 fi
 
-if grep -Fq 'stage:"follow-up-capture"' "$FOLLOW_UP_ACTION" && grep -Fq '<!-- gpa:artifact-payload:${capture_payload} -->' "$FOLLOW_UP_ACTION"; then
+if grep -Fq 'stage:"follow-up-capture"' "$FOLLOW_UP_ACTION" && \
+   grep -Fq 'render_orchestration_comment.py followup-complete' "$FOLLOW_UP_ACTION" && \
+   grep -Fq '<!-- gpa:artifact-payload:{e("ARTIFACT_PAYLOAD")} -->' scripts/render_orchestration_comment.py; then
   check "follow-up capture emits canonical artifact payload" "pass"
 else
   check "follow-up capture emits canonical artifact payload" "fail"
 fi
 
-if grep -Fq 'stage:"closeout"' "$CLOSEOUT_ACTION" && grep -Fq '<!-- gpa:artifact-payload:${created_payload} -->' "$CLOSEOUT_ACTION"; then
+if grep -Fq 'stage:"closeout"' "$CLOSEOUT_ACTION" && \
+   grep -Fq 'render_orchestration_comment.py closeout-scaffold-created' "$CLOSEOUT_ACTION" && \
+   grep -Fq '<!-- gpa:artifact-payload:{e("ARTIFACT_PAYLOAD")} -->' scripts/render_orchestration_comment.py; then
   check "closeout scaffold emits canonical artifact payload" "pass"
 else
   check "closeout scaffold emits canonical artifact payload" "fail"

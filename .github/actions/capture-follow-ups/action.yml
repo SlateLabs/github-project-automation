@@ -172,22 +172,22 @@ runs:
           echo "skipped=0" >> "$GITHUB_OUTPUT"
           echo "total_markers=0" >> "$GITHUB_OUTPUT"
 
-          # Post informational status comment
-          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-        ### Follow-up capture — no markers found
-        <!-- $status_marker -->
-        <!-- gpa:run-status:follow-up-capture:completed:$RUN_KEY -->
-        <!-- gpa:artifact-payload:${no_followups_payload} -->
-
-        | Field | Value |
+          table_rows="| Field | Value |
         |-------|-------|
         | **Run key** | \`$RUN_KEY\` |
         | **Actor** | @$ACTOR |
-        | **Result** | :information_source: No FOLLOW-UP markers found |
-
-        No \`<!-- FOLLOW-UP: ... -->\` markers were found in issue comments.
-        COMMENT_EOF
-          )"
+        | **Result** | :information_source: No FOLLOW-UP markers found |"
+          comment_body=$(
+            STATUS_MARKER="$status_marker" \
+            RUN_KEY="$RUN_KEY" \
+            TABLE_ROWS="$table_rows" \
+            ARTIFACT_PAYLOAD="$no_followups_payload" \
+            python3 scripts/render_orchestration_comment.py followup-none
+          )
+          python3 scripts/github_mutations.py issue-comment \
+            --repo "$GITHUB_REPOSITORY" \
+            --issue-number "$ISSUE_NUMBER" \
+            --body "$comment_body" >/dev/null
           exit 0
         fi
 
@@ -268,14 +268,16 @@ runs:
           # Try creating with labels first; if it fails due to missing labels,
           # retry without labels and log a warning
           new_issue_url=""
-          create_output=$(gh issue create \
+          create_output=$(python3 scripts/github_mutations.py issue-create \
+            --repo "$GITHUB_REPOSITORY" \
             --title "$issue_title_prefixed" \
             --body "$rendered_body" \
             --label "$labels" 2>&1) && {
             new_issue_url="$create_output"
           } || {
             echo "::warning::Failed to create issue with labels ($labels), retrying without labels: $create_output"
-            new_issue_url=$(gh issue create \
+            new_issue_url=$(python3 scripts/github_mutations.py issue-create \
+              --repo "$GITHUB_REPOSITORY" \
               --title "$issue_title_prefixed" \
               --body "$rendered_body" 2>&1) || {
               echo "::error::Failed to create follow-up issue #$seq ('$title'): $new_issue_url"
@@ -341,20 +343,19 @@ runs:
             }
           }')
 
-        gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-        ### Follow-up capture — complete
-        <!-- $status_marker -->
-        <!-- gpa:run-status:follow-up-capture:completed:$RUN_KEY -->
-        <!-- gpa:artifact-payload:${capture_payload} -->
-
-        $meta_rows
-
-        $table_header
-        $summary_rows
-
-        Follow-up issues have been created from \`<!-- FOLLOW-UP: ... -->\` markers in this issue's comments.
-        COMMENT_EOF
-        )"
+        comment_body=$(
+          STATUS_MARKER="$status_marker" \
+          RUN_KEY="$RUN_KEY" \
+          ARTIFACT_PAYLOAD="$capture_payload" \
+          META_ROWS="$meta_rows" \
+          TABLE_HEADER="$table_header" \
+          SUMMARY_ROWS="$summary_rows" \
+          python3 scripts/render_orchestration_comment.py followup-complete
+        )
+        python3 scripts/github_mutations.py issue-comment \
+          --repo "$GITHUB_REPOSITORY" \
+          --issue-number "$ISSUE_NUMBER" \
+          --body "$comment_body" >/dev/null
 
         # --- 6. Set outputs ---
         echo "issues_created=$issues_created" >> "$GITHUB_OUTPUT"

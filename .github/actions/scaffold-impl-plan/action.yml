@@ -123,16 +123,16 @@ runs:
         | **Discovery** | $discovery_method |
         | **Result** | :fast_forward: Skipped — plan comment already exists |"
 
-          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-        ### Implementation plan scaffold — already exists
-        <!-- $status_marker -->
-        <!-- gpa:run-status:plan:skipped:$RUN_KEY -->
-
-        $table_rows
-
-        An implementation plan comment already exists on this issue. No new comment was created.
-        COMMENT_EOF
-          )"
+          comment_body=$(
+            STATUS_MARKER="$status_marker" \
+            RUN_KEY="$RUN_KEY" \
+            TABLE_ROWS="$table_rows" \
+            python3 scripts/render_orchestration_comment.py plan-scaffold-exists
+          )
+          python3 scripts/github_mutations.py issue-comment \
+            --repo "$GITHUB_REPOSITORY" \
+            --issue-number "$ISSUE_NUMBER" \
+            --body "$comment_body" >/dev/null
 
           exit 0
         fi
@@ -169,7 +169,10 @@ runs:
         rendered_body=$(python3 -c 'import sys,os; t=open(sys.argv[1]).read(); t=t.replace("{{issue_title}}",os.environ["ISSUE_TITLE_SAFE"]); t=t.replace("{{issue_number}}",os.environ["ISSUE_NUMBER"]); t=t.replace("{{repo}}",os.environ["REPO_FULL"]); sys.stdout.write(t)' "$TEMPLATE_PATH")
 
         # --- 5. Post plan comment on issue ---
-        comment_result=$(gh issue comment "$ISSUE_NUMBER" --body "$rendered_body" 2>&1) || {
+        comment_result=$(python3 scripts/github_mutations.py issue-comment \
+          --repo "$GITHUB_REPOSITORY" \
+          --issue-number "$ISSUE_NUMBER" \
+          --body "$rendered_body" 2>&1) || {
           echo "::error::Failed to post plan comment: $comment_result"
           exit 1
         }
@@ -203,14 +206,13 @@ runs:
         | **Plan comment** | $new_url |
         | **Result** | :white_check_mark: Plan comment created |"
 
-        gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-        ### Implementation plan scaffold — created
-        <!-- gpa:impl-plan-status:#${ISSUE_NUMBER} -->
-        <!-- gpa:run-status:plan:completed:$RUN_KEY -->
-
-        $table_rows
-
-        An implementation plan comment has been created with all required gate headings.
-        Fill in each section with substantive content to pass the plan gate.
-        COMMENT_EOF
-        )"
+        comment_body=$(
+          ISSUE_NUMBER="$ISSUE_NUMBER" \
+          RUN_KEY="$RUN_KEY" \
+          TABLE_ROWS="$table_rows" \
+          python3 scripts/render_orchestration_comment.py plan-scaffold-created
+        )
+        python3 scripts/github_mutations.py issue-comment \
+          --repo "$GITHUB_REPOSITORY" \
+          --issue-number "$ISSUE_NUMBER" \
+          --body "$comment_body" >/dev/null

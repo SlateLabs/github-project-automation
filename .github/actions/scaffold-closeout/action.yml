@@ -131,17 +131,17 @@ runs:
               }
             }')
 
-          gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-        ### Closeout scaffold — already exists
-        <!-- $status_marker -->
-        <!-- gpa:run-status:closeout:skipped:$RUN_KEY -->
-        <!-- gpa:artifact-payload:${skipped_payload} -->
-
-        $table_rows
-
-        A closeout retrospective comment for this issue already exists. No duplicate was created.
-        COMMENT_EOF
-          )"
+          comment_body=$(
+            STATUS_MARKER="$status_marker" \
+            RUN_KEY="$RUN_KEY" \
+            TABLE_ROWS="$table_rows" \
+            ARTIFACT_PAYLOAD="$skipped_payload" \
+            python3 scripts/render_orchestration_comment.py closeout-scaffold-exists
+          )
+          python3 scripts/github_mutations.py issue-comment \
+            --repo "$GITHUB_REPOSITORY" \
+            --issue-number "$ISSUE_NUMBER" \
+            --body "$comment_body" >/dev/null
 
           exit 0
         fi
@@ -223,7 +223,10 @@ runs:
         ' "$TEMPLATE_PATH")
 
         # --- 6. Post closeout comment ---
-        comment_result=$(gh issue comment "$ISSUE_NUMBER" --body "$rendered_body" 2>&1) || {
+        comment_result=$(python3 scripts/github_mutations.py issue-comment \
+          --repo "$GITHUB_REPOSITORY" \
+          --issue-number "$ISSUE_NUMBER" \
+          --body "$rendered_body" 2>&1) || {
           echo "::error::Failed to post closeout comment: $comment_result"
           exit 1
         }
@@ -271,15 +274,14 @@ runs:
             }
           }')
 
-        gh issue comment "$ISSUE_NUMBER" --body "$(cat <<COMMENT_EOF
-        ### Closeout scaffold — created
-        <!-- $status_marker -->
-        <!-- gpa:run-status:closeout:completed:$RUN_KEY -->
-        <!-- gpa:artifact-payload:${created_payload} -->
-
-        $table_rows
-
-        A closeout retrospective comment has been posted on this issue.
-        Review the retrospective sections and complete the exit checklist before closing the issue.
-        COMMENT_EOF
-        )"
+        comment_body=$(
+          STATUS_MARKER="$status_marker" \
+          RUN_KEY="$RUN_KEY" \
+          TABLE_ROWS="$table_rows" \
+          ARTIFACT_PAYLOAD="$created_payload" \
+          python3 scripts/render_orchestration_comment.py closeout-scaffold-created
+        )
+        python3 scripts/github_mutations.py issue-comment \
+          --repo "$GITHUB_REPOSITORY" \
+          --issue-number "$ISSUE_NUMBER" \
+          --body "$comment_body" >/dev/null

@@ -57,7 +57,7 @@ run_validation() {
   local error_output
   error_output=$(mktemp)
 
-  VALID_STAGES="kickoff clarification design plan execution agent-review follow-up-capture merge closeout"
+  VALID_STAGES="$(python3 scripts/resolve_orchestration_stage.py valid-stages | tr '\n' ' ')"
 
   (
     set -euo pipefail

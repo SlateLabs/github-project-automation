@@ -9,6 +9,7 @@ from gateway.app import GatewayApplication
 from gateway.dedup import InMemoryDedupStore
 from gateway.github_api import ConfiguredRepo, GitHubApiError, ProjectItemContext, TrustPolicy
 from gateway.service import GatewayService
+from gateway.stage_map import MANUAL_STAGES, REQUESTED_STAGE
 
 
 class FakeGitHubClient:
@@ -114,7 +115,7 @@ class GatewayServiceTests(unittest.TestCase):
             repo_config={
                 "SlateLabs/github-project-automation": ConfiguredRepo(
                     repo="SlateLabs/github-project-automation",
-                    enabled_stages=("kickoff", "design", "plan", "execution", "agent-review", "merge", "follow-up-capture", "closeout"),
+                    enabled_stages=(REQUESTED_STAGE, *MANUAL_STAGES),
                     shared_workflow_version="deadbeef",
                 )
             },
