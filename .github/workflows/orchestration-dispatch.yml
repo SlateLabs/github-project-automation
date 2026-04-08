@@ -441,9 +441,22 @@ jobs:
 
           if [ "$duplicate" = "true" ]; then
             echo "::warning::Skipping: a recent run for this issue/stage completed within the ${DEDUP_WINDOW_SECONDS}s dedup window"
-            body="$(python3 scripts/render_orchestration_comment.py duplicate)"
-            python3 scripts/github_mutations.py issue-comment --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body "$body"
           fi
+
+      - name: Post duplicate comment
+        if: steps.dedup.outputs.duplicate == 'true'
+        uses: ./.github/actions/post-orchestration-comment
+        with:
+          issue_number: ${{ steps.normalize.outputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          template: duplicate
+        env:
+          RUN_KEY: ${{ steps.run-key.outputs.run_key }}
+          REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
+          ACTOR: ${{ steps.normalize.outputs.actor }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DEDUP_WINDOW_SECONDS: "60"
 
       - name: Validate eligibility
         if: steps.dedup.outputs.duplicate != 'true'
@@ -457,19 +470,18 @@ jobs:
 
       - name: Post ineligible comment
         if: steps.dedup.outputs.duplicate != 'true' && steps.eligibility.outputs.eligible != 'true'
+        uses: ./.github/actions/post-orchestration-comment
+        with:
+          issue_number: ${{ steps.normalize.outputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          template: ineligible
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ steps.normalize.outputs.issue_number }}
           RUN_KEY: ${{ steps.run-key.outputs.run_key }}
           REASON: ${{ steps.eligibility.outputs.reason }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REQUESTED_STAGE: ${{ steps.normalize.outputs.requested_stage }}
           ACTOR: ${{ steps.normalize.outputs.actor }}
           RUN_ID: ${{ github.run_id }}
-        shell: bash
-        run: |
-          body="$(python3 scripts/render_orchestration_comment.py ineligible)"
-          python3 scripts/github_mutations.py issue-comment --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body "$body"
 
       - name: Fail on ineligible
         if: steps.dedup.outputs.duplicate != 'true' && steps.eligibility.outputs.eligible != 'true'
@@ -612,9 +624,8 @@ jobs:
 
       - name: Post gate failure comment
         if: steps.gate.outputs.gate_passed != 'true'
+        id: prepare-gate-failed
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
           RUN_KEY: ${{ needs.intake.outputs.run_key }}
           UNMET: ${{ steps.gate.outputs.unmet_conditions }}
           WAIVED: ${{ steps.gate.outputs.waived_conditions }}
@@ -635,11 +646,32 @@ jobs:
             --argjson unmet "${UNMET:-[]}" \
             --argjson waived "${WAIVED:-[]}" \
             '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,run_url:$run_url,unmet_conditions:$unmet,waived_conditions:$waived}')
-          export UNMET_LIST="$unmet_list"
-          export WAIVED_LIST="$waived_list"
-          export CHECKPOINT="$checkpoint"
-          body="$(python3 scripts/render_orchestration_comment.py gate-failed)"
-          python3 scripts/github_mutations.py issue-comment --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body "$body"
+          {
+            echo "unmet_list<<EOF"
+            echo "$unmet_list"
+            echo "EOF"
+            echo "waived_list<<EOF"
+            echo "$waived_list"
+            echo "EOF"
+            echo "checkpoint=$checkpoint"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Emit gate failure comment
+        if: steps.gate.outputs.gate_passed != 'true'
+        uses: ./.github/actions/post-orchestration-comment
+        with:
+          issue_number: ${{ needs.intake.outputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          template: gate-failed
+        env:
+          RUN_KEY: ${{ needs.intake.outputs.run_key }}
+          REQUESTED_STAGE: ${{ needs.intake.outputs.requested_stage }}
+          ACTOR: ${{ needs.intake.outputs.actor }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          UNMET_LIST: ${{ steps.prepare-gate-failed.outputs.unmet_list }}
+          WAIVED_LIST: ${{ steps.prepare-gate-failed.outputs.waived_list }}
+          CHECKPOINT: ${{ steps.prepare-gate-failed.outputs.checkpoint }}
 
       - name: Fail on gate not passed
         if: steps.gate.outputs.gate_passed != 'true'
@@ -688,11 +720,10 @@ jobs:
 
           echo "state_valid=true" >> "$GITHUB_OUTPUT"
 
-      - name: Post success comment
+      - name: Prepare success comment
         if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true'
+        id: prepare-success
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
           RUN_KEY: ${{ needs.intake.outputs.run_key }}
           WAIVED: ${{ needs.gate.outputs.waived_conditions }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -752,11 +783,30 @@ jobs:
               canonical_checkpoint_line="<!-- gpa:checkpoint-v1 $canonical_checkpoint -->"
               ;;
           esac
-          export CANONICAL_CHECKPOINT_LINE="$canonical_checkpoint_line"
-          export CHECKPOINT_LINE="$checkpoint_line"
-          export WAIVED_SECTION="$waived_section"
-          body="$(python3 scripts/render_orchestration_comment.py stage-transition)"
-          python3 scripts/github_mutations.py issue-comment --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body "$body"
+          {
+            echo "canonical_checkpoint_line=$canonical_checkpoint_line"
+            echo "checkpoint_line=$checkpoint_line"
+            echo "waived_section<<EOF"
+            echo "$waived_section"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Emit success comment
+        if: steps.gate.outputs.gate_passed == 'true' && steps.state-check.outputs.state_valid == 'true'
+        uses: ./.github/actions/post-orchestration-comment
+        with:
+          issue_number: ${{ needs.intake.outputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          template: stage-transition
+        env:
+          RUN_KEY: ${{ needs.intake.outputs.run_key }}
+          REQUESTED_STAGE: ${{ needs.intake.outputs.requested_stage }}
+          ACTOR: ${{ needs.intake.outputs.actor }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CANONICAL_CHECKPOINT_LINE: ${{ steps.prepare-success.outputs.canonical_checkpoint_line }}
+          CHECKPOINT_LINE: ${{ steps.prepare-success.outputs.checkpoint_line }}
+          WAIVED_SECTION: ${{ steps.prepare-success.outputs.waived_section }}
 
   stage_merge:
     needs: [intake, gate]
@@ -908,10 +958,9 @@ jobs:
 
       - name: Post next-stage queued comment
         if: steps.dispatch.outputs.dispatched == 'true'
+        id: prepare-next-stage
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ needs.intake.outputs.issue_number }}
           ACTOR: ${{ needs.intake.outputs.actor }}
           NEXT_STAGE: ${{ steps.resolve.outputs.next_stage }}
           NEXT_RUN_KEY: ${{ steps.next-run-key.outputs.run_key }}
@@ -926,9 +975,22 @@ jobs:
             --arg actor "$ACTOR" \
             --arg parent_run_url "$RUN_URL" \
             '{run_key:$run_key,stage:$stage,state:$state,actor:$actor,parent_run_url:$parent_run_url}')
-          export CHECKPOINT="$checkpoint"
-          body="$(python3 scripts/render_orchestration_comment.py next-stage-queued)"
-          python3 scripts/github_mutations.py issue-comment --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" --body "$body"
+          echo "checkpoint=$checkpoint" >> "$GITHUB_OUTPUT"
+
+      - name: Emit next-stage queued comment
+        if: steps.dispatch.outputs.dispatched == 'true'
+        uses: ./.github/actions/post-orchestration-comment
+        with:
+          issue_number: ${{ needs.intake.outputs.issue_number }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          template: next-stage-queued
+        env:
+          ACTOR: ${{ needs.intake.outputs.actor }}
+          NEXT_STAGE: ${{ steps.resolve.outputs.next_stage }}
+          NEXT_RUN_KEY: ${{ steps.next-run-key.outputs.run_key }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+          CHECKPOINT: ${{ steps.prepare-next-stage.outputs.checkpoint }}
 
       - name: Skip next-stage dispatch without project item context
         if: steps.resolve.outputs.next_stage != '' && needs.intake.outputs.project_item_id == ''

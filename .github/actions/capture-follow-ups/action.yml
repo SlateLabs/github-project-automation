@@ -58,27 +58,17 @@ runs:
         status_marker="gpa:follow-up-status:#${ISSUE_NUMBER}"
 
         # --- 1. Pre-mutation guard: verify issue state ---
-        issue_state_json=$(gh issue view "$ISSUE_NUMBER" --json state,labels 2>&1) || {
+        issue_state_json=$(python3 scripts/scaffold_support.py ensure-open --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" 2>&1) || {
           echo "::error::Failed to fetch issue #$ISSUE_NUMBER: $issue_state_json"
           exit 1
         }
-        issue_state=$(echo "$issue_state_json" | jq -r '.state // ""')
-        has_block_label=$(echo "$issue_state_json" | jq -r '.labels[]?.name // empty' | grep -cF 'do-not-automate' || true)
-
-        if [ "$issue_state" != "OPEN" ]; then
-          echo "::error::Issue #$ISSUE_NUMBER is not open (state: $issue_state) — aborting follow-up capture"
-          exit 1
-        fi
-        if [ "$has_block_label" -gt 0 ]; then
-          echo "::error::Issue #$ISSUE_NUMBER has do-not-automate label — aborting follow-up capture"
-          exit 1
-        fi
 
         # --- 2. Fetch all comments and parse FOLLOW-UP markers ---
-        comments_json=$(gh issue view "$ISSUE_NUMBER" --json comments --jq '.comments' 2>&1) || {
+        comments_json=$(python3 scripts/scaffold_support.py issue-metadata --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" 2>&1) || {
           echo "::error::Failed to fetch comments for issue #$ISSUE_NUMBER: $comments_json"
           exit 1
         }
+        comments_json=$(echo "$comments_json" | jq '.comments // []')
 
         # Parse all markers across all comments.
         # Format: <!-- FOLLOW-UP: <title> | <category> | <reason> | <impact> | <blocking> -->
@@ -205,7 +195,7 @@ runs:
         skipped_titles=""
 
         # Fetch existing open issues to check for owned-artifact markers (idempotency)
-        existing_issues=$(gh issue list --state all --limit 200 --json number,body,title 2>/dev/null || echo '[]')
+        existing_issues=$(python3 scripts/scaffold_support.py issue-list --repo "$GITHUB_REPOSITORY" --state all --limit 200 --json number,body,title 2>/dev/null || echo '[]')
 
         while IFS=$'\t' read -r seq title category reason impact blocking; do
           owned_marker="gpa:owned-artifact:follow-up:${repo_full}#${ISSUE_NUMBER}:${seq}"
@@ -222,21 +212,10 @@ runs:
           fi
 
           # Pre-mutation guard: re-verify issue state before each creation
-          guard_json=$(gh issue view "$ISSUE_NUMBER" --json state,labels 2>&1) || {
+          guard_json=$(python3 scripts/scaffold_support.py ensure-open --repo "$GITHUB_REPOSITORY" --issue-number "$ISSUE_NUMBER" 2>&1) || {
             echo "::error::Failed to re-check issue #$ISSUE_NUMBER state before creating follow-up #$seq: $guard_json"
             exit 1
           }
-          guard_state=$(echo "$guard_json" | jq -r '.state // ""')
-          guard_block=$(echo "$guard_json" | jq -r '.labels[]?.name // empty' | grep -cF 'do-not-automate' || true)
-
-          if [ "$guard_state" != "OPEN" ]; then
-            echo "::error::Issue #$ISSUE_NUMBER is no longer open (state: $guard_state) — aborting before creating follow-up #$seq"
-            exit 1
-          fi
-          if [ "$guard_block" -gt 0 ]; then
-            echo "::error::Issue #$ISSUE_NUMBER now has do-not-automate label — aborting before creating follow-up #$seq"
-            exit 1
-          fi
 
           # Render template — use python3 str.replace (same pattern as other scaffold
           # actions) to avoid sed corruption of & and backslash in free-text fields.
@@ -245,20 +224,20 @@ runs:
             TMPL_IMPACT="$impact" TMPL_BLOCKING="$blocking" TMPL_RUN_KEY="$RUN_KEY" \
             python3 -c 'import sys,os; t=open(sys.argv[1]).read(); t=t.replace("{{repo}}",os.environ["TMPL_REPO"]); t=t.replace("{{source_issue}}",os.environ["TMPL_SOURCE_ISSUE"]); t=t.replace("{{sequence}}",os.environ["TMPL_SEQ"]); t=t.replace("{{category}}",os.environ["TMPL_CATEGORY"]); t=t.replace("{{reason}}",os.environ["TMPL_REASON"]); t=t.replace("{{impact}}",os.environ["TMPL_IMPACT"]); t=t.replace("{{blocking}}",os.environ["TMPL_BLOCKING"]); t=t.replace("{{run_key}}",os.environ["TMPL_RUN_KEY"]); sys.stdout.write(t)' "$TEMPLATE_PATH")
 
-          # Build label list — handle missing labels gracefully
-          labels="follow-up"
+          # Build label list — each label passed as a separate --label flag
+          label_args=("--label" "follow-up")
 
           # Only add category label if it's a recognized category
           valid_categories="technical-debt accessibility usability documentation automation defect"
           for vc in $valid_categories; do
             if [ "$vc" = "$category" ]; then
-              labels="${labels},$category"
+              label_args+=("--label" "$category")
               break
             fi
           done
 
           if [ "$blocking" = "yes" ]; then
-            labels="${labels},blocking"
+            label_args+=("--label" "blocking")
           fi
 
           # Create the issue — use --label flag, gh handles missing labels
@@ -272,10 +251,10 @@ runs:
             --repo "$GITHUB_REPOSITORY" \
             --title "$issue_title_prefixed" \
             --body "$rendered_body" \
-            --label "$labels" 2>&1) && {
+            "${label_args[@]}" 2>&1) && {
             new_issue_url="$create_output"
           } || {
-            echo "::warning::Failed to create issue with labels ($labels), retrying without labels: $create_output"
+            echo "::warning::Failed to create issue with labels (${label_args[*]}), retrying without labels: $create_output"
             new_issue_url=$(python3 scripts/github_mutations.py issue-create \
               --repo "$GITHUB_REPOSITORY" \
               --title "$issue_title_prefixed" \
@@ -283,7 +262,7 @@ runs:
               echo "::error::Failed to create follow-up issue #$seq ('$title'): $new_issue_url"
               exit 1
             }
-            echo "::warning::Issue created without labels — manually add labels: $labels"
+            echo "::warning::Issue created without labels — manually add labels: ${label_args[*]}"
           }
 
           echo "::notice::Created follow-up issue for marker #$seq: $new_issue_url"
