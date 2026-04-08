@@ -67,7 +67,7 @@ class GitHubApiClientAuthTests(unittest.TestCase):
             clock=lambda: 1_700_000_000.0,
         )
 
-        with patch("gateway.github_api.jwt.encode", return_value="signed-jwt") as encode:
+        with patch("gateway.github_api_client.jwt.encode", return_value="signed-jwt") as encode:
             token = client._build_app_jwt()
 
         self.assertEqual(token, "signed-jwt")

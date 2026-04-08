@@ -581,7 +581,7 @@ jobs:
   # Create artifacts, evaluate gates, and record stage advancement.
   gate:
     needs: [intake, stage_clarification, stage_design, stage_plan, stage_execution, stage_agent_review, stage_closeout_prepare]
-    if: needs.intake.outputs.duplicate != 'true'
+    if: needs.intake.outputs.duplicate != 'true' && needs.intake.outputs.eligible == 'true'
     runs-on: ubuntu-latest
     outputs:
       gate_passed: ${{ steps.gate.outputs.gate_passed }}
